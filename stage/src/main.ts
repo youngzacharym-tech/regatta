@@ -56,9 +56,14 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 // Filmic tone mapping keeps the env-lit metals from blowing out to white.
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+// Pulled down so the near-white stones and cream score pads don't blow out
+// under the warm lamp — keeps highlights readable instead of blinding.
+renderer.toneMappingExposure = 0.78;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x111116);
+scene.background = new THREE.Color(0x120d09);
 
 const camera = new THREE.PerspectiveCamera(
   45,
@@ -67,24 +72,50 @@ const camera = new THREE.PerspectiveCamera(
   100,
 );
 // Shared perspective: both players see the board from the same angle.
-// Aimed at the board mesh's visual center (x -0.5) — the tile grid is at the
-// origin but the ship's decorative prow extends further to -X (mirrored).
-camera.position.set(-0.5, 4.8, 4.8);
-camera.lookAt(-0.5, 0.15, 0);
+// Seated-across-the-table view — tilted down enough to read the piece designs
+// but low enough to feel like you're sitting opposite an opponent. Aimed at
+// the board's visual center (x -0.5); the tile grid is at the origin but the
+// ship's prow extends further to -X.
+camera.position.set(-0.5, 4.6, 5.0);
+camera.lookAt(-0.5, 0.15, 0.95);
 
 // Environment lighting — without it, metallic materials (the gold middle-row
 // stamps, bronze coins) reflect nothing and render black.
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.45;
+scene.environmentIntensity = 0.2;
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.25));
-const key = new THREE.DirectionalLight(0xffffff, 1.1);
-key.position.set(4, 8, 4);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0xa0b8ff, 0.35);
+// Tavern-table mood: one warm hanging lamp over the board doing most of the
+// work (with soft shadows), low warm ambient so nothing goes pitch black,
+// and a whisper of cool fill for shape.
+scene.add(new THREE.AmbientLight(0xffdcb4, 0.26));
+
+const lamp = new THREE.SpotLight(0xffc98a, 58, 0, Math.PI / 4.4, 0.6, 1.7);
+lamp.position.set(-1.0, 5.6, 1.4);
+lamp.target.position.set(-0.4, 0, 0);
+lamp.castShadow = true;
+lamp.shadow.mapSize.set(2048, 2048);
+lamp.shadow.bias = -0.001;
+lamp.shadow.normalBias = 0.06; // kills self-shadow striping on the hull sides
+lamp.shadow.camera.near = 1;
+lamp.shadow.camera.far = 12;
+scene.add(lamp, lamp.target);
+
+const fill = new THREE.DirectionalLight(0x92aacc, 0.22);
 fill.position.set(-4, 3, -2);
 scene.add(fill);
+
+// The tabletop the board rests on — a dark wood-toned plane that catches the
+// lamp pool and the pieces' shadows.
+const TABLE_Y = -0.42; // just under the board hull's lowest point
+const table = new THREE.Mesh(
+  new THREE.PlaneGeometry(40, 40),
+  new THREE.MeshStandardMaterial({ color: 0x2b1c11, roughness: 0.95 }),
+);
+table.rotation.x = -Math.PI / 2;
+table.position.y = TABLE_Y;
+table.receiveShadow = true;
+scene.add(table);
 
 function resize() {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -99,10 +130,9 @@ resize();
 // ---------------------------------------------------------------------------
 
 const boardGroup = new THREE.Group();
-// Mirror across the long axis so the ship faces the way Regatta's board
-// normally does. layout.ts x coordinates are negated to match (three.js
-// corrects triangle winding for negative scales automatically).
-boardGroup.scale.x = -1;
+// The painted board (tools/build_assets.py) is exported directly in world
+// space — no mirror needed, and layout.ts coordinates are measured from the
+// same export.
 scene.add(boardGroup);
 const dracoLoader = new DRACOLoader();
 // Draco decoder shipped by Google via jsDelivr — matches Three.js's expected version.
@@ -114,10 +144,40 @@ gltfLoader.load(
   (gltf) => {
     // The GLB is exported already in game space (tile grid centered at
     // origin, scale locked to layout.ts) — no auto-fit needed.
+    gltf.scene.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
     boardGroup.add(gltf.scene);
   },
   undefined,
   (err) => console.error("Failed to load", GLB_URL, err),
+);
+
+// Each captain gets a beer — one mug per side of the table.
+gltfLoader.load(
+  "/mug.glb",
+  (gltf) => {
+    gltf.scene.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    const place = (x: number, z: number, rotY: number) => {
+      const mug = gltf.scene.clone(true);
+      mug.scale.setScalar(1.15);
+      mug.position.set(x, TABLE_Y + 0.575, z);
+      mug.rotation.y = rotY;
+      scene.add(mug);
+    };
+    place(0.5, 2.12, -2.44); // beside my coins, handle turned out
+    place(0.5, -2.0, 2.4);   // the opponent's, across the table
+  },
+  undefined,
+  (err) => console.error("Failed to load /mug.glb", err),
 );
 
 // ---------------------------------------------------------------------------
@@ -125,16 +185,14 @@ gltfLoader.load(
 // ---------------------------------------------------------------------------
 
 const tokenGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.16, 24);
-// Prototypes only — each marker clones one of these so its emissive/color
-// can be toggled per-token (needed for the shield glow, which lights up only
-// the specific tokens sitting on shield tiles).
-const p1Mat = new THREE.MeshStandardMaterial({ color: 0xc02020, roughness: 0.5 });
-const p2Mat = new THREE.MeshStandardMaterial({ color: 0x2040c0, roughness: 0.5 });
+// Prototypes only — each marker clones one so materials stay independent.
+// Ownership reads from Kasen's paint on the sculpts (your design red, the
+// opponent's blue). Before the sculpts load, the placeholders use flat
+// red/blue.
+const p1Mat = new THREE.MeshStandardMaterial({ color: 0xc02020, roughness: 0.6 });
+const p2Mat = new THREE.MeshStandardMaterial({ color: 0x2040c0, roughness: 0.6 });
 
-const P1_COLOR = 0xc02020;
-const P2_COLOR = 0x2040c0;
-const SHIELD_EMISSIVE = 0xffcc44; // warm gold — reads as "protected"
-const SHIELD_INTENSITY = 0.65;
+const STONE_TINT = 0xdcd3c1; // soft bone; keeps the stones from reading pure white
 
 interface TokenMarker {
   mesh: THREE.Mesh;
@@ -165,6 +223,7 @@ for (let i = 0; i < 8; i++) {
   const mat = proto.clone();
   const mesh = new THREE.Mesh(tokenGeo, mat);
   mesh.visible = false;
+  mesh.castShadow = true;
   scene.add(mesh);
   markers.push({
     mesh,
@@ -206,20 +265,19 @@ const WIN_SCREEN_DELAY_MS = ESCAPE_FLIGHT_MS + 250;
 // ---------------------------------------------------------------------------
 // Coins
 //
-// 4 flat cylinders that tumble on each new flip. The rulebook / referee is
-// still authoritative on the flip count — the client just decides randomly
-// WHICH of the four coins land marked-side up to visually represent it.
+// Two sets of four, one per player, laid out like Soulframe's table: the
+// viewer's blossom-marked coins sit in front of the camera, the opponent's
+// star-marked coins across the board. Each new flip tumbles the CURRENT
+// player's set; the number of coins landing design-face-up shows the flip.
+// The rulebook / referee is still authoritative on the count — the client
+// just decides randomly WHICH coins land marked-side up to represent it.
 // ---------------------------------------------------------------------------
 
+// Flat disc, design face up (+Y) — read directly by the top-down camera.
 const coinGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.03, 32);
-coinGeo.rotateX(Math.PI / 2); // lay flat by default; +Z becomes the "up" face
 
-// Multi-material cylinder: index 0 = side (edge), 1 = top face, 2 = bottom face.
-// With the rotateX above, "top face" (index 1) is the +Z face, "bottom" is -Z.
-const coinSideMat = new THREE.MeshStandardMaterial({ color: 0xa87c3d, roughness: 0.5, metalness: 0.75 });
-const coinMarkedMat = new THREE.MeshStandardMaterial({ color: 0xf4d073, roughness: 0.35, metalness: 0.9, emissive: 0x110800, emissiveIntensity: 0.3 });
-const coinBlankMat = new THREE.MeshStandardMaterial({ color: 0x5c3f1c, roughness: 0.65, metalness: 0.5 });
-const coinMats = [coinSideMat, coinMarkedMat, coinBlankMat];
+// Placeholder until the sculpted coins load — plain pale discs.
+const coinPlaceholderMat = new THREE.MeshStandardMaterial({ color: 0xd8d2c4, roughness: 0.6 });
 
 interface CoinAnim {
   mesh: THREE.Mesh;
@@ -231,44 +289,174 @@ interface CoinAnim {
   spinTurns: number;
 }
 
-const COIN_REST_Y = 0.05;
-const COIN_Z = 2.3;   // front of the shared camera view
-const COIN_SPACING = 0.5;
+const COIN_REST_Y = -0.395; // resting on the tabletop
+const MY_COIN_Z = 2.05;     // front of the shared camera view
+const THEIR_COIN_Z = -1.95; // behind the far reserve row
 
-// Once the sculpted pieces load, coins switch from the multi-material
-// cylinder (bright top face / dark bottom face) to a single-material sculpted
-// mesh — the marked/blank result is then shown by tinting the whole coin.
-let coinsAreSculpted = false;
-const COIN_MARKED_TINT = 0xf4d073;
-const COIN_BLANK_TINT = 0x5c3f1c;
-const COIN_SPIN_TINT = 0xa87c3d; // neutral bronze while tumbling
+// Coins rest as a loose little heap next to the player, not a spread-out row:
+// a 2x2 cluster jittered in x/z (so the flat discs don't intersect) and
+// stacked a few mm in y (so overlaps read as a stack, not z-fighting).
+const COIN_PILE = [
+  { dx: -0.18, dz: -0.16, dy: 0.000 },
+  { dx: 0.17, dz: -0.18, dy: 0.022 },
+  { dx: -0.14, dz: 0.17, dy: 0.044 },
+  { dx: 0.19, dz: 0.15, dy: 0.066 },
+];
+const COIN_PILE_X = -0.5; // pile centered under the board's visual center
 
-function tintCoin(coin: CoinAnim, hex: number) {
-  if (!coinsAreSculpted) return;
-  (coin.mesh.material as THREE.MeshStandardMaterial).color.setHex(hex);
+function makeCoinRow(z: number): CoinAnim[] {
+  const row: CoinAnim[] = [];
+  for (let i = 0; i < 4; i++) {
+    const mesh = new THREE.Mesh(coinGeo, coinPlaceholderMat);
+    const p = COIN_PILE[i];
+    const restPos = new THREE.Vector3(COIN_PILE_X + p.dx, COIN_REST_Y + p.dy, z + p.dz);
+    mesh.position.copy(restPos);
+    mesh.castShadow = true;
+    // Start at rest showing marked side up (rotation.x = 0).
+    scene.add(mesh);
+    row.push({
+      mesh,
+      restPos,
+      isFlipping: false,
+      startTime: 0,
+      duration: 700,
+      willShowMarked: true,
+      spinTurns: 6,
+    });
+  }
+  return row;
 }
 
-const coins: CoinAnim[] = [];
-for (let i = 0; i < 4; i++) {
-  const mesh = new THREE.Mesh(coinGeo, coinMats);
-  const restPos = new THREE.Vector3(i * COIN_SPACING - 0.75, COIN_REST_Y, COIN_Z);
-  mesh.position.copy(restPos);
-  // Start at rest showing marked side up (rotation.x = 0, top face is +Y).
-  scene.add(mesh);
-  coins.push({
-    mesh,
-    restPos,
-    isFlipping: false,
-    startTime: 0,
-    duration: 700,
-    willShowMarked: true,
-    spinTurns: 6,
-  });
+// Seat-relative like everything else: the viewer always flips the red
+// blossom coins, the opponent always the blue star coins.
+const myCoins = makeCoinRow(MY_COIN_Z);
+const theirCoins = makeCoinRow(THEIR_COIN_Z);
+const allCoins = [...myCoins, ...theirCoins];
+
+// Soft gold glow pooled under each coin pile — a warm halo that makes the
+// metal coins the eye-catching "action" spot on the table. A radial-gradient
+// canvas texture on a flat plane, additively blended so it reads as light.
+function makeGlowTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  grad.addColorStop(0.0, "rgba(255, 214, 130, 0.85)");
+  grad.addColorStop(0.35, "rgba(240, 190, 96, 0.42)");
+  grad.addColorStop(1.0, "rgba(240, 190, 96, 0.0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, s, s);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const glowTex = makeGlowTexture();
+// Roll cue: a tight, steady warm halo hugging the player's coin pile —
+// only shown while the pile waits to be tapped. No flicker, no table-wide
+// pool; it just picks the coins out of the dark.
+function makeTightGlowTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  grad.addColorStop(0.0, "rgba(255, 205, 130, 0.9)");
+  grad.addColorStop(0.5, "rgba(255, 185, 105, 0.5)");
+  grad.addColorStop(0.78, "rgba(255, 170, 90, 0.1)");
+  grad.addColorStop(1.0, "rgba(255, 170, 90, 0.0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, s, s);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const myCoinGlow = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.05, 1.05),
+  new THREE.MeshBasicMaterial({
+    map: makeTightGlowTexture(),
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    opacity: 0.55,
+  }),
+);
+myCoinGlow.rotation.x = -Math.PI / 2;
+myCoinGlow.position.set(COIN_PILE_X, TABLE_Y + 0.006, MY_COIN_Z);
+myCoinGlow.renderOrder = -1;
+myCoinGlow.visible = false;
+scene.add(myCoinGlow);
+
+// ---------------------------------------------------------------------------
+// The fire in the corner of the room — a warm flickering point light and a
+// soft ember glow off past the table's edge (the crackle lives in audio.ts).
+// ---------------------------------------------------------------------------
+const fireCfg = {
+  intensity: 40,
+  flicker: 0.7,
+  color: "#ff7a26",
+  x: -6.8,
+  y: 0.85,
+  z: -4,
+  size: 2.6,
+  opacity: 1,
+  crackle: 0.9,
+};
+const fireLight = new THREE.PointLight(0xff7a26, fireCfg.intensity, 11, 2);
+fireLight.position.set(fireCfg.x, fireCfg.y, fireCfg.z);
+scene.add(fireLight);
+const fireSprite = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: glowTex,
+    color: 0xff8630,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  }),
+);
+fireSprite.position.set(fireCfg.x, fireCfg.y - 0.35, fireCfg.z);
+fireSprite.scale.set(fireCfg.size, fireCfg.size * 0.73, 1);
+scene.add(fireSprite);
+
+// ---------------------------------------------------------------------------
+// Capture-hover glow — hovering an enemy token that one of your legal moves
+// can take bathes it in a warm halo.
+// ---------------------------------------------------------------------------
+
+const hoverGlow = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.66, 0.66),
+  new THREE.MeshBasicMaterial({
+    map: glowTex,
+    color: 0xffa332, // deep gold — must read against the white stones
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  }),
+);
+hoverGlow.rotation.x = -Math.PI / 2;
+hoverGlow.visible = false;
+hoverGlow.renderOrder = 1;
+scene.add(hoverGlow);
+
+/** Enemy token ids capturable by the current legal moves. */
+const capturableIds = new Set<number>();
+
+function hideHoverGlow() {
+  hoverGlow.visible = false;
 }
 
-// Swap the placeholder cylinders for the sculpted piece meshes once they
-// load. Colors stay owned by the game (red/blue markers, coin result tints);
-// only geometry comes from the GLB. If the load fails, cylinders remain.
+function updateCapturable(legalMoves: Move[] | null, isMyTurn: boolean) {
+  capturableIds.clear();
+  hideHoverGlow();
+  if (!isMyTurn || !legalMoves) return;
+  for (const m of legalMoves) for (const id of m.captures) capturableIds.add(id);
+}
+
+// Swap the placeholder cylinders for the painted sculpts once they load.
+// Token ownership colors stay owned by the game (red/blue tint over the
+// painted stone); the coins' look comes entirely from their vertex paint —
+// the design face IS the marked side, so no result tinting is needed.
+// If the load fails, the placeholders remain.
 gltfLoader.load(
   PIECES_URL,
   (gltf) => {
@@ -276,8 +464,9 @@ gltfLoader.load(
       (gltf.scene.getObjectByName(name) as THREE.Mesh | undefined)?.geometry;
     const tokenP1 = geoOf("token_p1");
     const tokenP2 = geoOf("token_p2");
-    const coinSculpt = geoOf("coin");
-    if (!tokenP1 || !tokenP2 || !coinSculpt) {
+    const coinRed = geoOf("coin_red");
+    const coinBlue = geoOf("coin_blue");
+    if (!tokenP1 || !tokenP2 || !coinRed || !coinBlue) {
       console.error("pieces.glb missing expected meshes", gltf.scene);
       return;
     }
@@ -288,28 +477,30 @@ gltfLoader.load(
       geo.translate(0, -0.08 - geo.boundingBox!.min.y, 0);
     }
     sculptedTokenGeos = { red: tokenP1, blue: tokenP2 };
+    // The stone sculpts carry the paint (white stone + colored relief) —
+    // show it as-is instead of the placeholders' flat ownership colors.
+    for (const marker of markers) {
+      const mat = marker.mesh.material as THREE.MeshStandardMaterial;
+      mat.vertexColors = true;
+      mat.color.setHex(STONE_TINT);
+      mat.needsUpdate = true;
+    }
     applyTokenGeometries();
-    // Same lay-flat convention the procedural coin used: bake the design face
-    // to point +Z, so the existing rotation.x flip logic works unchanged.
-    coinSculpt.rotateX(Math.PI / 2);
-    for (const coin of coins) {
-      coin.mesh.geometry = coinSculpt;
-      coin.mesh.material = new THREE.MeshStandardMaterial({
-        color: COIN_MARKED_TINT,
-        roughness: 0.35,
-        metalness: 0.9,
-      });
-    }
-    coinsAreSculpted = true;
-    for (const coin of coins) {
-      tintCoin(coin, coin.willShowMarked ? COIN_MARKED_TINT : COIN_BLANK_TINT);
-    }
+    // Coins come out of the pipeline design-face-up (+Y), which is exactly
+    // what the top-down camera wants: rotation.x = 0 rests design-up, and the
+    // rotation.x tumble lands design-up (marked) or design-down (blank).
+    // Kasen's coin GLB carries its own painted metal material — use it.
+    const coinMat =
+      (gltf.scene.getObjectByName("coin_red") as THREE.Mesh).material;
+    for (const coin of myCoins) coin.mesh.geometry = coinRed;
+    for (const coin of theirCoins) coin.mesh.geometry = coinBlue;
+    for (const coin of allCoins) coin.mesh.material = coinMat;
   },
   undefined,
   (err) => console.error("Failed to load", PIECES_URL, err),
 );
 
-function triggerCoinFlip(markedCount: number) {
+function triggerCoinFlip(markedCount: number, set: CoinAnim[]) {
   const now = performance.now();
   // Pick markedCount coin indices uniformly at random to show the marked face.
   const indices = [0, 1, 2, 3];
@@ -320,17 +511,17 @@ function triggerCoinFlip(markedCount: number) {
   const markedSet = new Set(indices.slice(0, markedCount));
 
   for (let i = 0; i < 4; i++) {
-    coins[i].isFlipping = true;
-    coins[i].startTime = now + Math.random() * 80;
-    coins[i].duration = 550 + Math.random() * 250;
-    coins[i].willShowMarked = markedSet.has(i);
-    coins[i].spinTurns = 5 + Math.random() * 4;
-    tintCoin(coins[i], COIN_SPIN_TINT);
+    set[i].isFlipping = true;
+    set[i].startTime = now + Math.random() * 110;
+    // A quick, readable tumble that settles — not a blur, not sluggish.
+    set[i].duration = 680 + Math.random() * 220;
+    set[i].willShowMarked = markedSet.has(i);
+    set[i].spinTurns = 2 + Math.floor(Math.random() * 2); // 2 or 3 whole turns
   }
 }
 
 function updateCoins(now: number) {
-  for (const coin of coins) {
+  for (const coin of allCoins) {
     if (!coin.isFlipping) continue;
     const elapsed = now - coin.startTime;
     if (elapsed < 0) continue;
@@ -338,15 +529,17 @@ function updateCoins(now: number) {
       coin.mesh.rotation.x = coin.willShowMarked ? 0 : Math.PI;
       coin.mesh.position.y = coin.restPos.y;
       coin.isFlipping = false;
-      tintCoin(coin, coin.willShowMarked ? COIN_MARKED_TINT : COIN_BLANK_TINT);
     } else {
       const t = elapsed / coin.duration;
-      // Total rotation: spinTurns full spins over the duration, plus the
-      // final half-turn if we're landing blank-side up.
+      // Ease-out the spin so the coin tumbles fast off the table then slows
+      // and settles onto its face — a real toss decelerates into landing,
+      // rather than spinning at a constant rate and snapping to a stop.
+      const spin = 1 - Math.pow(1 - t, 2.4);
       const finalRot = coin.willShowMarked ? 0 : Math.PI;
-      coin.mesh.rotation.x = coin.spinTurns * Math.PI * 2 * t + finalRot * t;
-      // Parabolic Y arc so coins arc up and back down.
-      coin.mesh.position.y = coin.restPos.y + Math.sin(t * Math.PI) * 0.35;
+      coin.mesh.rotation.x = (coin.spinTurns * Math.PI * 2 + finalRot) * spin;
+      // Toss arc that peaks early and drops back down as it settles.
+      const lift = Math.sin(Math.pow(t, 0.85) * Math.PI);
+      coin.mesh.position.y = coin.restPos.y + lift * 0.28;
     }
   }
 }
@@ -358,13 +551,9 @@ function refreshMarkers(state: GameState) {
   state.tokens.forEach((token, idx) => {
     const marker = markers[idx];
     marker.mesh.visible = true;
-    // Own-material approach: each marker has its own MeshStandardMaterial clone
-    // so color + emissive can be set independently. Drive from owner every frame
-    // so red/blue still tracks the player if the array is ever reordered.
+    // Ownership shows through the sculpt's relief design (and, before the
+    // sculpts load, the placeholder's flat color) — nothing to recolor here.
     // (Emissive is applied per-frame in the render loop — see tick().)
-    const mat = marker.mesh.material as THREE.MeshStandardMaterial;
-    // Seat-relative colors: mine are always red, opponent's always blue.
-    mat.color.setHex(token.owner === (myRole ?? "p1") ? P1_COLOR : P2_COLOR);
 
     // Slot counters stay keyed by the true owner; only the rendered side is
     // remapped so my tokens take the near red row on every client.
@@ -402,7 +591,6 @@ function refreshMarkers(state: GameState) {
         .set(Math.random() - 0.5, Math.random() * 0.6, Math.random() - 0.5)
         .normalize();
       marker.flightSpinSpeed = 5 + Math.random() * 4;
-      audio.play("capture");
     } else if (wasOnBoard && token.position >= PATH_LENGTH) {
       // Escaped — triumphant high arc with a slow forward flip.
       marker.flying = true;
@@ -414,10 +602,22 @@ function refreshMarkers(state: GameState) {
       // Forward flip around X axis reads as a dive / victory somersault.
       marker.flightSpinAxis.set(1, 0, 0);
       marker.flightSpinSpeed = 1.3 + Math.random() * 0.5;
-      audio.play("escape");
-    } else if (!wasOnShield && nowOnShield) {
-      // Landed on a shield — chime.
-      audio.play("shield");
+    } else if (
+      token.position !== marker.lastPosition &&
+      token.position >= 0 &&
+      token.position < PATH_LENGTH
+    ) {
+      // Normal move (including entering from the hand) — a quick low hop so
+      // the piece clears the board rim and stays visible in flight instead
+      // of lerping through geometry.
+      marker.flying = true;
+      marker.flightStart = now;
+      marker.flightDuration = 380;
+      marker.flightArcHeight = 0.38;
+      marker.flightFrom.copy(marker.mesh.position);
+      marker.flightTo.copy(marker.target);
+      marker.flightSpinAxis.set(1, 0, 0);
+      marker.flightSpinSpeed = 0; // no tumble — just the hop
     }
 
     marker.lastPosition = token.position;
@@ -434,6 +634,8 @@ const movesEl = document.getElementById("moves") as HTMLDivElement;
 
 let myRole: PlayerId | null = null;
 let currentMoves: Move[] | null = null;
+/** Every roll of the player's coins waits for a tap on their pile. */
+let rollPending: { flip: number; legalMoves: Move[] | null; state: GameState } | null = null;
 
 /** Which physical side an owner renders on for THIS viewer. Every player
  *  sees their own tokens as Red on the near row and the opponent as Blue on
@@ -507,6 +709,7 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
       moveIndexByToken.set(legalMoves[i].tokenId, i);
     }
   }
+  updateCapturable(legalMoves, isMyTurn);
   // No move buttons — tap-to-move via canvas raycast.
   movesEl.innerHTML = "";
 }
@@ -548,6 +751,17 @@ function findEligibleMeshUnderPointer(clientX: number, clientY: number): number 
 }
 
 canvas.addEventListener("pointerdown", (e) => {
+  // Roll gate: your flip happens when you tap your coin pile.
+  if (rollPending) {
+    if (isMyCoinUnderPointer(e.clientX, e.clientY)) {
+      const pending = rollPending;
+      rollPending = null;
+      triggerCoinFlip(pending.flip, myCoins);
+      renderHud(pending.state, pending.flip);
+      renderMoves(pending.legalMoves, true);
+    }
+    return;
+  }
   const tokenId = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   if (tokenId === null) return;
   const moveIdx = moveIndexByToken.get(tokenId);
@@ -555,15 +769,53 @@ canvas.addEventListener("pointerdown", (e) => {
   ws.send(
     JSON.stringify({ type: "chooseMove", moveIndex: moveIdx } satisfies ClientMessage),
   );
-  // Immediate feedback: clear eligibility so the pulse fades this frame.
+  // Immediate feedback: clear eligibility + hover glow this frame.
   eligibleTokenIds.clear();
   moveIndexByToken.clear();
+  capturableIds.clear();
+  hideHoverGlow();
 });
 
-// Cursor + subtle hover feedback: pointer style when hovering an eligible token.
+// Cursor + hover feedback: pointer style over an eligible token, and a warm
+// halo under a capturable enemy token.
+function findCapturableUnderPointer(clientX: number, clientY: number): number | null {
+  if (capturableIds.size === 0) return null;
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const ids = [...capturableIds].filter((i) => markers[i].mesh.visible);
+  const meshes = ids.map((i) => markers[i].mesh);
+  const hits = raycaster.intersectObjects(meshes, false);
+  return hits.length ? ids[meshes.indexOf(hits[0].object as THREE.Mesh)] : null;
+}
+
+function isMyCoinUnderPointer(clientX: number, clientY: number): boolean {
+  // Generous hit zone: anywhere near the pile counts — clicking the gap
+  // between the four coins must still roll.
+  const v = new THREE.Vector3(COIN_PILE_X, COIN_REST_Y, MY_COIN_Z).project(camera);
+  const sx = (v.x * 0.5 + 0.5) * window.innerWidth;
+  const sy = (-v.y * 0.5 + 0.5) * window.innerHeight;
+  if (Math.hypot(clientX - sx, clientY - sy) < 115) return true;
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  return raycaster.intersectObjects(myCoins.map((c) => c.mesh), false).length > 0;
+}
+
 canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
-  canvas.style.cursor = hit !== null ? "pointer" : "default";
+  const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
+  const rollable = rollPending !== null && isMyCoinUnderPointer(e.clientX, e.clientY);
+  canvas.style.cursor = hit !== null || capturable !== null || rollable ? "pointer" : "default";
+  if (capturable !== null) {
+    const m = markers[capturable];
+    hoverGlow.position.set(m.target.x, m.target.y - 0.062, m.target.z);
+    hoverGlow.visible = true;
+  } else {
+    hideHoverGlow();
+  }
 });
 
 function showPlayAgainButton() {
@@ -624,13 +876,20 @@ winCloseBtn.addEventListener("click", () => {
 // Audio unlock + mute toggle
 // ---------------------------------------------------------------------------
 
-const audioUnlock = document.getElementById("audio-unlock") as HTMLDivElement;
 const muteToggle = document.getElementById("mute-toggle") as HTMLButtonElement;
-
-audioUnlock.addEventListener("click", async () => {
-  await audio.unlock();
-  audioUnlock.classList.add("hidden");
+const volumeSlider = document.getElementById("volume") as HTMLInputElement;
+volumeSlider.value = localStorage.getItem("regatta-volume") ?? "20";
+audio.setVolume(Number(volumeSlider.value) / 100);
+volumeSlider.addEventListener("input", () => {
+  audio.setVolume(Number(volumeSlider.value) / 100);
+  localStorage.setItem("regatta-volume", volumeSlider.value);
 });
+
+// Autoplay policy: audio can only start after SOME user gesture. The first
+// tap/click anywhere unlocks the context, and the already-requested music
+// starts immediately. No overlay — just the mute button on screen.
+window.addEventListener("pointerdown", () => audio.unlock(), { once: true });
+audio.startMusic();
 
 muteToggle.addEventListener("click", () => {
   const nowMuted = !audio.isMuted();
@@ -792,6 +1051,7 @@ function connect() {
       case "role":
         myRole = msg.player;
         myRoom = msg.room;
+        rollPending = null;
         inCpuGame = msg.vsCpu;
         awaitingRejoin = false;
         saveSession({ room: msg.room, seat: msg.player, seatToken: msg.seatToken });
@@ -818,13 +1078,25 @@ function connect() {
         // markers, so the banner appears at the same time as the animation.
         announceFromState(msg);
         refreshMarkers(msg.state);
-        renderHud(msg.state, msg.flip);
-        renderMoves(msg.legalMoves, msg.state.currentPlayer === myRole);
-        // Each state broadcast with flip !== null corresponds to a new flip;
-        // the referee only broadcasts once per fresh flip.
-        if (msg.flip !== null) {
-          triggerCoinFlip(msg.flip);
-          audio.play("coin");
+        {
+          const mine = msg.state.currentPlayer === (myRole ?? "p1");
+          // The player rolls their own hand: every flip of mine waits for a
+          // tap on my coin pile (the pile glows while it waits). The CPU's
+          // rolls animate on their own.
+          if (msg.flip !== null && mine) {
+            rollPending = { flip: msg.flip, legalMoves: msg.legalMoves, state: msg.state };
+            renderHud(msg.state, null);
+            hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
+            renderMoves(null, false);
+          } else {
+            renderHud(msg.state, msg.flip);
+            renderMoves(msg.legalMoves, mine);
+            // Each broadcast with flip !== null is a fresh flip; the flip
+            // belongs to the player about to move, so their coin set tumbles.
+            if (msg.flip !== null) {
+              triggerCoinFlip(msg.flip, mine ? myCoins : theirCoins);
+            }
+          }
         }
         break;
       case "gameOver": {
@@ -837,7 +1109,6 @@ function connect() {
         setTimeout(() => {
           showWinScreen(winner, stats);
           showPlayAgainButton();
-          audio.play("win");
         }, WIN_SCREEN_DELAY_MS);
         break;
       }
@@ -881,17 +1152,6 @@ function hideMenu() {
   menuError.textContent = "";
 }
 
-// Any interaction with the menu is a user gesture — use it to unlock audio
-// so the player never sees the separate "tap to enable sound" screen.
-menuEl.addEventListener(
-  "click",
-  async () => {
-    await audio.unlock();
-    document.getElementById("audio-unlock")!.classList.add("hidden");
-  },
-  { once: true },
-);
-
 function showRoomInfo(code: string) {
   roomCodeEl.textContent = code;
   roomLinkEl.textContent = `${location.origin}/?room=${code}`;
@@ -911,11 +1171,14 @@ function sendToServer(msg: ClientMessage) {
 
 /** Back to the lobby: clear all match-local state and reopen the menu. */
 function resetToMenu(message: string) {
+  rollPending = null;
   hideWinScreen();
   hideRoomInfo();
   movesEl.innerHTML = "";
   currentMoves = null;
   eligibleTokenIds.clear();
+  capturableIds.clear();
+  hideHoverGlow();
   for (const marker of markers) {
     marker.mesh.visible = false;
     marker.flying = false;
@@ -951,6 +1214,107 @@ menuCodeInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") submitJoinCode();
 });
 
+
+// ---------------------------------------------------------------------------
+// Game guide booklet — a little parchment book with flippable spreads.
+// ---------------------------------------------------------------------------
+
+const GUIDE_SPREADS: [string, string][] = [
+  [
+    `<h2>Regatta</h2>
+     <p>A race across the water, played on one carved ship. Regatta is a
+     rendition of the <em>Royal Game of Ur</em> — a four-thousand-year-old
+     race game — as it appears on the tavern tables of Soulframe.</p>
+     <p>Two crews race to sail all <span class="gold">four stones</span> down
+     their own shore, across the contested midline, and home to the far dock.
+     First crew to walk all four off the board wins.</p>
+     <p style="margin-top:14px; font-style:italic;">Turn the page to learn the
+     table &rsaquo;</p>`,
+    `<h2>The Table</h2>
+     <ul>
+       <li><b>Your stones</b> bear the <span class="gold">red star</span> and
+       wait in a pile by your coins. The enemy's carry the blue blossom.</li>
+       <li><b>Your coins</b> are the four metal pieces stacked in front of
+       you. They are your dice.</li>
+       <li><b>Your shore</b> is the red row nearest you. The middle row is
+       shared water — that is where captures happen.</li>
+       <li><b>Score pads</b> are the two stone medallions set into the notch;
+       escaped stones gather past the ship's prow.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>A Turn</h2>
+     <ul>
+       <li>When your coin pile <span class="gold">glows</span>, tap it to
+       roll. Coins landing <b>design-up</b> count one pace each — zero to
+       four.</li>
+       <li>Stones you may move light up. Tap one to sail it that many paces.</li>
+       <li>Rolled a zero, or no stone can move? The turn passes.</li>
+       <li>Your route: down your shore toward the prow, up the shared middle,
+       then back along your shore to the dock.</li>
+     </ul>`,
+    `<h2>Shields, Swords &amp; Home</h2>
+     <ul>
+       <li><b>Shield tiles</b> (the crest glyph) grant an
+       <span class="gold">extra turn</span> and protect the stone standing
+       there from capture.</li>
+       <li>Land on an enemy stone in shared water and it is
+       <span class="gold">captured</span> — sent back to their hand to start
+       over. Hover an enemy stone to see if you can take it.</li>
+       <li>Two of your own stones cannot share a tile.</li>
+       <li>The final dock demands an <b>exact roll</b> — overshoot and the
+       stone must wait.</li>
+       <li>First to bring <b>all four stones home</b> wins the race.</li>
+     </ul>`,
+  ],
+];
+
+const guideOverlay = document.getElementById("guide-overlay") as HTMLDivElement;
+const guideBook = document.getElementById("guide-book") as HTMLDivElement;
+const guideLeft = document.getElementById("guide-left") as HTMLDivElement;
+const guideRight = document.getElementById("guide-right") as HTMLDivElement;
+const guideDots = document.getElementById("guide-dots") as HTMLDivElement;
+let guideSpread = 0;
+
+function renderGuide() {
+  const [l, r] = GUIDE_SPREADS[guideSpread];
+  guideLeft.innerHTML = l;
+  guideRight.innerHTML = r;
+  guideDots.innerHTML = GUIDE_SPREADS.map(
+    (_, i) => `<span${i === guideSpread ? ' class="on"' : ""}></span>`,
+  ).join("");
+  // retrigger the page-flip animation
+  guideBook.classList.remove("flip");
+  void guideBook.offsetWidth;
+  guideBook.classList.add("flip");
+}
+
+function turnGuide(dir: number) {
+  const next = guideSpread + dir;
+  if (next < 0 || next >= GUIDE_SPREADS.length) return;
+  guideSpread = next;
+  renderGuide();
+}
+
+(document.getElementById("guide-toggle") as HTMLButtonElement).addEventListener("click", () => {
+  guideSpread = 0;
+  renderGuide();
+  guideOverlay.classList.add("show");
+});
+(document.getElementById("guide-close") as HTMLButtonElement).addEventListener("click", () => {
+  guideOverlay.classList.remove("show");
+});
+(document.getElementById("guide-prev") as HTMLButtonElement).addEventListener("click", () => turnGuide(-1));
+(document.getElementById("guide-next") as HTMLButtonElement).addEventListener("click", () => turnGuide(1));
+guideOverlay.addEventListener("click", (e) => {
+  if (e.target === guideOverlay) guideOverlay.classList.remove("show");
+});
+guideRight.addEventListener("click", () => turnGuide(1));
+guideLeft.addEventListener("click", () => turnGuide(-1));
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") guideOverlay.classList.remove("show");
+});
+
 // PWA: register the service worker (no-op on unsupported browsers/dev).
 if ("serviceWorker" in navigator && location.hostname !== "localhost") {
   window.addEventListener("load", () => {
@@ -981,8 +1345,6 @@ function tick() {
   requestAnimationFrame(tick);
   const now = performance.now();
   const lerp = 0.18;
-  // Golden pulse for eligible-to-move tokens (0.35 → 0.9 sine sweep).
-  const pulse = 0.35 + Math.abs(Math.sin(now * 0.005)) * 0.55;
 
   for (let i = 0; i < markers.length; i++) {
     const marker = markers[i];
@@ -1006,25 +1368,22 @@ function tick() {
     } else {
       marker.mesh.position.lerp(marker.target, lerp);
     }
-
-    // Emissive: eligible tokens pulse gold, else shield glow if on a shield.
-    const mat = marker.mesh.material as THREE.MeshStandardMaterial;
-    const isEligible = eligibleTokenIds.has(i);
-    const onShield =
-      marker.lastPosition >= 0 &&
-      marker.lastPosition < PATH_LENGTH &&
-      BOARD_LAYOUT[marker.lastPosition].type === "shield";
-    if (isEligible) {
-      mat.emissive.setHex(SHIELD_EMISSIVE);
-      mat.emissiveIntensity = pulse;
-    } else if (onShield) {
-      mat.emissive.setHex(SHIELD_EMISSIVE);
-      mat.emissiveIntensity = SHIELD_INTENSITY;
-    } else {
-      mat.emissive.setHex(0x000000);
-      mat.emissiveIntensity = 0;
-    }
   }
+  // Gentle breathing on the capture-hover glow.
+  if (hoverGlow.visible) {
+    (hoverGlow.material as THREE.MeshBasicMaterial).opacity =
+      0.8 + 0.2 * Math.abs(Math.sin(now * 0.0035));
+  }
+  // Roll cue: steady halo around my coins only while they wait to be tapped.
+  myCoinGlow.visible = rollPending !== null;
+  // Fire flicker: stacked sines read surprisingly flame-like.
+  const flick =
+    4.5 * Math.sin(now * 0.011) + 3.2 * Math.sin(now * 0.023 + 1.7) + 2.4 * Math.sin(now * 0.047 + 0.6);
+  fireLight.intensity = Math.max(fireCfg.intensity * 0.4, fireCfg.intensity + fireCfg.flicker * flick);
+  const fs = 1 + fireCfg.flicker * (0.06 * Math.sin(now * 0.017 + 0.3) + 0.05 * Math.sin(now * 0.041));
+  fireSprite.scale.set(fireCfg.size * fs, fireCfg.size * 0.73 * fs, 1);
+  (fireSprite.material as THREE.SpriteMaterial).opacity =
+    fireCfg.opacity + 0.2 * fireCfg.flicker * Math.abs(Math.sin(now * 0.013));
   updateCoins(now);
   renderer.render(scene, camera);
 }
