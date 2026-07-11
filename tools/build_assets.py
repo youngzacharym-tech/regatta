@@ -412,7 +412,7 @@ def weather_wood(obj, strength=0.55):
     gfreq = 21.0 + 7.0 * np.sin(z * 2.3 + nz * 3.0)
     grain = 0.5 + 0.5 * np.sin(x * gfreq + np.sin(z * 11.7) * 3.5 + nz * 8.0)
     lowlight = np.clip((z.max() - z) / (z.max() - z.min() + 1e-9), 0, 1)
-    darken = 1.0 - strength * (0.62 * nz + 0.16 * (1.0 - grain) + 0.22 * lowlight)
+    darken = 1.0 - strength * (0.70 * nz + 0.0 * (1.0 - grain) + 0.24 * lowlight)  # grain term OFF: any periodic term reads as artificial stripes
     # weathered wood also greys out slightly — pull each color a touch toward
     # its own luma so the brown desaturates where it's most worn.
     luma = (0.3 * cols[:, 0] + 0.59 * cols[:, 1] + 0.11 * cols[:, 2])[:, None]
