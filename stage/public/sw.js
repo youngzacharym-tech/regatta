@@ -8,7 +8,11 @@
 //   - Big static models + icons (.glb, /icons/): stale-while-revalidate so
 //     the 2 MB board doesn't re-download every visit but still updates.
 //   - Everything else (including /api/ and WebSocket upgrades): untouched.
-const CACHE = "regatta-v1";
+//
+// __BUILD__ is stamped with a unique id at build time (stage/stamp-sw.mjs),
+// so every deploy activates a fresh cache and purges the previous one —
+// stale models can never outlive the deploy that shipped them.
+const CACHE = "regatta-__BUILD__";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
