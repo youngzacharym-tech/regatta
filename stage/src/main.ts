@@ -891,6 +891,63 @@ volumeSlider.addEventListener("input", () => {
 window.addEventListener("pointerdown", () => audio.unlock(), { once: true });
 audio.startMusic();
 
+// ---------------------------------------------------------------------------
+// App feel: on the first tap, go fullscreen + lock landscape where the
+// browser allows it (Chrome/Android, most desktop). Browsers forbid
+// auto-fullscreen without a gesture, and iOS Safari has no Fullscreen API at
+// all — there the manifest ("Add to Home Screen") is the real app path, so
+// we fail silently and just rely on the rotate hint. An ✕ exits fullscreen.
+// ---------------------------------------------------------------------------
+const fsExit = document.getElementById("fs-exit") as HTMLButtonElement;
+const rotateHint = document.getElementById("rotate-hint") as HTMLDivElement;
+
+function isPhone(): boolean {
+  return (
+    /Android|iPhone|iPod|Mobile/i.test(navigator.userAgent) &&
+    Math.min(window.innerWidth, window.innerHeight) < 820
+  );
+}
+
+async function enterAppMode(): Promise<void> {
+  const el = document.documentElement as HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void>;
+  };
+  try {
+    if (!document.fullscreenElement) {
+      if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: "hide" });
+      else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+    }
+  } catch { /* unsupported (iOS Safari) — ignore */ }
+  try {
+    const orient = screen.orientation as ScreenOrientation & {
+      lock?: (o: string) => Promise<void>;
+    };
+    if (orient?.lock) await orient.lock("landscape");
+  } catch { /* not lockable (desktop, iOS) — ignore */ }
+}
+
+function updateRotateHint(): void {
+  const portrait = window.innerHeight > window.innerWidth;
+  rotateHint.classList.toggle("show", isPhone() && portrait);
+}
+window.addEventListener("resize", updateRotateHint);
+window.addEventListener("orientationchange", updateRotateHint);
+updateRotateHint();
+
+document.addEventListener("fullscreenchange", () => {
+  document.body.classList.toggle("fs", !!document.fullscreenElement);
+});
+fsExit.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+});
+
+// First real interaction enters app mode (only worth it on phones; on desktop
+// a game in fullscreen with no window chrome is more annoying than helpful).
+if (isPhone()) {
+  window.addEventListener("pointerdown", () => void enterAppMode(), { once: true });
+}
+
 muteToggle.addEventListener("click", () => {
   const nowMuted = !audio.isMuted();
   audio.setMuted(nowMuted);

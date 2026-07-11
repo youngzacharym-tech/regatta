@@ -98,6 +98,35 @@
         background: rgba(255, 255, 255, 0.08); color: #ccc;
       }
 
+      /* --- Fullscreen exit button (only visible while in fullscreen) --- */
+      #fs-exit {
+        position: fixed; top: 12px; right: 12px; z-index: 210;
+        background: rgba(0, 0, 0, 0.55); color: #eee; border: none;
+        width: 40px; height: 40px; border-radius: 20px;
+        font-size: 20px; line-height: 1; cursor: pointer; display: none;
+      }
+      #fs-exit:hover { background: rgba(0, 0, 0, 0.85); }
+      body.fs #fs-exit { display: block; }
+
+      /* --- Rotate-to-landscape hint (phones held portrait) --- */
+      #rotate-hint {
+        position: fixed; inset: 0; z-index: 220;
+        background: #0d0906;
+        display: none; flex-direction: column;
+        justify-content: center; align-items: center; gap: 18px;
+        color: #e8d8c0; text-align: center; padding: 24px;
+      }
+      #rotate-hint.show { display: flex; }
+      #rotate-hint .glyph {
+        font-size: 64px; animation: rotateNudge 1.8s ease-in-out infinite;
+      }
+      #rotate-hint b { font-size: 18px; color: #ffc98a; }
+      #rotate-hint span { font-size: 14px; opacity: 0.8; max-width: 300px; }
+      @keyframes rotateNudge {
+        0%, 60% { transform: rotate(0deg); }
+        80%, 100% { transform: rotate(90deg); }
+      }
+
       /* --- Mute toggle button + volume slider --- */
       #mute-toggle {
         position: fixed; bottom: 14px; right: 14px;
@@ -269,6 +298,12 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <button id="fs-exit" title="Exit fullscreen">✕</button>
+    <div id="rotate-hint">
+      <div class="glyph">📱</div>
+      <b>Rotate your device</b>
+      <span>Regatta plays in landscape. Turn your phone sideways to set sail.</span>
+    </div>
     <div id="hud">Connecting…</div>
     <div id="status">…</div>
     <div id="moves"></div>
