@@ -22,3 +22,8 @@ api/ws.js
 .agents/
 .claude/
 skills-lock.json
+.env*.local
+
+# Pipeline outputs and local Blender scratch
+tools/out/
+myrmblender/
