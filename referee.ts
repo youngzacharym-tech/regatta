@@ -78,6 +78,10 @@ class Match {
   readonly vsCpu: boolean;
   /** Monotonic turn stamp so a stale bot timer can't fire into a new turn. */
   private botTurnStamp = 0;
+  /** Every match opens with a flip-off: both players flip, higher count
+   *  moves first, ties re-flip. Normal turns don't start until resolved. */
+  phase: "opening" | "play" = "opening";
+  openingFlips: { p1: number | null; p2: number | null } = { p1: null, p2: null };
   // Stats tracked for the win-screen display.
   turns = 0;
   captures = { p1: 0, p2: 0 };
@@ -142,6 +146,71 @@ class Match {
     }
   }
 
+  // ---- Opening flip-off ----------------------------------------------------
+
+  private broadcastOpening(first: PlayerId | null = null, tie = false): void {
+    this.broadcast({
+      type: "opening",
+      flips: { ...this.openingFlips },
+      first,
+      tie,
+    });
+  }
+
+  /** Kick off the flip-off once the room is full. In CPU rooms the bot
+   *  flips by itself after a beat. */
+  startOpening(): void {
+    this.phase = "opening";
+    this.openingFlips = { p1: null, p2: null };
+    this.broadcastOpening();
+    this.scheduleBotOpeningFlip();
+  }
+
+  private scheduleBotOpeningFlip(): void {
+    if (!this.vsCpu) return;
+    const stamp = ++this.botTurnStamp;
+    setTimeout(() => {
+      if (stamp !== this.botTurnStamp) return;
+      if (this.phase === "opening" && this.openingFlips.p2 === null) {
+        this.handleOpeningFlip("p2");
+      }
+    }, BOT_THINK_MS);
+  }
+
+  handleOpeningFlip(role: PlayerId): void {
+    if (this.phase !== "opening" || this.openingFlips[role] !== null) return;
+    this.openingFlips[role] = flipCoins();
+    const { p1, p2 } = this.openingFlips;
+
+    if (p1 === null || p2 === null) {
+      this.broadcastOpening(); // one side landed — show it, keep waiting
+      return;
+    }
+    if (p1 === p2) {
+      // Tie: show both results with the tie flag, then re-arm after the
+      // clients have had time to animate the flips.
+      this.broadcastOpening(null, true);
+      console.log(`[${this.code}] opening tie (${p1}) — re-flipping`);
+      setTimeout(() => {
+        if (this.phase !== "opening") return;
+        this.openingFlips = { p1: null, p2: null };
+        this.broadcastOpening();
+        this.scheduleBotOpeningFlip();
+      }, 1600);
+      return;
+    }
+
+    const first: PlayerId = p1 > p2 ? "p1" : "p2";
+    this.state.currentPlayer = first;
+    this.phase = "play";
+    this.broadcastOpening(first);
+    console.log(`[${this.code}] opening: p1=${p1} p2=${p2} — ${first} moves first`);
+    // Give clients a moment to animate + announce before the first turn.
+    setTimeout(() => {
+      if (this.phase === "play" && this.currentFlip === null) this.advance();
+    }, 1400);
+  }
+
   /** Clear per-transition announcement fields. Called at the start of each
    *  new turn (after we've broadcast the previous transition's context). */
   private clearAnnouncement(): void {
@@ -154,6 +223,7 @@ class Match {
 
   /** Drive the next turn: flip coins, compute legal moves, broadcast. */
   advance(): void {
+    if (this.phase !== "play") return; // no turns until the flip-off resolves
     if (this.state.winner) {
       // Broadcast the final state first so clients can render the winning
       // token's final position before showing the game-over overlay.
@@ -257,16 +327,15 @@ class Match {
       });
       return;
     }
-    // Fresh state, fresh first-player randomization, fresh stats.
+    // Fresh state + stats; the opening flip-off decides who moves first.
     this.state = initialState();
-    this.state.currentPlayer = Math.random() < 0.5 ? "p1" : "p2";
     this.currentFlip = null;
     this.currentLegalMoves = null;
     this.turns = 0;
     this.captures = { p1: 0, p2: 0 };
     this.clearAnnouncement();
     console.log(`new match started (requested by ${role})`);
-    this.advance();
+    this.startOpening();
   }
 }
 
@@ -399,8 +468,8 @@ wss.on("connection", (ws) => {
     });
 
     if (room.isFull()) {
-      console.log(`[${room.code}] match starting`);
-      room.advance();
+      console.log(`[${room.code}] match starting — opening flip-off`);
+      room.startOpening();
     } else {
       sendMsg({ type: "waiting", reason: "Waiting for opponent" });
     }
@@ -429,6 +498,8 @@ wss.on("connection", (ws) => {
       sendMsg({ type: "error", message: "Room not found" });
     } else if (!room || !role) {
       sendMsg({ type: "error", message: "Join a room first" });
+    } else if (msg.type === "openingFlip") {
+      room.handleOpeningFlip(role);
     } else if (msg.type === "chooseMove") {
       room.handleChooseMove(role, msg.moveIndex);
     } else if (msg.type === "newMatch") {

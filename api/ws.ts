@@ -54,6 +54,10 @@ interface RoomDoc {
   vsCpu: boolean;
   seats: { p1: string | null; p2: string | null }; // seat tokens ("BOT" for cpu p2)
   started: boolean;
+  /** Every match opens with a flip-off (higher count moves first, ties
+   *  re-flip). No turns happen until phase flips to "play". */
+  phase: "opening" | "play";
+  openingFlips: { p1: number | null; p2: number | null };
   state: GameState;
   currentFlip: number | null;
   turns: number;
@@ -80,12 +84,15 @@ return 1
 
 function freshMatchFields(): Pick<
   RoomDoc,
+  | "phase" | "openingFlips"
   | "state" | "currentFlip" | "turns" | "captures"
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
 > {
+  // currentPlayer is decided by the opening flip-off, not randomized here.
   const state = initialState();
-  state.currentPlayer = Math.random() < 0.5 ? "p1" : "p2";
   return {
+    phase: "opening",
+    openingFlips: { p1: null, p2: null },
     state,
     currentFlip: null,
     turns: 0,
@@ -120,6 +127,9 @@ export function GET(request: Request) {
     let mySeat: PlayerId | null = null;
     let myRoom: string | null = null;
     let lastAnnouncedWinner: PlayerId | null = null;
+    /** Last phase this connection rendered — the opening->play transition is
+     *  where the "X goes first" reveal gets sent, exactly once. */
+    let prevPhase: "opening" | "play" | null = null;
     // Timers scheduled against a doc version; cancelled implicitly by CAS.
     let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -153,9 +163,52 @@ export function GET(request: Request) {
       return false;
     };
 
+    /** Run `fn` after `ms` — but only if the room doc hasn't moved on since
+     *  `doc` (version check on reload). Multiple connections can schedule
+     *  the same action; the CAS in commit() lets exactly one land. */
+    const scheduleVersioned = (
+      doc: RoomDoc,
+      ms: number,
+      fn: (cur: RoomDoc) => Promise<void>,
+    ) => {
+      const versionAtSchedule = doc.version;
+      setTimeout(async () => {
+        try {
+          const cur = await loadDoc(doc.code);
+          if (cur && cur.version === versionAtSchedule) await fn(cur);
+        } catch (err) {
+          console.error("scheduled action failed", err);
+        }
+      }, ms);
+    };
+
     /** Derive and send THIS seat's view of a doc. */
     const sendStateView = (doc: RoomDoc) => {
       if (!mySeat || !doc.started) return;
+      // Opening flip-off: send the opening view instead of a game state.
+      // The tie flag is derivable (both set + equal); the "first" reveal is
+      // the opening->play transition, tracked per connection via prevPhase.
+      if (doc.phase === "opening") {
+        prevPhase = "opening";
+        const { p1, p2 } = doc.openingFlips;
+        send({
+          type: "opening",
+          flips: { ...doc.openingFlips },
+          first: null,
+          tie: p1 !== null && p2 !== null && p1 === p2,
+        });
+        return;
+      }
+      if (prevPhase === "opening") {
+        // Just resolved — announce who moves first before normal flow.
+        prevPhase = "play";
+        send({
+          type: "opening",
+          flips: { ...doc.openingFlips },
+          first: doc.state.currentPlayer,
+          tie: false,
+        });
+      }
       // A doc without a winner means a fresh match — re-arm gameOver delivery.
       if (doc.state.winner === null) lastAnnouncedWinner = null;
       const legalMoves =
@@ -191,27 +244,78 @@ export function GET(request: Request) {
       return turnOwner === mySeat;
     };
 
+    /** Opening flip-off transitions. Any connection can resolve; the CAS in
+     *  commit() serializes racers, and rejoins re-evaluate — self-healing. */
+    const maybeDriveOpening = async (doc: RoomDoc): Promise<void> => {
+      if (!mySeat || !doc.started || doc.phase !== "opening") return;
+      const { p1, p2 } = doc.openingFlips;
+
+      // CPU rooms: the human's connection flips for the bot after a beat.
+      if (doc.vsCpu && p2 === null && mySeat === "p1") {
+        scheduleVersioned(doc, BOT_THINK_MS, async (cur) => {
+          if (cur.phase !== "opening" || cur.openingFlips.p2 !== null) return;
+          await commit({
+            ...cur,
+            openingFlips: { ...cur.openingFlips, p2: flipCoins() },
+          });
+        });
+      }
+
+      if (p1 === null || p2 === null) return;
+
+      if (p1 === p2) {
+        // Tie: leave the tying doc visible for the animation beat, then
+        // clear both flips to re-arm.
+        scheduleVersioned(doc, 1600, async (cur) => {
+          if (cur.phase !== "opening") return;
+          await commit({ ...cur, openingFlips: { p1: null, p2: null } });
+        });
+        return;
+      }
+
+      const first: PlayerId = p1 > p2 ? "p1" : "p2";
+      console.log(`[${doc.code}] opening: p1=${p1} p2=${p2} — ${first} first`);
+      const next: RoomDoc = {
+        ...doc,
+        phase: "play",
+        state: { ...doc.state, currentPlayer: first },
+      };
+      if (await commit(next)) await maybeDrive(next);
+    };
+
     /** Advance the room if it's stalled on something we're responsible for. */
     const maybeDrive = async (doc: RoomDoc): Promise<void> => {
-      if (!doc.started || doc.state.winner || !iDrive(doc)) return;
+      if (!doc.started || doc.phase !== "play" || doc.state.winner || !iDrive(doc)) return;
 
       // Needs a coin flip to start the turn.
       if (doc.currentFlip === null) {
-        const next: RoomDoc = {
-          ...doc,
-          currentFlip: flipCoins(),
-          turns: doc.turns + 1,
-          // A fresh flip consumes the previous announcement.
-          lastMove: null,
-          lastMovePlayer: null,
-          wasSkipped: false,
-          skippedPlayer: null,
-          skipReason: null,
+        const commitTurnFlip = async (cur: RoomDoc) => {
+          const next: RoomDoc = {
+            ...cur,
+            currentFlip: flipCoins(),
+            turns: cur.turns + 1,
+            // A fresh flip consumes the previous announcement.
+            lastMove: null,
+            lastMovePlayer: null,
+            wasSkipped: false,
+            skippedPlayer: null,
+            skipReason: null,
+          };
+          if (await commit(next)) await maybeDrive(next);
+          else {
+            const reloaded = await loadDoc(cur.code);
+            if (reloaded) await maybeDrive(reloaded);
+          }
         };
-        if (await commit(next)) await maybeDrive(next);
-        else {
-          const reloaded = await loadDoc(doc.code);
-          if (reloaded) await maybeDrive(reloaded);
+        if (doc.turns === 0) {
+          // First turn after the flip-off: let the "goes first" reveal land.
+          scheduleVersioned(doc, 1400, async (cur) => {
+            if (cur.phase === "play" && cur.currentFlip === null) {
+              await commitTurnFlip(cur);
+            }
+          });
+        } else {
+          await commitTurnFlip(doc);
         }
         return;
       }
@@ -309,6 +413,7 @@ export function GET(request: Request) {
       sub.on("message", async (_channel, payload) => {
         const doc = JSON.parse(payload) as RoomDoc;
         sendStateView(doc);
+        await maybeDriveOpening(doc);
         await maybeDrive(doc);
       });
     };
@@ -354,7 +459,7 @@ export function GET(request: Request) {
           return;
         }
         await seatIn(next, "p2", token);
-        await maybeDrive(next); // p2 might own the first (randomized) turn
+        await maybeDriveOpening(next); // room just filled — flip-off begins
         return;
       }
 
@@ -383,8 +488,14 @@ export function GET(request: Request) {
         );
         if (created) {
           await seatIn(doc, "p1", token);
-          if (doc.started) await maybeDrive(doc);
-          else send({ type: "waiting", reason: "Waiting for opponent" });
+          if (doc.started) {
+            // CPU room: creation doesn't publish, so paint the opening
+            // prompt directly and arm the bot's opening flip.
+            sendStateView(doc);
+            await maybeDriveOpening(doc);
+          } else {
+            send({ type: "waiting", reason: "Waiting for opponent" });
+          }
           return;
         }
       }
@@ -408,7 +519,9 @@ export function GET(request: Request) {
       await seatIn(doc, msg.seat, msg.seatToken);
       sendStateView(doc); // immediate snapshot so the board repaints
       if (!doc.started) send({ type: "waiting", reason: "Waiting for opponent" });
-      await maybeDrive(doc); // resume anything that stalled while we were away
+      // Resume anything that stalled while we were away (either phase).
+      await maybeDriveOpening(doc);
+      await maybeDrive(doc);
     };
 
     ws.on("message", async (data: unknown) => {
@@ -424,6 +537,16 @@ export function GET(request: Request) {
         else if (msg.type === "rejoin") await handleRejoin(msg);
         else if (!myRoom || !mySeat) {
           send({ type: "error", message: "Join a room first" });
+        } else if (msg.type === "openingFlip") {
+          const doc = await loadDoc(myRoom);
+          if (!doc || doc.phase !== "opening" || doc.openingFlips[mySeat] !== null) {
+            return; // out of phase or already flipped — silently ignore
+          }
+          const next: RoomDoc = {
+            ...doc,
+            openingFlips: { ...doc.openingFlips, [mySeat]: flipCoins() },
+          };
+          if (await commit(next)) await maybeDriveOpening(next);
         } else if (msg.type === "chooseMove") {
           const doc = await loadDoc(myRoom);
           if (doc) await applyChosenMove(doc, mySeat, msg.moveIndex);
@@ -436,7 +559,7 @@ export function GET(request: Request) {
           }
           lastAnnouncedWinner = null;
           const next: RoomDoc = { ...doc, ...freshMatchFields() };
-          if (await commit(next)) await maybeDrive(next);
+          if (await commit(next)) await maybeDriveOpening(next);
         }
       } catch (err) {
         console.error("ws message error", err);

@@ -20,10 +20,21 @@ function client(name) {
     ws,
     name,
     send: (m) => ws.send(JSON.stringify(m)),
-    next: () =>
-      queue.length
-        ? Promise.resolve(queue.shift())
-        : new Promise((res) => waiters.push(res)),
+    /** Next message, or null after `ms`. A timed-out waiter REMOVES itself —
+     *  an abandoned waiter would silently eat the next real message. */
+    next: (ms = 15000) => {
+      if (queue.length) return Promise.resolve(queue.shift());
+      return new Promise((res) => {
+        waiters.push(res);
+        setTimeout(() => {
+          const i = waiters.indexOf(res);
+          if (i !== -1) {
+            waiters.splice(i, 1);
+            res(null);
+          }
+        }, ms);
+      });
+    },
     open: () => new Promise((res) => ws.once("open", res)),
   };
 }
@@ -32,12 +43,18 @@ async function cpuGame() {
   const c = client("solo");
   await c.open();
   c.send({ type: "join", mode: "cpu" });
-  let role = null, room = null, winner = null, myMoves = 0;
+  let role = null, room = null, winner = null, myMoves = 0, openings = 0;
   const deadline = Date.now() + 90_000;
   while (!winner && Date.now() < deadline) {
-    const msg = await c.next();
+    const msg = await c.next(5000);
+    if (!msg) continue;
     if (msg.type === "role") { role = msg.player; room = msg.room;
       if (!msg.vsCpu) throw new Error("expected vsCpu room");
+    }
+    // Opening flip-off: flip whenever prompted (incl. tie re-flips).
+    if (msg.type === "opening" && role && msg.first === null && !msg.tie && msg.flips[role] === null) {
+      openings++;
+      c.send({ type: "openingFlip" });
     }
     if (msg.type === "state" && msg.legalMoves && msg.legalMoves.length) {
       myMoves++;
@@ -47,7 +64,8 @@ async function cpuGame() {
   }
   c.ws.close();
   if (!winner) throw new Error("cpu game did not finish in time");
-  console.log(`CPU GAME OK: room=${room} me=${role} winner=${winner} myMoves=${myMoves}`);
+  if (openings < 1) throw new Error("never saw an opening prompt");
+  console.log(`CPU GAME OK: room=${room} me=${role} winner=${winner} myMoves=${myMoves} openingFlips=${openings}`);
 }
 
 async function pvpRooms() {
@@ -58,12 +76,14 @@ async function pvpRooms() {
   let m = await a1.next();
   if (m.type !== "role") throw new Error("a1 expected role, got " + m.type);
   const codeA = m.room;
+  a1.role = m.player;
   // Room B
   const b1 = client("b1"), b2 = client("b2");
   await b1.open(); await b2.open();
   b1.send({ type: "join", mode: "create" });
   m = await b1.next();
   const codeB = m.room;
+  b1.role = m.player;
   if (codeA === codeB) throw new Error("room codes collided");
 
   a2.send({ type: "join", mode: "join", room: codeA.toLowerCase() }); // case-insensitive
@@ -83,9 +103,14 @@ async function pvpRooms() {
     const deadline = Date.now() + 30_000;
     while (moves < 6 && Date.now() < deadline) {
       for (const c of clients) {
-        // Drain without blocking: peek with a short race.
-        const msg = await Promise.race([c.next(), new Promise((r) => setTimeout(() => r(null), 150))]);
+        // Drain without blocking: short self-cancelling wait.
+        const msg = await c.next(150);
         if (!msg) continue;
+        if (msg.type === "role") c.role = msg.player;
+        // Opening flip-off: flip whenever prompted (incl. tie re-flips).
+        if (msg.type === "opening" && c.role && msg.first === null && !msg.tie && msg.flips[c.role] === null) {
+          c.send({ type: "openingFlip" });
+        }
         if (msg.type === "state" && msg.legalMoves && msg.legalMoves.length && msg.state.winner === null) {
           c.send({ type: "chooseMove", moveIndex: 0 });
           moves++;
@@ -104,7 +129,7 @@ async function pvpRooms() {
   const deadline = Date.now() + 5000;
   let gotLeft = false;
   while (Date.now() < deadline && !gotLeft) {
-    const msg = await Promise.race([a2.next(), new Promise((r) => setTimeout(() => r(null), 300))]);
+    const msg = await a2.next(300);
     if (msg && msg.type === "opponentLeft") gotLeft = true;
   }
   if (!gotLeft) throw new Error("a2 never received opponentLeft");

@@ -31,6 +31,16 @@ export type ServerMessage =
       type: "opponentLeft";
     }
   | {
+      /** Opening flip-off: both players flip their coins, higher count moves
+       *  first, ties re-flip. Broadcast whenever the opening state changes:
+       *  prompt (both null), one side landed, tie (flips shown, then reset),
+       *  or resolved (`first` set — normal state flow follows). */
+      type: "opening";
+      flips: { p1: number | null; p2: number | null };
+      first: PlayerId | null;
+      tie: boolean;
+    }
+  | {
       /** Broadcast after every state transition. Contains everything a client
        *  needs to render + decide. `legalMoves` is only populated for the
        *  current player; the opponent gets `null` so they can't cheat.
@@ -84,6 +94,11 @@ export type ClientMessage =
       room: string;
       seat: PlayerId;
       seatToken: string;
+    }
+  | {
+      /** Flip my coins in the opening flip-off. Ignored outside the opening
+       *  phase or if this seat already flipped this round. */
+      type: "openingFlip";
     }
   | {
       /** Client picks a move by index into the last received `legalMoves` list.

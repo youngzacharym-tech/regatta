@@ -194,6 +194,43 @@
       #menu .credit a { color: #80b8ff; text-decoration: none; }
       #menu .credit a:hover { text-decoration: underline; }
 
+      /* --- How to Play overlay --- */
+      #howto {
+        position: fixed; inset: 0; z-index: 260;
+        background: rgba(10, 10, 15, 0.85);
+        display: none; justify-content: center; align-items: center;
+        backdrop-filter: blur(3px);
+      }
+      #howto.show { display: flex; }
+      #howto .card {
+        position: relative;
+        background: linear-gradient(160deg, #262636, #16161e);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 26px 32px;
+        max-width: 480px; width: calc(100% - 40px);
+        max-height: 86vh; overflow-y: auto;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+      }
+      #howto h2 { font-size: 22px; color: #ffd370; margin-bottom: 14px; letter-spacing: 0.5px; }
+      #howto ol { padding-left: 20px; }
+      #howto li { font-size: 14px; line-height: 1.55; color: #ccccdd; margin-bottom: 10px; }
+      #howto li b { color: #fff; }
+      #howto button.close {
+        position: absolute; top: 10px; right: 12px;
+        background: transparent; border: none; color: #6a6a80;
+        font-size: 22px; line-height: 1; cursor: pointer;
+        padding: 6px 12px; border-radius: 6px;
+      }
+      #howto button.close:hover { background: rgba(255, 255, 255, 0.08); color: #ccc; }
+      #howto button.got-it {
+        display: block; margin: 16px auto 0;
+        background: #c73; color: white; border: none;
+        padding: 11px 26px; border-radius: 8px; font-size: 14px;
+        font-weight: 600; cursor: pointer;
+      }
+      #howto button.got-it:hover { background: #d84; }
+
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
         position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
@@ -230,6 +267,7 @@
         <div class="tagline">a race across the board</div>
         <button class="mode" id="menu-cpu">Play vs Computer</button>
         <button class="mode alt" id="menu-create">Create Room</button>
+        <button class="mode alt" id="menu-howto">How to Play</button>
         <div class="join-row">
           <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" />
           <button id="menu-join">Join</button>
@@ -240,6 +278,22 @@
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
           — used with the artist's blessing
         </div>
+      </div>
+    </div>
+    <div id="howto">
+      <div class="card">
+        <button class="close" id="howto-close" title="Close">×</button>
+        <h2>How to Play</h2>
+        <ol>
+          <li><b>The goal:</b> race all 4 of your tokens around the board and off the white finish stone. First to get all 4 out wins. You're always <b>Red</b>, on the near side.</li>
+          <li><b>Flip for first move:</b> each match opens with both players tapping their coins — higher flip goes first, ties flip again.</li>
+          <li><b>Coins are your dice:</b> on your turn, 4 coins flip — the number that land <b>marked-side up</b> is how far one token moves. Flip a 0 and your turn is skipped.</li>
+          <li><b>Moving:</b> tokens you can move <b>pulse gold</b> — tap one and it goes. Each token has exactly one destination per flip.</li>
+          <li><b>The middle row is shared:</b> land on an enemy token there and it gets sent home to start over.</li>
+          <li><b>Shield tiles</b> (the ivory-stamped ones): tokens standing there can't be captured, and landing on one grants an <b>extra turn</b>.</li>
+          <li><b>Escaping:</b> you need the <b>exact</b> flip to land on the finish stone — overshoot and that token can't move this turn.</li>
+        </ol>
+        <button class="got-it" id="howto-gotit">Got it</button>
       </div>
     </div>
     <div id="room-info">

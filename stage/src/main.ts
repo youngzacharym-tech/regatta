@@ -206,9 +206,10 @@ const WIN_SCREEN_DELAY_MS = ESCAPE_FLIGHT_MS + 250;
 // ---------------------------------------------------------------------------
 // Coins
 //
-// 4 flat cylinders that tumble on each new flip. The rulebook / referee is
-// still authoritative on the flip count — the client just decides randomly
-// WHICH of the four coins land marked-side up to visually represent it.
+// Each player has their OWN set of 4 coins: the viewer's near the bottom
+// edge, the opponent's past the board's far edge — so it's always obvious
+// whose flip a number belongs to. The referee is authoritative on the flip
+// count; the client just decides randomly WHICH coins land marked-side up.
 // ---------------------------------------------------------------------------
 
 const coinGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.03, 32);
@@ -229,10 +230,15 @@ interface CoinAnim {
   duration: number;
   willShowMarked: boolean;
   spinTurns: number;
+  /** Last tint applied (sculpted mode) — re-applied when emphasis changes. */
+  lastTint: number;
+  /** Dimmed = not the set whose flip is currently displayed. */
+  dimmed: boolean;
 }
 
 const COIN_REST_Y = 0.05;
-const COIN_Z = 2.3;   // front of the shared camera view
+const COIN_Z = 2.3;        // viewer's coin row, front of the camera view
+const THEIR_COIN_Z = -2.1; // opponent's row, past the board's far edge
 const COIN_SPACING = 0.5;
 
 // Once the sculpted pieces load, coins switch from the multi-material
@@ -244,26 +250,55 @@ const COIN_BLANK_TINT = 0x5c3f1c;
 const COIN_SPIN_TINT = 0xa87c3d; // neutral bronze while tumbling
 
 function tintCoin(coin: CoinAnim, hex: number) {
+  coin.lastTint = hex;
   if (!coinsAreSculpted) return;
-  (coin.mesh.material as THREE.MeshStandardMaterial).color.setHex(hex);
+  const mat = coin.mesh.material as THREE.MeshStandardMaterial;
+  mat.color.setHex(hex);
+  if (coin.dimmed) mat.color.multiplyScalar(0.45);
 }
 
-const coins: CoinAnim[] = [];
-for (let i = 0; i < 4; i++) {
-  const mesh = new THREE.Mesh(coinGeo, coinMats);
-  const restPos = new THREE.Vector3(i * COIN_SPACING - 0.75, COIN_REST_Y, COIN_Z);
-  mesh.position.copy(restPos);
-  // Start at rest showing marked side up (rotation.x = 0, top face is +Y).
-  scene.add(mesh);
-  coins.push({
-    mesh,
-    restPos,
-    isFlipping: false,
-    startTime: 0,
-    duration: 700,
-    willShowMarked: true,
-    spinTurns: 6,
-  });
+function makeCoinSet(z: number): CoinAnim[] {
+  const set: CoinAnim[] = [];
+  for (let i = 0; i < 4; i++) {
+    const mesh = new THREE.Mesh(coinGeo, coinMats);
+    const restPos = new THREE.Vector3(i * COIN_SPACING - 0.75, COIN_REST_Y, z);
+    mesh.position.copy(restPos);
+    // Start at rest showing marked side up (rotation.x = 0).
+    scene.add(mesh);
+    set.push({
+      mesh,
+      restPos,
+      isFlipping: false,
+      startTime: 0,
+      duration: 700,
+      willShowMarked: true,
+      spinTurns: 6,
+      lastTint: COIN_MARKED_TINT,
+      dimmed: false,
+    });
+  }
+  return set;
+}
+
+const myCoins = makeCoinSet(COIN_Z);
+const theirCoins = makeCoinSet(THEIR_COIN_Z);
+const allCoins = [...myCoins, ...theirCoins];
+
+/** Emphasis: the set whose flip is on display renders full-size and bright;
+ *  the other set shrinks and darkens (but keeps showing its last result). */
+function setCoinSetActive(set: CoinAnim[], active: boolean) {
+  for (const coin of set) {
+    coin.dimmed = !active;
+    coin.mesh.scale.setScalar(active ? 1 : 0.82);
+    tintCoin(coin, coin.lastTint);
+  }
+}
+
+/** Undo the tap-me pulse's scale wobble (see tick()). */
+function resetCoinPulse() {
+  for (const coin of myCoins) {
+    coin.mesh.scale.setScalar(coin.dimmed ? 0.82 : 1);
+  }
 }
 
 // Swap the placeholder cylinders for the sculpted piece meshes once they
@@ -292,7 +327,7 @@ gltfLoader.load(
     // Same lay-flat convention the procedural coin used: bake the design face
     // to point +Z, so the existing rotation.x flip logic works unchanged.
     coinSculpt.rotateX(Math.PI / 2);
-    for (const coin of coins) {
+    for (const coin of allCoins) {
       coin.mesh.geometry = coinSculpt;
       coin.mesh.material = new THREE.MeshStandardMaterial({
         color: COIN_MARKED_TINT,
@@ -301,7 +336,7 @@ gltfLoader.load(
       });
     }
     coinsAreSculpted = true;
-    for (const coin of coins) {
+    for (const coin of allCoins) {
       tintCoin(coin, coin.willShowMarked ? COIN_MARKED_TINT : COIN_BLANK_TINT);
     }
   },
@@ -309,8 +344,18 @@ gltfLoader.load(
   (err) => console.error("Failed to load", PIECES_URL, err),
 );
 
-function triggerCoinFlip(markedCount: number) {
+function triggerCoinFlip(markedCount: number, owner: PlayerId) {
   const now = performance.now();
+  // The owner's set animates; whose set that is on-screen is seat-relative.
+  const set = viewSide(owner) === "p1" ? myCoins : theirCoins;
+  // During the opening flip-off both sets stay full brightness (both are
+  // "on display"); in normal play the non-flipping set dims.
+  if (!openingActive) {
+    setCoinSetActive(set, true);
+    setCoinSetActive(set === myCoins ? theirCoins : myCoins, false);
+  } else {
+    setCoinSetActive(set, true);
+  }
   // Pick markedCount coin indices uniformly at random to show the marked face.
   const indices = [0, 1, 2, 3];
   for (let i = 3; i > 0; i--) {
@@ -320,17 +365,17 @@ function triggerCoinFlip(markedCount: number) {
   const markedSet = new Set(indices.slice(0, markedCount));
 
   for (let i = 0; i < 4; i++) {
-    coins[i].isFlipping = true;
-    coins[i].startTime = now + Math.random() * 80;
-    coins[i].duration = 550 + Math.random() * 250;
-    coins[i].willShowMarked = markedSet.has(i);
-    coins[i].spinTurns = 5 + Math.random() * 4;
-    tintCoin(coins[i], COIN_SPIN_TINT);
+    set[i].isFlipping = true;
+    set[i].startTime = now + Math.random() * 80;
+    set[i].duration = 550 + Math.random() * 250;
+    set[i].willShowMarked = markedSet.has(i);
+    set[i].spinTurns = 5 + Math.random() * 4;
+    tintCoin(set[i], COIN_SPIN_TINT);
   }
 }
 
 function updateCoins(now: number) {
-  for (const coin of coins) {
+  for (const coin of allCoins) {
     if (!coin.isFlipping) continue;
     const elapsed = now - coin.startTime;
     if (elapsed < 0) continue;
@@ -434,6 +479,14 @@ const movesEl = document.getElementById("moves") as HTMLDivElement;
 
 let myRole: PlayerId | null = null;
 let currentMoves: Move[] | null = null;
+
+// --- Opening flip-off state -------------------------------------------------
+/** True from the opening prompt until "who goes first" is resolved. */
+let openingActive = false;
+/** True while the game is waiting for THIS player to tap their coins. */
+let openingTapArmed = false;
+/** Flips already animated this opening round (to animate only new ones). */
+let seenOpeningFlips: { p1: number | null; p2: number | null } = { p1: null, p2: null };
 
 /** Which physical side an owner renders on for THIS viewer. Every player
  *  sees their own tokens as Red on the near row and the opponent as Blue on
@@ -547,7 +600,30 @@ function findEligibleMeshUnderPointer(clientX: number, clientY: number): number 
   return null;
 }
 
+/** During the opening flip-off, taps target the player's own coin row.
+ *  Distance-to-ray instead of exact mesh intersection: the coins are ~0.2
+ *  wide with gaps between them, and a fat target beats a fumbled tap —
+ *  anywhere on or near the row counts. */
+function myCoinUnderPointer(clientX: number, clientY: number): boolean {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  return myCoins.some(
+    (c) => raycaster.ray.distanceToPoint(c.mesh.position) < 0.4,
+  );
+}
+
 canvas.addEventListener("pointerdown", (e) => {
+  if (openingTapArmed) {
+    if (myCoinUnderPointer(e.clientX, e.clientY)) {
+      openingTapArmed = false;
+      resetCoinPulse();
+      sendToServer({ type: "openingFlip" });
+      hud.innerHTML = `<div>Flip for first move</div><div>Flipping…</div>`;
+    }
+    return;
+  }
   const tokenId = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   if (tokenId === null) return;
   const moveIdx = moveIndexByToken.get(tokenId);
@@ -560,10 +636,12 @@ canvas.addEventListener("pointerdown", (e) => {
   moveIndexByToken.clear();
 });
 
-// Cursor + subtle hover feedback: pointer style when hovering an eligible token.
+// Cursor + subtle hover feedback: pointer style when hovering a tappable thing.
 canvas.addEventListener("pointermove", (e) => {
-  const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
-  canvas.style.cursor = hit !== null ? "pointer" : "default";
+  const hit = openingTapArmed
+    ? myCoinUnderPointer(e.clientX, e.clientY)
+    : findEligibleMeshUnderPointer(e.clientX, e.clientY) !== null;
+  canvas.style.cursor = hit ? "pointer" : "default";
 });
 
 function showPlayAgainButton() {
@@ -809,6 +887,50 @@ function connect() {
       case "opponentLeft":
         resetToMenu("Opponent left the game");
         break;
+      case "opening": {
+        hideRoomInfo();
+        hideWinScreen(); // rematch via Play Again re-enters the flip-off
+        const mySide: PlayerId = myRole ?? "p1";
+        // Animate flips we haven't shown yet this round.
+        for (const seat of ["p1", "p2"] as PlayerId[]) {
+          const count = msg.flips[seat];
+          if (count !== null && seenOpeningFlips[seat] === null) {
+            triggerCoinFlip(count, seat);
+            audio.play("coin");
+          }
+        }
+        seenOpeningFlips = { ...msg.flips };
+
+        if (msg.first !== null) {
+          // Resolved — normal state flow takes over from here.
+          openingActive = false;
+          openingTapArmed = false;
+          seenOpeningFlips = { p1: null, p2: null };
+          resetCoinPulse();
+          const isMe = msg.first === myRole;
+          showAnnouncement(isMe ? "You go first!" : "Opponent goes first", isMe ? "escape" : "skip");
+          break;
+        }
+
+        openingActive = true;
+        if (msg.tie) {
+          openingTapArmed = false;
+          resetCoinPulse();
+          // Re-arm happens when the cleared prompt (both null) arrives.
+          setTimeout(() => showAnnouncement("Tie — flip again!", "shield"), 900);
+          break;
+        }
+        const iFlipped = msg.flips[mySide] !== null;
+        openingTapArmed = !iFlipped;
+        if (!iFlipped) {
+          hud.innerHTML = `<div>Flip for first move</div><div><b style="color:#ffd370">Tap your coins</b></div>`;
+          showAnnouncement("Flip for first move — tap your coins", "shield");
+        } else {
+          resetCoinPulse();
+          hud.innerHTML = `<div>Flip for first move</div><div>Waiting for opponent…</div>`;
+        }
+        break;
+      }
       case "state":
         hideRoomInfo(); // both seats filled — invite banner is done
         // If a new match started while this client had the win modal open
@@ -823,7 +945,7 @@ function connect() {
         // Each state broadcast with flip !== null corresponds to a new flip;
         // the referee only broadcasts once per fresh flip.
         if (msg.flip !== null) {
-          triggerCoinFlip(msg.flip);
+          triggerCoinFlip(msg.flip, msg.state.currentPlayer);
           audio.play("coin");
         }
         break;
@@ -924,9 +1046,25 @@ function resetToMenu(message: string) {
   myRole = null;
   myRoom = null;
   inCpuGame = false;
+  openingActive = false;
+  openingTapArmed = false;
+  seenOpeningFlips = { p1: null, p2: null };
+  setCoinSetActive(myCoins, true);
+  setCoinSetActive(theirCoins, true);
   clearSession();
   hud.textContent = message;
   menuEl.classList.add("show");
+}
+
+// How to Play overlay — open from the menu, close via × or "Got it".
+const howtoEl = document.getElementById("howto") as HTMLDivElement;
+(document.getElementById("menu-howto") as HTMLButtonElement).addEventListener("click", () => {
+  howtoEl.classList.add("show");
+});
+for (const id of ["howto-close", "howto-gotit"]) {
+  (document.getElementById(id) as HTMLButtonElement).addEventListener("click", () => {
+    howtoEl.classList.remove("show");
+  });
 }
 
 (document.getElementById("menu-cpu") as HTMLButtonElement).addEventListener("click", () => {
@@ -1026,6 +1164,11 @@ function tick() {
     }
   }
   updateCoins(now);
+  // Opening flip-off: my coins bob for attention until I tap them.
+  if (openingTapArmed) {
+    const bob = 1 + Math.abs(Math.sin(now * 0.004)) * 0.16;
+    for (const coin of myCoins) coin.mesh.scale.setScalar(bob);
+  }
   renderer.render(scene, camera);
 }
 tick();
