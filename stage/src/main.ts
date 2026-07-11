@@ -1379,6 +1379,65 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Install as an app — a real "download & install" flow, no store.
+//   - Chrome/Edge/Android fire beforeinstallprompt: we stash it and show the
+//     menu's "Install Regatta" button, which opens the native install dialog.
+//   - iOS Safari has no prompt API: if we're on iOS and not already installed,
+//     show the button anyway and explain Add-to-Home-Screen.
+//   - Already installed (standalone) or unsupported: button stays hidden.
+// ---------------------------------------------------------------------------
+{
+  const menuInstallBtn = document.getElementById("menu-install") as HTMLButtonElement;
+  const cornerInstallBtn = document.getElementById("install-toggle") as HTMLButtonElement;
+  const installButtons = [menuInstallBtn, cornerInstallBtn];
+  const iosModal = document.getElementById("ios-install") as HTMLDivElement;
+  const iosClose = document.getElementById("ios-install-close") as HTMLButtonElement;
+
+  interface BeforeInstallPromptEvent extends Event {
+    prompt: () => Promise<void>;
+    userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+  }
+  let deferredPrompt: BeforeInstallPromptEvent | null = null;
+
+  const isStandalone =
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches ||
+    (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  const showInstall = () => installButtons.forEach((b) => b.classList.add("show"));
+  const hideInstall = () => installButtons.forEach((b) => b.classList.remove("show"));
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredPrompt = e as BeforeInstallPromptEvent;
+    showInstall();
+  });
+
+  // iOS never fires the event, so surface the button for the manual path.
+  if (isIOS && !isStandalone) showInstall();
+
+  const doInstall = async () => {
+    if (deferredPrompt) {
+      await deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+      deferredPrompt = null;
+      hideInstall();
+    } else if (isIOS) {
+      iosModal.classList.add("show");
+    }
+  };
+  menuInstallBtn.addEventListener("click", doInstall);
+  cornerInstallBtn.addEventListener("click", doInstall);
+
+  iosClose.addEventListener("click", () => iosModal.classList.remove("show"));
+  iosModal.addEventListener("click", (e) => {
+    if (e.target === iosModal) iosModal.classList.remove("show");
+  });
+  window.addEventListener("appinstalled", hideInstall);
+}
+
 // Startup routing: resume a live seat if we have one (page reload), else
 // follow a ?room=CODE deep link, else show the mode menu.
 {

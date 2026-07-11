@@ -150,6 +150,16 @@
         font-size: 28px; cursor: pointer;
       }
       #guide-toggle:hover { background: rgba(0, 0, 0, 0.8); }
+
+      /* --- Install app corner button (shown only when installable) --- */
+      #install-toggle {
+        position: fixed; bottom: 14px; right: 162px;
+        background: rgba(0, 0, 0, 0.6); color: #ffc98a; border: none;
+        width: 64px; height: 64px; border-radius: 32px;
+        font-size: 26px; cursor: pointer; display: none;
+      }
+      #install-toggle:hover { background: rgba(0, 0, 0, 0.85); }
+      #install-toggle.show { display: block; }
       #guide-overlay {
         position: fixed; inset: 0; z-index: 150;
         background: rgba(8, 6, 4, 0.72);
@@ -277,7 +287,45 @@
       }
       #menu .join-row button:hover { background: #416085; }
       #menu .menu-error { color: #ff8080; font-size: 13px; margin-top: 12px; min-height: 16px; }
+      #menu #menu-install {
+        display: none; width: 100%; margin-top: 12px;
+        background: transparent; color: #ffc98a;
+        border: 1px solid rgba(255, 201, 138, 0.4); border-radius: 8px;
+        padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+      }
+      #menu #menu-install:hover { background: rgba(255, 201, 138, 0.12); }
+      #menu #menu-install.show { display: block; }
       #menu .credit { font-size: 11px; color: #6a6a80; margin-top: 14px; }
+
+      /* --- iOS Add-to-Home-Screen instructions --- */
+      #ios-install {
+        position: fixed; inset: 0; z-index: 260;
+        background: rgba(10, 10, 15, 0.85);
+        display: none; justify-content: center; align-items: center;
+        backdrop-filter: blur(3px);
+      }
+      #ios-install.show { display: flex; }
+      #ios-install .card {
+        position: relative;
+        background: linear-gradient(160deg, #262636, #16161e);
+        border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px;
+        padding: 28px 32px; max-width: 340px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+      }
+      #ios-install h2 { font-size: 20px; color: #ffc98a; margin-bottom: 10px; }
+      #ios-install p { font-size: 14px; color: #c8c8d4; margin-bottom: 14px; }
+      #ios-install ol { margin: 0 0 4px 20px; font-size: 14px; line-height: 1.7; color: #e0e0e8; }
+      #ios-install b { color: #fff; }
+      #ios-install .ios-share {
+        display: inline-block; color: #80b8ff; font-size: 16px;
+        transform: translateY(2px);
+      }
+      #ios-install .close {
+        position: absolute; top: 8px; right: 12px;
+        background: transparent; border: none; color: #6a6a80;
+        font-size: 24px; line-height: 1; cursor: pointer;
+      }
+      #ios-install .close:hover { color: #ccc; }
       #menu .credit a { color: #80b8ff; text-decoration: none; }
       #menu .credit a:hover { text-decoration: underline; }
 
@@ -310,6 +358,7 @@
     <button id="mute-toggle" title="Toggle sound">🔊</button>
     <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
     <button id="guide-toggle" title="How to play">📖</button>
+    <button id="install-toggle" title="Install Regatta">⬇</button>
     <div id="guide-overlay">
       <div id="guide-book">
         <button id="guide-close" title="Close">✕</button>
@@ -333,6 +382,7 @@
           <button id="menu-join">Join</button>
         </div>
         <div class="menu-error" id="menu-error"></div>
+        <button id="menu-install">⬇  Install Regatta</button>
         <div class="credit">
           Board &amp; pieces sculpted by
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
@@ -344,6 +394,18 @@
       <div class="code" id="room-code"></div>
       <div class="hint">Share this code — or the link below — with your opponent</div>
       <div class="link" id="room-link"></div>
+    </div>
+    <div id="ios-install">
+      <div class="card">
+        <button class="close" id="ios-install-close" title="Close">×</button>
+        <h2>Install Regatta</h2>
+        <p>Add it to your Home Screen to play fullscreen like an app:</p>
+        <ol>
+          <li>Tap the <b>Share</b> button <span class="ios-share">⎙</span> in the toolbar</li>
+          <li>Scroll and tap <b>Add to Home Screen</b></li>
+          <li>Tap <b>Add</b> — Regatta lands next to your other apps</li>
+        </ol>
+      </div>
     </div>
     <div id="win-screen">
       <div class="card">
