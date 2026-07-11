@@ -78,6 +78,46 @@ class AudioBank {
     }
   }
 
+  /** A hearty swig: three descending "glug" blips with a breathy tail,
+   *  synthesized so it needs no asset and rides the master volume/mute. */
+  gulp(): void {
+    if (!this.unlocked || this.muted) return;
+    const ctx = this.ensureCtx();
+    const out = ctx.createGain();
+    out.gain.value = this.effectiveGain() * 2.2;
+    out.connect(this.masterGain!);
+    const t0 = ctx.currentTime;
+    for (let i = 0; i < 3; i++) {
+      const t = t0 + i * 0.16;
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(300 - i * 55, t);
+      osc.frequency.exponentialRampToValueAtTime(95 - i * 12, t + 0.13);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.5, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+      osc.connect(g).connect(out);
+      osc.start(t);
+      osc.stop(t + 0.16);
+    }
+    // satisfied exhale: a short filtered-noise breath after the last glug
+    const dur = 0.25;
+    const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    const noise = ctx.createBufferSource();
+    noise.buffer = buf;
+    const filt = ctx.createBiquadFilter();
+    filt.type = "bandpass";
+    filt.frequency.value = 900;
+    filt.Q.value = 0.8;
+    const ng = ctx.createGain();
+    ng.gain.value = 0.18;
+    noise.connect(filt).connect(ng).connect(out);
+    noise.start(t0 + 0.52);
+  }
+
   /** Fire-panel crackle mixer, 0..1 (0.5 = designed level). */
   setCrackleVolume(v: number): void {
     this.crackleVolume = Math.min(1, Math.max(0, v));
