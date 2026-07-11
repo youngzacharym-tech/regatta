@@ -156,7 +156,23 @@ gltfLoader.load(
   (err) => console.error("Failed to load", GLB_URL, err),
 );
 
-// Each captain gets a beer — one mug per side of the table.
+// Each captain gets a beer — one mug per side of the table. Every stone
+// brought home earns a swig: the mug tilts back, gulps, and the foam head
+// shrinks a quarter. mug.glb ships as mug_body + mug_foam (foam pivoted at
+// the rim so scaling its Y squashes the head down into the tankard).
+interface MugRig {
+  root: THREE.Group;
+  foam: THREE.Object3D | null;
+  basePos: THREE.Vector3;
+  baseRotY: number;
+  /** Sips taken (0..4). 4 = slammed empty. */
+  sips: number;
+  anim: { start: number; kind: "sip" | "slam" } | null;
+}
+let myMug: MugRig | null = null;
+let theirMug: MugRig | null = null;
+const FOAM_SCALES = [1, 0.68, 0.42, 0.2, 0.0001];
+
 gltfLoader.load(
   "/mug.glb",
   (gltf) => {
@@ -166,19 +182,92 @@ gltfLoader.load(
         o.receiveShadow = true;
       }
     });
-    const place = (x: number, z: number, rotY: number) => {
-      const mug = gltf.scene.clone(true);
+    const place = (x: number, z: number, rotY: number): MugRig => {
+      const mug = gltf.scene.clone(true) as THREE.Group;
       mug.scale.setScalar(1.15);
       mug.position.set(x, TABLE_Y + 0.575, z);
       mug.rotation.y = rotY;
       scene.add(mug);
+      return {
+        root: mug,
+        foam: mug.getObjectByName("mug_foam") ?? null,
+        basePos: mug.position.clone(),
+        baseRotY: rotY,
+        sips: 0,
+        anim: null,
+      };
     };
-    place(0.5, 2.12, -2.44); // beside my coins, handle turned out
-    place(0.5, -2.0, 2.4);   // the opponent's, across the table
+    myMug = place(0.5, 2.12, -2.44); // beside my coins, handle turned out
+    theirMug = place(0.5, -2.0, 2.4); // the opponent's, across the table
   },
   undefined,
   (err) => console.error("Failed to load /mug.glb", err),
 );
+
+function applyFoam(rig: MugRig): void {
+  if (!rig.foam) return;
+  const s = FOAM_SCALES[Math.min(rig.sips, 4)];
+  rig.foam.visible = rig.sips < 4;
+  rig.foam.scale.set(0.45 + 0.55 * s, s, 0.45 + 0.55 * s);
+}
+
+function drinkSip(rig: MugRig, kind: "sip" | "slam"): void {
+  if (rig.anim || rig.sips >= 4) return;
+  rig.anim = { start: performance.now(), kind };
+  audio.gulp();
+}
+
+function resetMug(rig: MugRig | null): void {
+  if (!rig) return;
+  rig.sips = 0;
+  rig.anim = null;
+  rig.root.position.copy(rig.basePos);
+  rig.root.rotation.set(0, rig.baseRotY, 0);
+  applyFoam(rig);
+}
+
+/** Drive mug drink/slam animations each frame; the foam step lands at the
+ *  tilt's peak so the shrink happens "while drinking". */
+function updateMugs(now: number): void {
+  for (const rig of [myMug, theirMug]) {
+    if (!rig || !rig.anim) continue;
+    const { start, kind } = rig.anim;
+    const dur = kind === "slam" ? 1500 : 950;
+    const t = (now - start) / dur;
+    if (t >= 1) {
+      rig.anim = null;
+      rig.sips = kind === "slam" ? 4 : Math.min(rig.sips + 1, 4);
+      applyFoam(rig);
+      rig.root.position.copy(rig.basePos);
+      rig.root.rotation.set(0, rig.baseRotY, 0);
+      continue;
+    }
+    const maxTilt = kind === "slam" ? 1.9 : 1.15;
+    let tilt: number;
+    let lift: number;
+    if (kind === "slam" && t > 0.62) {
+      // the slam: drop fast from the deep tilt, small thud settle
+      const d = (t - 0.62) / 0.38;
+      tilt = maxTilt * (1 - d * d);
+      lift = 0.55 * (1 - d) + (d > 0.9 ? -0.03 * Math.sin((d - 0.9) * 31) : 0);
+    } else {
+      const phase = kind === "slam" ? t / 0.62 : t;
+      tilt = maxTilt * Math.sin(Math.min(phase, 1) * Math.PI * 0.5) * (kind === "sip" && t > 0.55 ? 1 - (t - 0.55) / 0.45 : 1);
+      lift = (kind === "slam" ? 0.55 : 0.4) * Math.sin(Math.min(phase, 1) * Math.PI * 0.5) * (kind === "sip" && t > 0.55 ? 1 - (t - 0.55) / 0.45 : 1);
+    }
+    rig.root.rotation.x = -tilt;
+    rig.root.position.y = rig.basePos.y + lift;
+    // foam shrinks at the drink's peak, once
+    if (t > 0.5 && rig.sips < (kind === "slam" ? 4 : rig.sips + 1)) {
+      const target = kind === "slam" ? 4 : rig.sips + 1;
+      if (rig.foam) {
+        const s = FOAM_SCALES[Math.min(target, 4)];
+        rig.foam.visible = target < 4;
+        rig.foam.scale.set(0.45 + 0.55 * s, s, 0.45 + 0.55 * s);
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Token markers (8 cylinders — 4 per player)
@@ -386,6 +475,68 @@ myCoinGlow.position.set(COIN_PILE_X, TABLE_Y + 0.006, MY_COIN_Z);
 myCoinGlow.renderOrder = -1;
 myCoinGlow.visible = false;
 scene.add(myCoinGlow);
+
+// Same cue under my mug while a celebratory swig is waiting to be drunk.
+const myMugGlow = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.95, 0.95),
+  new THREE.MeshBasicMaterial({
+    map: makeTightGlowTexture(),
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    opacity: 0.5,
+  }),
+);
+myMugGlow.rotation.x = -Math.PI / 2;
+myMugGlow.position.set(0.5, TABLE_Y + 0.006, 2.12); // under my mug
+myMugGlow.renderOrder = -1;
+myMugGlow.visible = false;
+scene.add(myMugGlow);
+
+// Escaped-token tallies per REAL seat, updated from every state broadcast.
+// A drop back to zero means a fresh match — mugs refill.
+let escapedByOwner: { p1: number; p2: number } = { p1: 0, p2: 0 };
+
+// Dev affordance (localhost only): ?sips=N pretends N of my tokens escaped
+// so the mug flow can be exercised without playing a full game.
+const debugSips =
+  location.hostname === "localhost"
+    ? Math.min(4, Number(new URLSearchParams(location.search).get("sips") ?? 0) || 0)
+    : 0;
+
+/** Swigs I've earned but not yet drunk. The 4th (victory) swig pours itself. */
+function myAvailableSips(): number {
+  if (!myMug || myMug.anim || myMug.sips >= 4) return 0;
+  const mySide: PlayerId = myRole ?? "p1";
+  const earned = Math.min(escapedByOwner[mySide] + debugSips, 4);
+  return Math.max(0, earned - myMug.sips);
+}
+
+function handleEscapeChanges(now: { p1: number; p2: number }): void {
+  const mySide: PlayerId = myRole ?? "p1";
+  const otherSide: PlayerId = mySide === "p1" ? "p2" : "p1";
+  if (now.p1 < escapedByOwner.p1 || now.p2 < escapedByOwner.p2) {
+    // Rematch: the tallies went backwards — refill both mugs.
+    resetMug(myMug);
+    resetMug(theirMug);
+  } else {
+    // The opponent celebrates their own escapes (their tap on their screen;
+    // an automatic swig on ours) once the escape flight has landed.
+    if (now[otherSide] > escapedByOwner[otherSide]) {
+      const total = now[otherSide];
+      setTimeout(() => {
+        if (theirMug) drinkSip(theirMug, total >= 4 ? "slam" : "sip");
+      }, ESCAPE_FLIGHT_MS + 300);
+    }
+    // My 4th is the victory swig — it pours itself as part of the flourish.
+    if (now[mySide] >= 4 && escapedByOwner[mySide] < 4) {
+      setTimeout(() => {
+        if (myMug) drinkSip(myMug, "slam");
+      }, ESCAPE_FLIGHT_MS + 300);
+    }
+  }
+  escapedByOwner = { ...now };
+}
 
 // ---------------------------------------------------------------------------
 // The fire in the corner of the room — a warm flickering point light and a
@@ -622,6 +773,14 @@ function refreshMarkers(state: GameState) {
 
     marker.lastPosition = token.position;
   });
+
+  // Beer bookkeeping: tally escaped tokens per seat and react to changes
+  // (earned swigs, the opponent's auto-swig, rematch refills).
+  const nowEscaped: { p1: number; p2: number } = { p1: 0, p2: 0 };
+  for (const t of state.tokens) {
+    if (t.position >= PATH_LENGTH) nowEscaped[t.owner]++;
+  }
+  handleEscapeChanges(nowEscaped);
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +916,17 @@ function findEligibleMeshUnderPointer(clientX: number, clientY: number): number 
   return null;
 }
 
+/** Generous hit zone around my mug — a swig should never miss. */
+function isMyMugUnderPointer(clientX: number, clientY: number): boolean {
+  if (!myMug) return false;
+  const v = myMug.basePos.clone();
+  v.y += 0.35; // aim at the mug's belly, not the table
+  v.project(camera);
+  const sx = (v.x * 0.5 + 0.5) * window.innerWidth;
+  const sy = (-v.y * 0.5 + 0.5) * window.innerHeight;
+  return Math.hypot(clientX - sx, clientY - sy) < 110;
+}
+
 canvas.addEventListener("pointerdown", (e) => {
   // Opening flip-off: same tap target and glow as the roll gate.
   if (openingTapArmed) {
@@ -765,6 +935,13 @@ canvas.addEventListener("pointerdown", (e) => {
       sendToServer({ type: "openingFlip" });
       hud.innerHTML = `<div>Flip for first move</div><div>Flipping…</div>`;
     }
+    return;
+  }
+  // A waiting swig: tap the mug, drink to the stone you brought home.
+  if (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY)) {
+    const mySide: PlayerId = myRole ?? "p1";
+    const earned = Math.min(escapedByOwner[mySide] + debugSips, 4);
+    drinkSip(myMug!, earned >= 4 && myMug!.sips === 3 ? "slam" : "sip");
     return;
   }
   // Roll gate: your flip happens when you tap your coin pile.
@@ -824,7 +1001,8 @@ canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
   const rollable =
-    (rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY);
+    ((rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY)) ||
+    (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY));
   canvas.style.cursor = hit !== null || capturable !== null || rollable ? "pointer" : "default";
   if (capturable !== null) {
     const m = markers[capturable];
@@ -1222,7 +1400,7 @@ function connect() {
         setTimeout(() => {
           showWinScreen(winner, stats);
           showPlayAgainButton();
-        }, WIN_SCREEN_DELAY_MS);
+        }, WIN_SCREEN_DELAY_MS + 1500); // extra beat: the winner's mug slams before the modal
         break;
       }
       case "error":
@@ -1287,6 +1465,9 @@ function resetToMenu(message: string) {
   rollPending = null;
   openingTapArmed = false;
   seenOpeningFlips = { p1: null, p2: null };
+  escapedByOwner = { p1: 0, p2: 0 };
+  resetMug(myMug);
+  resetMug(theirMug);
   hideWinScreen();
   hideRoomInfo();
   movesEl.innerHTML = "";
@@ -1347,8 +1528,9 @@ const GUIDE_SPREADS: [string, string][] = [
      table &rsaquo;</p>`,
     `<h2>The Table</h2>
      <ul>
-       <li><b>Your stones</b> bear the <span class="gold">red star</span> and
-       wait in a pile by your coins. The enemy's carry the blue blossom.</li>
+       <li><b>Your stones</b> bear the <span class="gold">red blossom</span>,
+       matching your shore's stamps, and wait in a pile by your coins. The
+       enemy's carry the blue star.</li>
        <li><b>Your coins</b> are the four metal pieces stacked in front of
        you. They are your dice.</li>
        <li><b>Your shore</b> is the red row nearest you. The middle row is
@@ -1382,7 +1564,10 @@ const GUIDE_SPREADS: [string, string][] = [
        <li>Two of your own stones cannot share a tile.</li>
        <li>The final dock demands an <b>exact roll</b> — overshoot and the
        stone must wait.</li>
-       <li>First to bring <b>all four stones home</b> wins the race.</li>
+       <li>Every stone brought home earns a <span class="gold">swig of
+       ale</span> — your mug glows; tap it and drink to the crossing.</li>
+       <li>First to bring <b>all four stones home</b> wins the race — and
+       drains the mug.</li>
      </ul>`,
   ],
 ];
@@ -1465,7 +1650,12 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
     window.matchMedia("(display-mode: standalone)").matches ||
     window.matchMedia("(display-mode: fullscreen)").matches ||
     (navigator as Navigator & { standalone?: boolean }).standalone === true;
-  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  // iPadOS ships a "Macintosh" user agent (desktop-class Safari), so the
+  // classic regex misses iPads — but no real Mac has a touchscreen, so a
+  // "Mac" with any touch points is an iPad.
+  const isIOS =
+    /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.userAgent.includes("Macintosh") && navigator.maxTouchPoints > 0);
 
   const showInstall = () => installButtons.forEach((b) => b.classList.add("show"));
   const hideInstall = () => installButtons.forEach((b) => b.classList.remove("show"));
@@ -1562,6 +1752,8 @@ function tick() {
   (fireSprite.material as THREE.SpriteMaterial).opacity =
     fireCfg.opacity + 0.2 * fireCfg.flicker * Math.abs(Math.sin(now * 0.013));
   updateCoins(now);
+  updateMugs(now);
+  myMugGlow.visible = myAvailableSips() > 0;
   renderer.render(scene, camera);
 }
 tick();

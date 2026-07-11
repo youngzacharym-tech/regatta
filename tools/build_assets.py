@@ -35,6 +35,14 @@ SRC = os.environ.get("REGATTA_SRC", "/Users/myrm/Desktop/Matcap regatta.glb")
 # When present, they replace the scene's white PlayerA/B sculpts as tokens.
 # Note the crossover: PlayerB is painted RED and the viewer is always red
 # (token_p1), so B goes to p1 and the blue-painted A to p2.
+#
+# FIXME (2026-07-11): that crossover put STAR tokens on the blossom-stamped
+# red field (and blossoms on the star field). The Soulframe reference pairs
+# red BLOSSOM tokens with the red blossom shore. pieces.glb has been
+# corrected downstream (tokens rebuilt from the original sculpts: PlayerA
+# blossom -> token_p1 painted red, PlayerB star -> token_p2 painted blue).
+# Next time these are regenerated from the painted sources, repaint to match:
+# blossom sculpt in red for p1, star sculpt in blue for p2.
 TOKEN_SRC = {
     "token_p1": os.environ.get("REGATTA_TOKEN_A", "/Users/myrm/Downloads/Regatta_PlayerB color.glb"),
     "token_p2": os.environ.get("REGATTA_TOKEN_B", "/Users/myrm/Downloads/Regatta_PlayerA color.glb"),
