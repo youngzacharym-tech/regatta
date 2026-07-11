@@ -79,9 +79,15 @@ ships a stale server bundle.
 
 ## Board assets
 
+The board, tokens, and coin were sculpted by
+**[pek_andrei](https://cults3d.com/en/3d-model/game/regatta-game-board)**
+(available on Cults3D) and appear here **with the artist's blessing** —
+thank you! Please don't lift the models out of this repo; if you want them,
+buy his kit.
+
 `stage/public/regatta.glb` (board) and `pieces.glb` (tokens/coin) are
-Draco-compressed exports from a Blender scene built out of Nomad Sculpt
-meshes. The Blender-side build scripts (vertex painting, game-space
-transform, measured tile-coordinate output for `layout.ts`) live alongside
-the `.blend` source, outside this repo. `compress-glb.ps1` handles
-compression when a new export lands.
+Draco-compressed exports from a Blender scene built out of those sculpts.
+The Blender-side build scripts (vertex painting, game-space transform,
+measured tile-coordinate output for `layout.ts`) live alongside the
+`.blend` source, outside this repo. `compress-glb.ps1` handles compression
+when a new export lands.
