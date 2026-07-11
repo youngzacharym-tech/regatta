@@ -4,7 +4,7 @@
   "description": "A two-player race across the board — play a friend or the computer.",
   "start_url": "/",
   "scope": "/",
-  "display": "standalone",
+  "display": "fullscreen",
   "orientation": "landscape",
   "background_color": "#111116",
   "theme_color": "#16161e",

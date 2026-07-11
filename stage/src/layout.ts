@@ -12,14 +12,14 @@
 //   14     finish tile         (right-to-left continuation, exact roll to enter)
 //
 // These coordinates are MEASURED, not eyeballed: the board GLB is exported
-// from regatta-board.blend already in game space (tile-grid centered at
-// origin, long axis on X, scale 0.02), and each entry below is the actual
-// center of the hand-placed tile stamp, printed by build_board.py during
-// export. Per-tile y = stamp top surface + half a token's height.
+// by tools/build_assets.py from the painted sculpt, already in world space
+// (tile grid centered at origin, long axis on X). Each entry below is the
+// measured center of the tile's white border frame, printed by the build
+// script during export. Per-tile y = stamp relief top + token seat offset.
 //
-// The board mesh is MIRRORED in main.ts (boardGroup.scale.x = -1) to face
-// the direction Regatta's board normally does, so every measured x below is
-// negated relative to build_board.py's output.
+// The board is NOT mirrored at runtime anymore — the painted sculpt is
+// oriented like Soulframe's table (finish end +X, viewer's red row +Z), so
+// the export IS on-screen space.
 //
 // P1 = red row (near camera, +Z). P2 = blue row (far, -Z). Middle contested
 // row is shared, so entries 4..11 are identical in both arrays.
@@ -34,54 +34,58 @@ export interface WorldPos {
 }
 
 const P1_TILES: WorldPos[] = [
-  { x: -0.266, y: 0.178, z: 0.540 }, // 0
-  { x: -0.806, y: 0.186, z: 0.540 }, // 1
-  { x: -1.346, y: 0.172, z: 0.540 }, // 2
-  { x: -1.886, y: 0.185, z: 0.540 }, // 3  SHIELD
-  { x: -1.886, y: 0.176, z: 0.060 }, // 4
-  { x: -1.348, y: 0.170, z: 0.048 }, // 5
-  { x: -0.808, y: 0.170, z: 0.048 }, // 6
-  { x: -0.242, y: 0.178, z: -0.009 }, // 7  SHIELD
-  { x: 0.292, y: 0.176, z: 0.033 },  // 8
-  { x: 0.820, y: 0.195, z: 0.042 },  // 9
-  { x: 1.368, y: 0.161, z: 0.056 },  // 10
-  { x: 1.886, y: 0.170, z: 0.068 },  // 11
-  { x: 1.835, y: 0.212, z: 0.529 },  // 12
-  { x: 1.296, y: 0.227, z: 0.540 },  // 13 SHIELD
-  { x: 0.620, y: 0.194, z: 0.540 },  // 14 FINISH
+  { x: -0.272, y: 0.140, z: 0.539 }, // 0
+  { x: -0.811, y: 0.141, z: 0.539 }, // 1
+  { x: -1.350, y: 0.140, z: 0.539 }, // 2
+  { x: -1.889, y: 0.140, z: 0.539 }, // 3  SHIELD
+  { x: -1.889, y: 0.140, z: 0.000 }, // 4
+  { x: -1.350, y: 0.140, z: 0.000 }, // 5
+  { x: -0.811, y: 0.140, z: 0.000 }, // 6
+  { x: -0.272, y: 0.140, z: 0.000 }, // 7  SHIELD
+  { x: 0.270, y: 0.129, z: 0.000 },  // 8
+  { x: 0.812, y: 0.129, z: 0.000 },  // 9
+  { x: 1.351, y: 0.129, z: 0.000 },  // 10
+  { x: 1.890, y: 0.129, z: 0.000 },  // 11
+  { x: 1.890, y: 0.129, z: 0.539 },  // 12
+  { x: 1.351, y: 0.129, z: 0.539 },  // 13 SHIELD
+  { x: 0.776, y: 0.202, z: 0.589 },  // 14 FINISH
 ];
 
 const P2_TILES: WorldPos[] = [
-  { x: -0.266, y: 0.195, z: -0.540 }, // 0
-  { x: -0.806, y: 0.195, z: -0.540 }, // 1
-  { x: -1.352, y: 0.198, z: -0.521 }, // 2
-  { x: -1.886, y: 0.178, z: -0.540 }, // 3  SHIELD
-  { x: -1.886, y: 0.176, z: 0.060 },  // 4
-  { x: -1.348, y: 0.170, z: 0.048 },  // 5
-  { x: -0.808, y: 0.170, z: 0.048 },  // 6
-  { x: -0.242, y: 0.178, z: -0.009 }, // 7  SHIELD
-  { x: 0.292, y: 0.176, z: 0.033 },   // 8
-  { x: 0.820, y: 0.195, z: 0.042 },   // 9
-  { x: 1.368, y: 0.161, z: 0.056 },   // 10
-  { x: 1.886, y: 0.170, z: 0.068 },   // 11
-  { x: 1.831, y: 0.195, z: -0.511 },  // 12
-  { x: 1.306, y: 0.180, z: -0.511 },  // 13 SHIELD
-  { x: 0.634, y: 0.196, z: -0.540 },  // 14 FINISH
+  { x: -0.272, y: 0.140, z: -0.539 }, // 0
+  { x: -0.811, y: 0.140, z: -0.539 }, // 1
+  { x: -1.350, y: 0.140, z: -0.539 }, // 2
+  { x: -1.889, y: 0.140, z: -0.539 }, // 3  SHIELD
+  { x: -1.889, y: 0.140, z: 0.000 },  // 4
+  { x: -1.350, y: 0.140, z: 0.000 },  // 5
+  { x: -0.811, y: 0.140, z: 0.000 },  // 6
+  { x: -0.272, y: 0.140, z: 0.000 },  // 7  SHIELD
+  { x: 0.270, y: 0.129, z: 0.000 },   // 8
+  { x: 0.812, y: 0.129, z: 0.000 },   // 9
+  { x: 1.351, y: 0.129, z: 0.000 },   // 10
+  { x: 1.890, y: 0.129, z: 0.000 },   // 11
+  { x: 1.890, y: 0.130, z: -0.539 },  // 12
+  { x: 1.351, y: 0.129, z: -0.539 },  // 13 SHIELD
+  { x: 0.776, y: 0.209, z: -0.591 },  // 14 FINISH
 ];
 
 export function tileWorldPos(player: PlayerId, tile: number): WorldPos {
   return (player === "p1" ? P1_TILES : P2_TILES)[tile];
 }
 
-const OFF_BOARD_Y = 0.18;
+// Off-board pieces rest on the tabletop (table surface at y = -0.42 in
+// main.ts; the token pivot puts the base at mesh y - 0.08).
+const OFF_BOARD_Y = -0.34;
 
-/** Reserve pool sits off the board past the start end (-X), own side.
- *  Spacing fits the sculpted tokens (0.485 wide). */
+/** Reserve stones wait beside the player's own coin pile. Spaced wider than a
+ *  stone's diameter (~0.42) and staggered a touch in z so the models never
+ *  intersect each other. */
 export function reservePos(player: PlayerId, slot: number): WorldPos {
+  const zbase = player === "p1" ? 2.05 : -1.9;
   return {
-    x: -1.9 - slot * 0.52,
+    x: -1.28 - slot * 0.5,
     y: OFF_BOARD_Y,
-    z: player === "p1" ? 1.65 : -1.65,
+    z: zbase + (slot % 2 === 0 ? 0.07 : -0.07),
   };
 }
 

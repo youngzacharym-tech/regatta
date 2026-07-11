@@ -98,35 +98,132 @@
         background: rgba(255, 255, 255, 0.08); color: #ccc;
       }
 
-      /* --- Audio unlock overlay --- */
-      #audio-unlock {
-        position: fixed; inset: 0; z-index: 200;
-        background: rgba(10, 10, 15, 0.85);
-        display: flex; justify-content: center; align-items: center;
-        color: #ddd; font-size: 15px; cursor: pointer;
-        backdrop-filter: blur(2px);
-      }
-      #audio-unlock.hidden { display: none; }
-      #audio-unlock .box {
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        padding: 22px 32px; border-radius: 10px;
-        text-align: center; background: rgba(30, 30, 40, 0.6);
-      }
-      #audio-unlock .box b { color: #ffd370; font-size: 17px; }
-
-      /* --- Mute toggle button --- */
-      #mute-toggle {
-        position: fixed; bottom: 10px; right: 10px;
-        background: rgba(0, 0, 0, 0.6); color: #eee; border: none;
+      /* --- Fullscreen exit button (only visible while in fullscreen) --- */
+      #fs-exit {
+        position: fixed; top: 12px; right: 12px; z-index: 210;
+        background: rgba(0, 0, 0, 0.55); color: #eee; border: none;
         width: 40px; height: 40px; border-radius: 20px;
-        font-size: 18px; cursor: pointer;
+        font-size: 20px; line-height: 1; cursor: pointer; display: none;
+      }
+      #fs-exit:hover { background: rgba(0, 0, 0, 0.85); }
+      body.fs #fs-exit { display: block; }
+
+      /* --- Rotate-to-landscape hint (phones held portrait) --- */
+      #rotate-hint {
+        position: fixed; inset: 0; z-index: 220;
+        background: #0d0906;
+        display: none; flex-direction: column;
+        justify-content: center; align-items: center; gap: 18px;
+        color: #e8d8c0; text-align: center; padding: 24px;
+      }
+      #rotate-hint.show { display: flex; }
+      #rotate-hint .glyph {
+        font-size: 64px; animation: rotateNudge 1.8s ease-in-out infinite;
+      }
+      #rotate-hint b { font-size: 18px; color: #ffc98a; }
+      #rotate-hint span { font-size: 14px; opacity: 0.8; max-width: 300px; }
+      @keyframes rotateNudge {
+        0%, 60% { transform: rotate(0deg); }
+        80%, 100% { transform: rotate(90deg); }
+      }
+
+      /* --- Mute toggle button + volume slider --- */
+      #mute-toggle {
+        position: fixed; bottom: 14px; right: 14px;
+        background: rgba(0, 0, 0, 0.6); color: #eee; border: none;
+        width: 64px; height: 64px; border-radius: 32px;
+        font-size: 30px; cursor: pointer;
       }
       #mute-toggle:hover { background: rgba(0, 0, 0, 0.8); }
+      #volume {
+        position: fixed; bottom: 92px; right: 14px;
+        width: 64px; height: 140px;
+        writing-mode: vertical-lr; direction: rtl;
+        accent-color: #ffc98a; cursor: pointer;
+      }
+
+      /* --- Game guide booklet --- */
+      #guide-toggle {
+        position: fixed; bottom: 14px; right: 88px;
+        background: rgba(0, 0, 0, 0.6); border: none;
+        width: 64px; height: 64px; border-radius: 32px;
+        font-size: 28px; cursor: pointer;
+      }
+      #guide-toggle:hover { background: rgba(0, 0, 0, 0.8); }
+
+      /* --- Install app corner button (shown only when installable) --- */
+      #install-toggle {
+        position: fixed; bottom: 14px; right: 162px;
+        background: rgba(0, 0, 0, 0.6); color: #ffc98a; border: none;
+        width: 64px; height: 64px; border-radius: 32px;
+        font-size: 26px; cursor: pointer; display: none;
+      }
+      #install-toggle:hover { background: rgba(0, 0, 0, 0.85); }
+      #install-toggle.show { display: block; }
+      #guide-overlay {
+        position: fixed; inset: 0; z-index: 150;
+        background: rgba(8, 6, 4, 0.72);
+        display: none; justify-content: center; align-items: center;
+      }
+      #guide-overlay.show { display: flex; }
+      #guide-book {
+        position: relative;
+        width: min(760px, 92vw); height: min(480px, 80vh);
+        display: flex;
+        background: linear-gradient(100deg, #e9dcbd 0%, #f2e7cd 48%, #dccfae 52%, #eee1c2 100%);
+        border: 10px solid #3a2517;
+        border-radius: 10px 14px 14px 10px;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.7), inset 0 0 40px rgba(90, 60, 20, 0.25);
+        color: #3b2a17; font-family: Georgia, "Times New Roman", serif;
+      }
+      #guide-book .page {
+        flex: 1; padding: 26px 30px; overflow-y: auto;
+        font-size: 14px; line-height: 1.55;
+      }
+      #guide-book .page h2 {
+        font-size: 19px; margin-bottom: 10px; letter-spacing: 0.5px;
+        border-bottom: 1px solid rgba(90, 60, 20, 0.35); padding-bottom: 6px;
+      }
+      #guide-book .page p { margin-bottom: 9px; }
+      #guide-book .page ul { margin: 0 0 9px 18px; }
+      #guide-book .page li { margin-bottom: 5px; }
+      #guide-book .page .gold { color: #a06010; font-weight: bold; }
+      #guide-book .spine {
+        width: 3px; align-self: stretch;
+        background: linear-gradient(to right, rgba(60, 35, 10, 0.05), rgba(60, 35, 10, 0.5), rgba(60, 35, 10, 0.05));
+      }
+      #guide-book.flip .page { animation: pageflip 0.28s ease-out; }
+      @keyframes pageflip {
+        0% { opacity: 0.2; transform: perspective(900px) rotateY(-14deg); }
+        100% { opacity: 1; transform: perspective(900px) rotateY(0deg); }
+      }
+      #guide-close {
+        position: absolute; top: -4px; right: 2px;
+        background: none; border: none; font-size: 22px;
+        color: #6a4a25; cursor: pointer;
+      }
+      .guide-arrow {
+        position: absolute; bottom: 10px;
+        background: none; border: none; font-size: 26px;
+        color: #6a4a25; cursor: pointer; padding: 4px 10px;
+      }
+      .guide-arrow:hover { color: #a06010; }
+      #guide-prev { left: 12px; }
+      #guide-next { right: 12px; }
+      #guide-dots {
+        position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 8px;
+      }
+      #guide-dots span {
+        width: 8px; height: 8px; border-radius: 4px;
+        background: rgba(90, 60, 20, 0.3);
+      }
+      #guide-dots span.on { background: #a06010; }
 
       /* --- Event announcement banner --- */
       #announce {
         position: fixed;
-        top: 50%; left: 50%;
+        top: 16%; left: 50%;
         transform: translate(-50%, -50%);
         padding: 12px 22px; border-radius: 10px;
         font-size: 18px; font-weight: 600; letter-spacing: 0.3px;
@@ -190,46 +287,47 @@
       }
       #menu .join-row button:hover { background: #416085; }
       #menu .menu-error { color: #ff8080; font-size: 13px; margin-top: 12px; min-height: 16px; }
+      #menu #menu-install {
+        display: none; width: 100%; margin-top: 12px;
+        background: transparent; color: #ffc98a;
+        border: 1px solid rgba(255, 201, 138, 0.4); border-radius: 8px;
+        padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+      }
+      #menu #menu-install:hover { background: rgba(255, 201, 138, 0.12); }
+      #menu #menu-install.show { display: block; }
       #menu .credit { font-size: 11px; color: #6a6a80; margin-top: 14px; }
-      #menu .credit a { color: #80b8ff; text-decoration: none; }
-      #menu .credit a:hover { text-decoration: underline; }
 
-      /* --- How to Play overlay --- */
-      #howto {
+      /* --- iOS Add-to-Home-Screen instructions --- */
+      #ios-install {
         position: fixed; inset: 0; z-index: 260;
         background: rgba(10, 10, 15, 0.85);
         display: none; justify-content: center; align-items: center;
         backdrop-filter: blur(3px);
       }
-      #howto.show { display: flex; }
-      #howto .card {
+      #ios-install.show { display: flex; }
+      #ios-install .card {
         position: relative;
         background: linear-gradient(160deg, #262636, #16161e);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 16px;
-        padding: 26px 32px;
-        max-width: 480px; width: calc(100% - 40px);
-        max-height: 86vh; overflow-y: auto;
+        border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px;
+        padding: 28px 32px; max-width: 340px;
         box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
       }
-      #howto h2 { font-size: 22px; color: #ffd370; margin-bottom: 14px; letter-spacing: 0.5px; }
-      #howto ol { padding-left: 20px; }
-      #howto li { font-size: 14px; line-height: 1.55; color: #ccccdd; margin-bottom: 10px; }
-      #howto li b { color: #fff; }
-      #howto button.close {
-        position: absolute; top: 10px; right: 12px;
+      #ios-install h2 { font-size: 20px; color: #ffc98a; margin-bottom: 10px; }
+      #ios-install p { font-size: 14px; color: #c8c8d4; margin-bottom: 14px; }
+      #ios-install ol { margin: 0 0 4px 20px; font-size: 14px; line-height: 1.7; color: #e0e0e8; }
+      #ios-install b { color: #fff; }
+      #ios-install .ios-share {
+        display: inline-block; color: #80b8ff; font-size: 16px;
+        transform: translateY(2px);
+      }
+      #ios-install .close {
+        position: absolute; top: 8px; right: 12px;
         background: transparent; border: none; color: #6a6a80;
-        font-size: 22px; line-height: 1; cursor: pointer;
-        padding: 6px 12px; border-radius: 6px;
+        font-size: 24px; line-height: 1; cursor: pointer;
       }
-      #howto button.close:hover { background: rgba(255, 255, 255, 0.08); color: #ccc; }
-      #howto button.got-it {
-        display: block; margin: 16px auto 0;
-        background: #c73; color: white; border: none;
-        padding: 11px 26px; border-radius: 8px; font-size: 14px;
-        font-weight: 600; cursor: pointer;
-      }
-      #howto button.got-it:hover { background: #d84; }
+      #ios-install .close:hover { color: #ccc; }
+      #menu .credit a { color: #80b8ff; text-decoration: none; }
+      #menu .credit a:hover { text-decoration: underline; }
 
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
@@ -248,31 +346,43 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <button id="fs-exit" title="Exit fullscreen">✕</button>
+    <div id="rotate-hint">
+      <div class="glyph">📱</div>
+      <b>Rotate your device</b>
+      <span>Regatta plays in landscape. Turn your phone sideways to set sail.</span>
+    </div>
     <div id="hud">Connecting…</div>
     <div id="status">…</div>
     <div id="moves"></div>
     <button id="mute-toggle" title="Toggle sound">🔊</button>
-    <div id="announce"></div>
-    <div id="audio-unlock">
-      <div class="box">
-        <div><b>Tap to enable sound</b></div>
-        <div style="margin-top:6px; opacity:0.75; font-size:13px">
-          Browsers block audio until you interact with the page
-        </div>
+    <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
+    <button id="guide-toggle" title="How to play">📖</button>
+    <button id="install-toggle" title="Install Regatta">⬇</button>
+    <div id="guide-overlay">
+      <div id="guide-book">
+        <button id="guide-close" title="Close">✕</button>
+        <div class="page" id="guide-left"></div>
+        <div class="spine"></div>
+        <div class="page" id="guide-right"></div>
+        <button class="guide-arrow" id="guide-prev" title="Previous page">‹</button>
+        <button class="guide-arrow" id="guide-next" title="Next page">›</button>
+        <div id="guide-dots"></div>
       </div>
     </div>
+    <div id="announce"></div>
     <div id="menu">
       <div class="card">
         <h1>REGATTA</h1>
         <div class="tagline">a race across the board</div>
         <button class="mode" id="menu-cpu">Play vs Computer</button>
         <button class="mode alt" id="menu-create">Create Room</button>
-        <button class="mode alt" id="menu-howto">How to Play</button>
         <div class="join-row">
           <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" />
           <button id="menu-join">Join</button>
         </div>
         <div class="menu-error" id="menu-error"></div>
+        <button id="menu-install">⬇  Install Regatta</button>
         <div class="credit">
           Board &amp; pieces sculpted by
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
@@ -280,26 +390,22 @@
         </div>
       </div>
     </div>
-    <div id="howto">
-      <div class="card">
-        <button class="close" id="howto-close" title="Close">×</button>
-        <h2>How to Play</h2>
-        <ol>
-          <li><b>The goal:</b> race all 4 of your tokens around the board and off the white finish stone. First to get all 4 out wins. You're always <b>Red</b>, on the near side.</li>
-          <li><b>Flip for first move:</b> each match opens with both players tapping their coins — higher flip goes first, ties flip again.</li>
-          <li><b>Coins are your dice:</b> on your turn, 4 coins flip — the number that land <b>marked-side up</b> is how far one token moves. Flip a 0 and your turn is skipped.</li>
-          <li><b>Moving:</b> tokens you can move <b>pulse gold</b> — tap one and it goes. Each token has exactly one destination per flip.</li>
-          <li><b>The middle row is shared:</b> land on an enemy token there and it gets sent home to start over.</li>
-          <li><b>Shield tiles</b> (the ivory-stamped ones): tokens standing there can't be captured, and landing on one grants an <b>extra turn</b>.</li>
-          <li><b>Escaping:</b> you need the <b>exact</b> flip to land on the finish stone — overshoot and that token can't move this turn.</li>
-        </ol>
-        <button class="got-it" id="howto-gotit">Got it</button>
-      </div>
-    </div>
     <div id="room-info">
       <div class="code" id="room-code"></div>
       <div class="hint">Share this code — or the link below — with your opponent</div>
       <div class="link" id="room-link"></div>
+    </div>
+    <div id="ios-install">
+      <div class="card">
+        <button class="close" id="ios-install-close" title="Close">×</button>
+        <h2>Install Regatta</h2>
+        <p>Add it to your Home Screen to play fullscreen like an app:</p>
+        <ol>
+          <li>Tap the <b>Share</b> button <span class="ios-share">⎙</span> in the toolbar</li>
+          <li>Scroll and tap <b>Add to Home Screen</b></li>
+          <li>Tap <b>Add</b> — Regatta lands next to your other apps</li>
+        </ol>
+      </div>
     </div>
     <div id="win-screen">
       <div class="card">
