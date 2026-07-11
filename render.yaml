@@ -1,0 +1,23 @@
+# Render deployment config for Regatta.
+#
+# One "web service" that:
+#   1. Installs dependencies (referee: ws, tsx / stage: three, vite, ...)
+#   2. Runs `npm run build` to build the Vite bundle into stage/dist/
+#   3. Starts the referee, which serves both the WebSocket AND the static build
+#      from the same port (Render picks the port and sets $PORT).
+#
+# Free plan: sleeps after 15 min of inactivity. Cold start ~30 sec on first
+# request. Warm after a client connects. Fine for a friends-list demo.
+
+services:
+  - type: web
+    name: regatta
+    runtime: node
+    plan: free
+    autoDeploy: true
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production

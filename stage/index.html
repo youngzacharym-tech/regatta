@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Regatta</title>
+    <meta name="description" content="Regatta — a two-player race across the board. Play a friend or the computer." />
+    <meta name="theme-color" content="#16161e" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon-192.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #111; color: #eee; font-family: system-ui, sans-serif; }
+      #canvas { display: block; width: 100%; height: 100%; }
+      #hud {
+        position: fixed; top: 10px; left: 10px;
+        background: rgba(0,0,0,0.6); padding: 10px 14px; border-radius: 8px;
+        font-size: 14px; line-height: 1.5; min-width: 180px;
+      }
+      #hud b { color: #fff; }
+      #moves {
+        position: fixed; bottom: 10px; left: 10px; right: 10px;
+        display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+      }
+      #moves button {
+        background: #4a5; color: white; border: none; padding: 10px 14px;
+        border-radius: 6px; font-size: 14px; cursor: pointer;
+        font-family: monospace;
+      }
+      #moves button:hover { background: #5b6; }
+      #moves button:active { transform: translateY(1px); }
+      #status {
+        position: fixed; top: 10px; right: 10px;
+        background: rgba(0,0,0,0.6); padding: 6px 10px; border-radius: 6px;
+        font-size: 12px;
+      }
+      #status.ok { color: #6f6; }
+      #status.err { color: #f66; }
+
+      /* --- Win screen modal --- */
+      #win-screen {
+        position: fixed; inset: 0; z-index: 100;
+        background: rgba(0, 0, 0, 0.65);
+        display: none; justify-content: center; align-items: center;
+        backdrop-filter: blur(3px);
+      }
+      #win-screen.show { display: flex; }
+      #win-screen .card {
+        position: relative;
+        background: linear-gradient(160deg, #262636, #16161e);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 32px 44px;
+        min-width: 300px;
+        text-align: center;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+        animation: winPop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
+      }
+      @keyframes winPop {
+        from { transform: scale(0.85); opacity: 0; }
+        to   { transform: scale(1);    opacity: 1; }
+      }
+      #win-screen h1 {
+        font-size: 32px; letter-spacing: 0.5px; margin-bottom: 4px;
+      }
+      #win-screen h1.won  { color: #ffd370; }
+      #win-screen h1.lost { color: #b0b0bc; }
+      #win-screen .subtitle {
+        font-size: 13px; color: #8888a0; margin-bottom: 22px;
+      }
+      #win-screen .stats {
+        display: grid; grid-template-columns: auto auto;
+        gap: 10px 24px;
+        text-align: left; font-size: 15px;
+        margin: 8px 0 24px;
+        padding: 16px 20px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 10px;
+      }
+      #win-screen .stats .label { color: #a0a0b0; }
+      #win-screen .stats .value { color: #fff; font-weight: 600; text-align: right; }
+      #win-screen button.play {
+        background: #c73; color: white; border: none;
+        padding: 12px 28px; border-radius: 8px; font-size: 15px;
+        font-weight: 600; cursor: pointer;
+      }
+      #win-screen button.play:hover { background: #d84; }
+      #win-screen button.close {
+        position: absolute; top: 10px; right: 12px;
+        background: transparent; border: none; color: #6a6a80;
+        font-size: 22px; line-height: 1; cursor: pointer;
+        padding: 6px 12px; border-radius: 6px;
+      }
+      #win-screen button.close:hover {
+        background: rgba(255, 255, 255, 0.08); color: #ccc;
+      }
+
+      /* --- Audio unlock overlay --- */
+      #audio-unlock {
+        position: fixed; inset: 0; z-index: 200;
+        background: rgba(10, 10, 15, 0.85);
+        display: flex; justify-content: center; align-items: center;
+        color: #ddd; font-size: 15px; cursor: pointer;
+        backdrop-filter: blur(2px);
+      }
+      #audio-unlock.hidden { display: none; }
+      #audio-unlock .box {
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        padding: 22px 32px; border-radius: 10px;
+        text-align: center; background: rgba(30, 30, 40, 0.6);
+      }
+      #audio-unlock .box b { color: #ffd370; font-size: 17px; }
+
+      /* --- Mute toggle button --- */
+      #mute-toggle {
+        position: fixed; bottom: 10px; right: 10px;
+        background: rgba(0, 0, 0, 0.6); color: #eee; border: none;
+        width: 40px; height: 40px; border-radius: 20px;
+        font-size: 18px; cursor: pointer;
+      }
+      #mute-toggle:hover { background: rgba(0, 0, 0, 0.8); }
+
+      /* --- Event announcement banner --- */
+      #announce {
+        position: fixed;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 12px 22px; border-radius: 10px;
+        font-size: 18px; font-weight: 600; letter-spacing: 0.3px;
+        background: rgba(20, 20, 30, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #ffd370;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.25s ease-out;
+        max-width: 80%;
+        text-align: center;
+      }
+      #announce.show { opacity: 1; }
+      #announce.capture { color: #ff8080; }
+      #announce.shield { color: #ffd370; }
+      #announce.escape { color: #80ffb0; }
+      #announce.skip { color: #a0a0c0; }
+
+      /* --- Mode menu (vs CPU / create / join room) ---
+         Sits ABOVE the audio-unlock overlay: picking a mode is itself the
+         user gesture that unlocks audio (main.ts hooks it). */
+      #menu {
+        position: fixed; inset: 0; z-index: 250;
+        background: rgba(10, 10, 15, 0.82);
+        display: none; justify-content: center; align-items: center;
+        backdrop-filter: blur(3px);
+      }
+      #menu.show { display: flex; }
+      #menu .card {
+        background: linear-gradient(160deg, #262636, #16161e);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 30px 38px;
+        min-width: 290px;
+        text-align: center;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+      }
+      #menu h1 { font-size: 28px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
+      #menu .tagline { font-size: 12px; color: #8888a0; margin-bottom: 22px; }
+      #menu button.mode {
+        display: block; width: 100%;
+        background: #c73; color: white; border: none;
+        padding: 13px 20px; border-radius: 8px; font-size: 15px;
+        font-weight: 600; cursor: pointer; margin-bottom: 10px;
+      }
+      #menu button.mode:hover { background: #d84; }
+      #menu button.mode.alt { background: #35506e; }
+      #menu button.mode.alt:hover { background: #416085; }
+      #menu .join-row { display: flex; gap: 8px; margin-top: 4px; }
+      #menu .join-row input {
+        flex: 1; min-width: 0;
+        background: rgba(255,255,255,0.06); color: #fff;
+        border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
+        padding: 12px; font-size: 15px; text-transform: uppercase;
+        text-align: center; letter-spacing: 4px; font-family: monospace;
+      }
+      #menu .join-row button {
+        background: #35506e; color: white; border: none;
+        padding: 12px 18px; border-radius: 8px; font-size: 15px;
+        font-weight: 600; cursor: pointer;
+      }
+      #menu .join-row button:hover { background: #416085; }
+      #menu .menu-error { color: #ff8080; font-size: 13px; margin-top: 12px; min-height: 16px; }
+
+      /* --- Room invite banner (shown while waiting for a friend) --- */
+      #room-info {
+        position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+        z-index: 90;
+        background: rgba(20, 20, 30, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 10px; padding: 14px 22px;
+        text-align: center; display: none;
+      }
+      #room-info.show { display: block; }
+      #room-info .code { font-size: 30px; letter-spacing: 8px; font-family: monospace; color: #ffd370; }
+      #room-info .hint { font-size: 12px; color: #a0a0b0; margin-top: 6px; }
+      #room-info .link { font-size: 12px; color: #80b8ff; margin-top: 4px; user-select: all; word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="hud">Connecting…</div>
+    <div id="status">…</div>
+    <div id="moves"></div>
+    <button id="mute-toggle" title="Toggle sound">🔊</button>
+    <div id="announce"></div>
+    <div id="audio-unlock">
+      <div class="box">
+        <div><b>Tap to enable sound</b></div>
+        <div style="margin-top:6px; opacity:0.75; font-size:13px">
+          Browsers block audio until you interact with the page
+        </div>
+      </div>
+    </div>
+    <div id="menu">
+      <div class="card">
+        <h1>REGATTA</h1>
+        <div class="tagline">a race across the board</div>
+        <button class="mode" id="menu-cpu">Play vs Computer</button>
+        <button class="mode alt" id="menu-create">Create Room</button>
+        <div class="join-row">
+          <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" />
+          <button id="menu-join">Join</button>
+        </div>
+        <div class="menu-error" id="menu-error"></div>
+      </div>
+    </div>
+    <div id="room-info">
+      <div class="code" id="room-code"></div>
+      <div class="hint">Share this code — or the link below — with your opponent</div>
+      <div class="link" id="room-link"></div>
+    </div>
+    <div id="win-screen">
+      <div class="card">
+        <button class="close" id="win-close" title="Dismiss">×</button>
+        <h1 id="win-title">You won!</h1>
+        <div class="subtitle" id="win-subtitle"></div>
+        <div class="stats" id="win-stats"></div>
+        <button class="play" id="win-play-again">Play Again</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
