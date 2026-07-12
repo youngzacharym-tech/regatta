@@ -20,6 +20,10 @@ import type {
 import { BOARD_LAYOUT } from "../../rulebook.ts";
 import { tileWorldPos, reservePos, escapedPos } from "./layout.ts";
 import { audio } from "./audio.ts";
+// Master Killer mode — additive only. Everything below is inert in classic
+// rooms (myVariant stays "classic", currentPower stays null, and every
+// branch that reads them is gated accordingly).
+import { CHARGE_CAP, isWarded, type PlayerClass, type PowerMove, type PowerState } from "../../master-killer.ts";
 
 const PATH_LENGTH = 15; // must match rulebook.ts PATH_LENGTH_PER_PLAYER
 
@@ -791,6 +795,37 @@ function refreshMarkers(state: GameState) {
   handleEscapeChanges(nowEscaped);
 }
 
+/** Master Killer only: tint warded / Shieldbreaker-safe tokens. Reuses the
+ *  real isWarded() from master-killer.ts against a minimal PowerState built
+ *  from the public `power` field, so the client can never drift from the
+ *  server's own definition of "warded". Classic rooms (currentPower === null)
+ *  always take the clear-everything branch — a no-op against the materials'
+ *  own black-emissive default, so classic visuals are untouched. */
+function updateTokenTints(state: GameState) {
+  const safe = currentPower ? new Set(currentPower.safeTokens) : null;
+  const fakePower: PowerState | null = currentPower
+    ? {
+        classes: currentPower.classes,
+        charges: currentPower.charges,
+        safeTokens: new Set(),
+        reflipUsedThisTurn: false,
+      }
+    : null;
+  state.tokens.forEach((token, idx) => {
+    const mat = markers[idx].mesh.material as THREE.MeshStandardMaterial;
+    if (fakePower && isWarded(state, fakePower, token)) {
+      mat.emissive.setHex(0x8040ff); // violet — Mage ward
+      mat.emissiveIntensity = 0.55;
+    } else if (safe && safe.has(token.id)) {
+      mat.emissive.setHex(0xffa332); // warm gold — Shieldbreaker-safe
+      mat.emissiveIntensity = 0.45;
+    } else {
+      mat.emissive.setHex(0x000000);
+      mat.emissiveIntensity = 0;
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------
 // HUD + move buttons
 // ---------------------------------------------------------------------------
@@ -803,6 +838,26 @@ let myRole: PlayerId | null = null;
 let currentMoves: Move[] | null = null;
 /** Every roll of the player's coins waits for a tap on their pile. */
 let rollPending: { flip: number; legalMoves: Move[] | null; state: GameState } | null = null;
+
+// --- Master Killer mode (additive; all null/"classic" in classic rooms) ---
+let myVariant: "classic" | "masterKiller" = "classic";
+/** Public class/charge/ward info — mirrors protocol.ts's `state.power`. */
+let currentPower: {
+  classes: Record<PlayerId, PlayerClass>;
+  charges: Record<PlayerId, number>;
+  safeTokens: number[];
+  pushTargets: number[];
+} | null = null;
+/** The current player's power-boosted move list (only populated on my own
+ *  turn — same security rule as legalMoves). Kept alongside currentMoves
+ *  (which gets the same array structurally, via tap-to-move) so Warrior's
+ *  Charge buttons can read chargeAvailable/from/to per move. */
+let currentPowerMoves: PowerMove[] | null = null;
+/** True while an Archer has tapped "Push" and is waiting to tap a target. */
+let pushArmed = false;
+/** Push's targetable enemy tokens while pushArmed — lit the same way as
+ *  capturableIds, via the shared hover-glow helper below. */
+const pushTargetIds = new Set<number>();
 
 // --- Opening flip-off ---
 /** True while the match start waits for THIS player to tap their pile.
@@ -851,16 +906,28 @@ function moveLabel(m: Move): string {
   return `${tokenLabel(m.tokenId)}: ${tileLabel(m.from)}→${tileLabel(m.to)}${tags ? " " + tags : ""}`;
 }
 
+function classLabel(cls: PlayerClass): string {
+  return cls.charAt(0).toUpperCase() + cls.slice(1);
+}
+
 function renderHud(state: GameState, flip: number | null) {
   const yours = state.currentPlayer === myRole;
   const myColor = "Red"; // seat-relative: every player sees themselves as Red
   const turnLabel = yours
     ? `<b style="color:#ffd370">Your turn</b>`
     : `<b>Opponent's turn</b>`;
+  let powerLine = "";
+  if (currentPower) {
+    const mySide: PlayerId = myRole ?? "p1";
+    const cls = currentPower.classes[mySide];
+    const charges = currentPower.charges[mySide];
+    powerLine = `<div>Class: <b>${classLabel(cls)}</b> · Charges: <b>${charges}/${CHARGE_CAP}</b></div>`;
+  }
   hud.innerHTML = `
     <div>You: <b>${myColor}</b></div>
     <div>${turnLabel}</div>
     <div>Flip: <b>${flip ?? "—"}</b></div>
+    ${powerLine}
     ${state.winner ? `<div style="color:#ffd700">${state.winner === myRole ? "You win!" : "Opponent wins"}</div>` : ""}
   `;
 }
@@ -886,6 +953,57 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
   updateCapturable(legalMoves, isMyTurn);
   // No move buttons — tap-to-move via canvas raycast.
   movesEl.innerHTML = "";
+}
+
+/** Master Killer only: append active-ability buttons to #moves (which
+ *  renderMoves() just cleared). Normal moves stay tap-to-move, unchanged —
+ *  this only adds the extra Push/Re-flip/Charge affordances a class needs. */
+function renderPowerActions(isMyTurn: boolean) {
+  pushArmed = false;
+  pushTargetIds.clear();
+  if (!isMyTurn || myVariant !== "masterKiller" || !currentPower) return;
+  const mySide: PlayerId = myRole ?? "p1";
+  const cls = currentPower.classes[mySide];
+  const charges = currentPower.charges[mySide];
+  if (charges < 1) return;
+
+  if (cls === "mage") {
+    const btn = document.createElement("button");
+    btn.textContent = `Re-flip (${charges}⚡)`;
+    btn.style.background = "#6a4fb0";
+    btn.addEventListener("click", () => {
+      sendToServer({ type: "usePower", action: { kind: "reflip" } });
+    });
+    movesEl.appendChild(btn);
+  } else if (cls === "archer" && currentPower.pushTargets.length > 0) {
+    const btn = document.createElement("button");
+    const setLabel = () => {
+      btn.textContent = pushArmed ? "Push: tap a target…" : `Push (${charges}⚡)`;
+      btn.style.background = pushArmed ? "#a06010" : "#6a4fb0";
+    };
+    setLabel();
+    btn.addEventListener("click", () => {
+      pushArmed = !pushArmed;
+      pushTargetIds.clear();
+      if (pushArmed) for (const id of currentPower!.pushTargets) pushTargetIds.add(id);
+      else hideHoverGlow();
+      setLabel();
+    });
+    movesEl.appendChild(btn);
+  } else if (cls === "warrior" && currentPowerMoves) {
+    for (let i = 0; i < currentPowerMoves.length; i++) {
+      const m = currentPowerMoves[i];
+      if (!m.chargeAvailable) continue;
+      const btn = document.createElement("button");
+      btn.textContent = `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`;
+      btn.style.background = "#6a4fb0";
+      const moveIndex = i;
+      btn.addEventListener("click", () => {
+        sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
+      });
+      movesEl.appendChild(btn);
+    }
+  }
 }
 
 movesEl.addEventListener("click", (e) => {
@@ -945,6 +1063,17 @@ canvas.addEventListener("pointerdown", (e) => {
     }
     return;
   }
+  // Master Killer: Push is armed and waiting for a target tap.
+  if (pushArmed) {
+    const target = findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      sendToServer({ type: "usePower", action: { kind: "push", targetTokenId: target } });
+      pushArmed = false;
+      pushTargetIds.clear();
+      hideHoverGlow();
+    }
+    return;
+  }
   // A waiting swig: tap the mug, drink to the stone you brought home.
   if (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY)) {
     const mySide: PlayerId = myRole ?? "p1";
@@ -960,6 +1089,7 @@ canvas.addEventListener("pointerdown", (e) => {
       triggerCoinFlip(pending.flip, myCoins);
       renderHud(pending.state, pending.flip);
       renderMoves(pending.legalMoves, true);
+      renderPowerActions(true);
     }
     return;
   }
@@ -979,16 +1109,22 @@ canvas.addEventListener("pointerdown", (e) => {
 
 // Cursor + hover feedback: pointer style over an eligible token, and a warm
 // halo under a capturable enemy token.
-function findCapturableUnderPointer(clientX: number, clientY: number): number | null {
-  if (capturableIds.size === 0) return null;
+/** Which of `ids` (token indices) is under the pointer, if any — shared by
+ *  capture-hover and Master Killer's Push targeting. */
+function findTargetUnderPointer(ids: Set<number>, clientX: number, clientY: number): number | null {
+  if (ids.size === 0) return null;
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const ids = [...capturableIds].filter((i) => markers[i].mesh.visible);
-  const meshes = ids.map((i) => markers[i].mesh);
+  const list = [...ids].filter((i) => markers[i].mesh.visible);
+  const meshes = list.map((i) => markers[i].mesh);
   const hits = raycaster.intersectObjects(meshes, false);
-  return hits.length ? ids[meshes.indexOf(hits[0].object as THREE.Mesh)] : null;
+  return hits.length ? list[meshes.indexOf(hits[0].object as THREE.Mesh)] : null;
+}
+
+function findCapturableUnderPointer(clientX: number, clientY: number): number | null {
+  return findTargetUnderPointer(capturableIds, clientX, clientY);
 }
 
 function isMyCoinUnderPointer(clientX: number, clientY: number): boolean {
@@ -1008,12 +1144,14 @@ function isMyCoinUnderPointer(clientX: number, clientY: number): boolean {
 canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
+  const pushable = pushArmed ? findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY) : null;
   const rollable =
     ((rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY)) ||
     (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY));
-  canvas.style.cursor = hit !== null || capturable !== null || rollable ? "pointer" : "default";
-  if (capturable !== null) {
-    const m = markers[capturable];
+  canvas.style.cursor = hit !== null || capturable !== null || pushable !== null || rollable ? "pointer" : "default";
+  const glowTarget = pushable !== null ? pushable : capturable;
+  if (glowTarget !== null) {
+    const m = markers[glowTarget];
     hoverGlow.position.set(m.target.x, m.target.y - 0.062, m.target.z);
     hoverGlow.visible = true;
   } else {
@@ -1311,9 +1449,15 @@ function connect() {
       case "role":
         myRole = msg.player;
         myRoom = msg.room;
+        myVariant = msg.variant;
         rollPending = null;
         openingTapArmed = false;
         seenOpeningFlips = { p1: null, p2: null };
+        currentPower = null;
+        currentPowerMoves = null;
+        pushArmed = false;
+        pushTargetIds.clear();
+        classpickEl.classList.remove("show");
         inCpuGame = msg.vsCpu;
         awaitingRejoin = false;
         saveSession({ room: msg.room, seat: msg.player, seatToken: msg.seatToken });
@@ -1322,6 +1466,10 @@ function connect() {
         hud.textContent = inCpuGame
           ? "You are Red — vs Computer"
           : "You are Red. Waiting for opponent…";
+        break;
+      case "classPick":
+        classpickEl.classList.add("show");
+        renderClassPick(msg);
         break;
       case "waiting":
         hud.textContent = msg.reason;
@@ -1334,6 +1482,7 @@ function connect() {
       case "opening": {
         hideRoomInfo();
         hideWinScreen(); // a rematch re-enters the flip-off
+        classpickEl.classList.remove("show"); // class pick (if any) is done
         rollPending = null;
         const mySide: PlayerId = myRole ?? "p1";
         // Tumble any flips we haven't shown yet this round.
@@ -1377,19 +1526,31 @@ function connect() {
         // markers, so the banner appears at the same time as the animation.
         announceFromState(msg);
         refreshMarkers(msg.state);
+        // Master Killer: public class/charge/ward info, then re-derive the
+        // token tints. No-op (clears to no tint) in classic rooms.
+        currentPower = msg.power ?? null;
+        currentPowerMoves = msg.powerMoves ?? null;
+        updateTokenTints(msg.state);
+        pushArmed = false;
+        pushTargetIds.clear();
         {
           const mine = msg.state.currentPlayer === (myRole ?? "p1");
+          // PowerMove is a structural superset of Move, so it drops straight
+          // into the existing tap-to-move plumbing unchanged.
+          const movesForTap: Move[] | null =
+            myVariant === "masterKiller" ? currentPowerMoves : msg.legalMoves;
           // The player rolls their own hand: every flip of mine waits for a
           // tap on my coin pile (the pile glows while it waits). The CPU's
           // rolls animate on their own.
           if (msg.flip !== null && mine) {
-            rollPending = { flip: msg.flip, legalMoves: msg.legalMoves, state: msg.state };
+            rollPending = { flip: msg.flip, legalMoves: movesForTap, state: msg.state };
             renderHud(msg.state, null);
             hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
             renderMoves(null, false);
           } else {
             renderHud(msg.state, msg.flip);
-            renderMoves(msg.legalMoves, mine);
+            renderMoves(movesForTap, mine);
+            renderPowerActions(mine);
             // Each broadcast with flip !== null is a fresh flip; the flip
             // belongs to the player about to move, so their coin set tumbles.
             if (msg.flip !== null) {
@@ -1439,12 +1600,50 @@ connect();
 const menuEl = document.getElementById("menu") as HTMLDivElement;
 const menuError = document.getElementById("menu-error") as HTMLDivElement;
 const menuCodeInput = document.getElementById("menu-code") as HTMLInputElement;
+const menuVariantToggle = document.getElementById("menu-variant-toggle") as HTMLButtonElement;
 const roomInfoEl = document.getElementById("room-info") as HTMLDivElement;
 const roomCodeEl = document.getElementById("room-code") as HTMLDivElement;
 const roomLinkEl = document.getElementById("room-link") as HTMLDivElement;
 
 let myRoom: string | null = null;
 let inCpuGame = false;
+
+// --- Master Killer mode: menu toggle + class-pick overlay ---
+/** Ruleset picked in the menu, sent along with cpu/create joins. Ignored
+ *  by the server for mode "join" — you play whatever room you're joining. */
+let selectedVariant: "classic" | "masterKiller" = "classic";
+function updateVariantToggleLabel() {
+  const mk = selectedVariant === "masterKiller";
+  menuVariantToggle.textContent = mk ? "⚔ Mode: Master Killer" : "Mode: Classic";
+  menuVariantToggle.classList.toggle("variant-mk", mk);
+}
+menuVariantToggle.addEventListener("click", () => {
+  selectedVariant = selectedVariant === "masterKiller" ? "classic" : "masterKiller";
+  updateVariantToggleLabel();
+});
+updateVariantToggleLabel();
+
+const classpickEl = document.getElementById("classpick") as HTMLDivElement;
+const classpickStatus = document.getElementById("classpick-status") as HTMLDivElement;
+const classButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>("#classpick button.class"),
+);
+function renderClassPick(msg: { classes: Record<PlayerId, PlayerClass | null>; ready: boolean }) {
+  const mySide: PlayerId = myRole ?? "p1";
+  const mine = msg.classes[mySide];
+  for (const btn of classButtons) {
+    const cls = btn.dataset.class as PlayerClass;
+    btn.classList.toggle("picked", cls === mine);
+    btn.disabled = mine !== null;
+  }
+  classpickStatus.textContent =
+    mine === null ? "Pick your class" : msg.ready ? "Both crews ready…" : "Waiting for opponent to pick…";
+}
+for (const btn of classButtons) {
+  btn.addEventListener("click", () => {
+    sendToServer({ type: "pickClass", class: btn.dataset.class as PlayerClass });
+  });
+}
 
 function hideMenu() {
   menuEl.classList.remove("show");
@@ -1478,15 +1677,22 @@ function resetToMenu(message: string) {
   resetMug(theirMug);
   hideWinScreen();
   hideRoomInfo();
+  classpickEl.classList.remove("show");
   movesEl.innerHTML = "";
   currentMoves = null;
   eligibleTokenIds.clear();
   capturableIds.clear();
   hideHoverGlow();
+  currentPower = null;
+  currentPowerMoves = null;
+  pushArmed = false;
+  pushTargetIds.clear();
+  myVariant = "classic";
   for (const marker of markers) {
     marker.mesh.visible = false;
     marker.flying = false;
     marker.lastPosition = -1;
+    (marker.mesh.material as THREE.MeshStandardMaterial).emissive.setHex(0x000000);
   }
   myRole = null;
   myRoom = null;
@@ -1498,11 +1704,11 @@ function resetToMenu(message: string) {
 
 (document.getElementById("menu-cpu") as HTMLButtonElement).addEventListener("click", () => {
   menuError.textContent = "";
-  sendToServer({ type: "join", mode: "cpu" });
+  sendToServer({ type: "join", mode: "cpu", variant: selectedVariant });
 });
 (document.getElementById("menu-create") as HTMLButtonElement).addEventListener("click", () => {
   menuError.textContent = "";
-  sendToServer({ type: "join", mode: "create" });
+  sendToServer({ type: "join", mode: "create", variant: selectedVariant });
 });
 function submitJoinCode() {
   const code = menuCodeInput.value.trim().toUpperCase();

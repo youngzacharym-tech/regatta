@@ -329,6 +329,49 @@
       #menu .credit a { color: #80b8ff; text-decoration: none; }
       #menu .credit a:hover { text-decoration: underline; }
 
+      /* --- Master Killer mode: class-pick overlay ---
+         Additive, isolated block — mirrors #menu's card look but under its
+         own selectors so nothing here can affect classic mode's styling. */
+      #classpick {
+        position: fixed; inset: 0; z-index: 251;
+        background: rgba(10, 10, 15, 0.82);
+        display: none; justify-content: center; align-items: center;
+        backdrop-filter: blur(3px);
+      }
+      #classpick.show { display: flex; }
+      #classpick .card {
+        background: linear-gradient(160deg, #262636, #16161e);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 30px 38px;
+        min-width: 300px;
+        text-align: center;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+      }
+      #classpick h1 { font-size: 24px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
+      #classpick .tagline { font-size: 12px; color: #8888a0; margin-bottom: 20px; min-height: 16px; }
+      #classpick button.class {
+        display: block; width: 100%;
+        background: #35506e; color: white; border: none;
+        padding: 12px 18px; border-radius: 8px; font-size: 15px;
+        font-weight: 600; cursor: pointer; margin-bottom: 10px;
+        text-align: left;
+      }
+      #classpick button.class:hover { background: #416085; }
+      #classpick button.class:disabled { opacity: 0.4; cursor: default; }
+      #classpick button.class.picked { background: #c73; }
+      #classpick button.class .class-desc {
+        display: block; font-size: 11px; font-weight: 400; opacity: 0.75; margin-top: 2px;
+      }
+
+      /* --- Menu's Master Killer mode toggle (additive) --- */
+      #menu button.mode.variant-toggle { background: transparent; border: 1px solid rgba(255,255,255,0.18); }
+      #menu button.mode.variant-toggle:hover { background: rgba(255,255,255,0.08); }
+      #menu button.mode.variant-toggle.variant-mk {
+        background: rgba(122, 47, 47, 0.5); border-color: rgba(255,150,150,0.35); color: #ffcaca;
+      }
+      #menu button.mode.variant-toggle.variant-mk:hover { background: rgba(143, 58, 58, 0.6); }
+
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
         position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
@@ -375,6 +418,7 @@
       <div class="card">
         <h1>REGATTA</h1>
         <div class="tagline">a race across the board</div>
+        <button class="mode variant-toggle" id="menu-variant-toggle" type="button">Mode: Classic</button>
         <button class="mode" id="menu-cpu">Play vs Computer</button>
         <button class="mode alt" id="menu-create">Create Room</button>
         <div class="join-row">
@@ -388,6 +432,24 @@
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
           — used with the artist's blessing
         </div>
+      </div>
+    </div>
+    <div id="classpick">
+      <div class="card">
+        <h1>MASTER KILLER</h1>
+        <div class="tagline" id="classpick-status">Pick your class</div>
+        <button class="class" data-class="archer">
+          🏹 Archer
+          <span class="class-desc">Passive: snipe the tile ahead, free. Active (1⚡): Push — knock an enemy back.</span>
+        </button>
+        <button class="class" data-class="mage">
+          🔮 Mage
+          <span class="class-desc">Passive: Warded while at full charge. Active (1⚡): Re-flip your coins.</span>
+        </button>
+        <button class="class" data-class="warrior">
+          ⚔ Warrior
+          <span class="class-desc">Passive: Shieldbreaker walks through wards. Active (1⚡): Charge — sweep captures.</span>
+        </button>
       </div>
     </div>
     <div id="room-info">
