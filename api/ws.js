@@ -173,13 +173,343 @@ function pickBotMove(state, moves, rand = Math.random) {
   return bestIndex;
 }
 
+// master-killer.ts
+function otherPlayerId(p) {
+  return p === "p1" ? "p2" : "p1";
+}
+var CHARGE_CAP = 2;
+var PUSH_DISTANCE = 1;
+var WARD_SCOPE = "most-advanced";
+function initialPowerState() {
+  return {
+    classes: { p1: "archer", p2: "archer" },
+    // placeholder until picked
+    charges: { p1: 0, p2: 0 },
+    safeTokens: /* @__PURE__ */ new Set(),
+    reflipUsedThisTurn: false
+  };
+}
+function resetTurnFlags(power) {
+  return { ...power, reflipUsedThisTurn: false };
+}
+function isMostAdvanced(state, token) {
+  const mine = state.tokens.filter((t) => t.owner === token.owner);
+  const best = Math.max(...mine.map((t) => t.position));
+  return token.position === best && token.position >= 0;
+}
+function isWarded(state, power, token) {
+  if (power.classes[token.owner] !== "mage") return false;
+  if (power.charges[token.owner] < CHARGE_CAP) return false;
+  if (WARD_SCOPE === "most-advanced") return isMostAdvanced(state, token);
+  return true;
+}
+function onShieldTile(token) {
+  if (token.position < 0 || token.position >= PATH_LENGTH_PER_PLAYER) return false;
+  return BOARD_LAYOUT[token.position].type === "shield";
+}
+function hasTransientSafety(power, token) {
+  return power.safeTokens.has(token.id);
+}
+function isProtected(state, power, token) {
+  return onShieldTile(token) || hasTransientSafety(power, token) || isWarded(state, power, token);
+}
+function addCharge(power, player) {
+  const current = power.charges[player];
+  if (current >= CHARGE_CAP) return power;
+  return { ...power, charges: { ...power.charges, [player]: current + 1 } };
+}
+function grantZeroFlipCharge(power, mover) {
+  return addCharge(power, mover);
+}
+function getLegalPowerMoves(state, power, flip) {
+  if (state.winner !== null) return [];
+  if (flip <= 0) return [];
+  const player = state.currentPlayer;
+  const cls = power.classes[player];
+  const moves = [];
+  for (const token of state.tokens) {
+    if (token.owner !== player) continue;
+    if (token.position >= PATH_LENGTH_PER_PLAYER) continue;
+    const from = token.position;
+    const to = from === -1 ? flip - 1 : from + flip;
+    if (to >= PATH_LENGTH_PER_PLAYER - 1) {
+      if (to !== PATH_LENGTH_PER_PLAYER - 1) continue;
+      const remaining = state.tokens.filter(
+        (t) => t.owner === player && t.id !== token.id && t.position < PATH_LENGTH_PER_PLAYER
+      );
+      moves.push({
+        tokenId: token.id,
+        from,
+        to: PATH_LENGTH_PER_PLAYER,
+        captures: [],
+        bonusCaptures: [],
+        landsOnShield: false,
+        causesWin: remaining.length === 0,
+        breaksWard: false,
+        chargeAvailable: false,
+        chargeSweepCaptures: []
+      });
+      continue;
+    }
+    const destTile = BOARD_LAYOUT[to];
+    const occupants = state.tokens.filter(
+      (t) => t.position === to && t.id !== token.id && (destTile.isContested || t.owner === player)
+    );
+    const self = occupants.find((t) => t.owner === player);
+    const enemy = occupants.find((t) => t.owner !== player);
+    if (self) continue;
+    let captures = [];
+    let breaksWard = false;
+    if (enemy) {
+      if (onShieldTile(enemy) || hasTransientSafety(power, enemy)) continue;
+      if (isWarded(state, power, enemy)) {
+        if (cls !== "warrior") continue;
+        breaksWard = true;
+        captures = [enemy.id];
+      } else {
+        captures = [enemy.id];
+      }
+    }
+    const bonusCaptures = [];
+    if (cls === "archer" && to + 1 <= 11) {
+      const sniped = state.tokens.find(
+        (t) => t.position === to + 1 && t.owner !== player && t.id !== enemy?.id
+      );
+      if (sniped && !isProtected(state, power, sniped)) {
+        bonusCaptures.push(sniped.id);
+      }
+    }
+    let chargeAvailable = false;
+    const chargeSweepCaptures = [];
+    if (cls === "warrior" && from >= 0) {
+      let laneClear = true;
+      for (let i = from + 1; i < to; i++) {
+        const tile = BOARD_LAYOUT[i];
+        if (!tile.isContested) continue;
+        const occ = state.tokens.filter((t) => t.position === i && t.id !== token.id);
+        if (occ.some((t) => t.owner === player)) {
+          laneClear = false;
+          break;
+        }
+        const foe = occ.find((t) => t.owner !== player);
+        if (foe && !isProtected(state, power, foe)) {
+          chargeSweepCaptures.push(foe.id);
+        }
+      }
+      chargeAvailable = laneClear;
+    }
+    moves.push({
+      tokenId: token.id,
+      from,
+      to,
+      captures,
+      bonusCaptures,
+      landsOnShield: destTile.type === "shield",
+      causesWin: false,
+      breaksWard,
+      chargeAvailable,
+      chargeSweepCaptures
+    });
+  }
+  return moves;
+}
+function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, grantsSafety) {
+  const tokens = state.tokens.map((t) => {
+    if (t.id === tokenId) return { ...t, position: to };
+    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    return t;
+  });
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(tokenId) || allCaptures.some((id) => safeTokens.has(id))) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(tokenId);
+    for (const id of allCaptures) safeTokens.delete(id);
+  }
+  if (grantsSafety) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.add(tokenId);
+  }
+  let nextPower = { ...power, safeTokens };
+  if (allCaptures.length > 0 || landsOnShield) {
+    nextPower = addCharge(nextPower, mover);
+  }
+  const extraTurn = landsOnShield;
+  const nextState = {
+    tokens,
+    currentPlayer: extraTurn ? mover : otherPlayerId(mover),
+    lastFlip: null,
+    winner: causesWin ? mover : null,
+    extraTurn
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower) };
+}
+function applyPowerMove(state, power, move, mover) {
+  const allCaptures = [...move.captures, ...move.bonusCaptures];
+  return resolveTurn(
+    state,
+    power,
+    mover,
+    move.tokenId,
+    move.to,
+    allCaptures,
+    move.landsOnShield,
+    move.causesWin,
+    move.breaksWard
+  );
+}
+function applyCharge(state, power, move, mover) {
+  const allCaptures = [...move.captures, ...move.bonusCaptures, ...move.chargeSweepCaptures];
+  const spent = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - 1 }
+  };
+  return resolveTurn(
+    state,
+    spent,
+    mover,
+    move.tokenId,
+    move.to,
+    allCaptures,
+    move.landsOnShield,
+    move.causesWin,
+    move.breaksWard
+  );
+}
+function getPushTargets(state, power, mover) {
+  const foe = otherPlayerId(mover);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !isProtected(state, power, t)).map((t) => t.id);
+}
+function applyPush(state, power, targetTokenId, mover) {
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  const rawTo = target.position - PUSH_DISTANCE;
+  const collides = state.tokens.some(
+    (t) => t.id !== targetTokenId && t.owner === target.owner && t.position === rawTo
+  );
+  const landing = collides || rawTo < 0 ? -1 : rawTo;
+  const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(targetTokenId)) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(targetTokenId);
+  }
+  const spentPower = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    safeTokens
+  };
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(spentPower) };
+}
+function applyReflip(power, mover) {
+  return {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    reflipUsedThisTurn: true
+  };
+}
+
+// master-killer-bot.ts
+function scoreMove(state, m, extraCaptures, rand) {
+  let score = 0;
+  const allCaptures = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
+  if (m.causesWin) score += 1e3;
+  if (allCaptures.length > 0) {
+    const victimProgress = Math.max(
+      ...allCaptures.map((id) => state.tokens.find((t) => t.id === id)?.position ?? 0)
+    );
+    score += 400 + victimProgress * 10 + (allCaptures.length - 1) * 150;
+  }
+  if (m.landsOnShield) score += 250;
+  if (m.to === PATH_LENGTH_PER_PLAYER) score += 300;
+  if (m.from === -1) score += 60;
+  const fromContested = m.from >= 0 && BOARD_LAYOUT[m.from]?.isContested;
+  const toSafe = m.to < PATH_LENGTH_PER_PLAYER && !BOARD_LAYOUT[m.to]?.isContested;
+  if (fromContested && toSafe) score += 120;
+  if (m.to < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[m.to]?.isContested && BOARD_LAYOUT[m.to]?.type !== "shield") {
+    const threatened = state.tokens.some(
+      (t) => t.owner !== state.currentPlayer && t.position >= 0 && m.to - t.position >= 1 && m.to - t.position <= 4
+    );
+    if (threatened) score -= 80;
+  }
+  score += m.to;
+  score += rand() * 20;
+  return score;
+}
+function scorePush(state, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  const rawTo = target.position - 2;
+  const collides = state.tokens.some(
+    (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
+  );
+  const sendsHome = collides || rawTo < 0;
+  let score = (sendsHome ? 350 : 180) + target.position * 8;
+  score += rand() * 20;
+  return score;
+}
+function scoreReflip(currentMoveCount, flip, rand) {
+  if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
+  return -1;
+}
+function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
+  const mover = state.currentPlayer;
+  const cls = power.classes[mover];
+  const charges = power.charges[mover];
+  let best = null;
+  let bestScore = -Infinity;
+  for (const m of moves) {
+    const score = scoreMove(state, m, [], rand);
+    if (score > bestScore) {
+      bestScore = score;
+      best = { kind: "move", move: m };
+    }
+    if (cls === "warrior" && m.chargeAvailable && charges >= 1) {
+      const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand) + 20;
+      if (chargeScore > bestScore) {
+        bestScore = chargeScore;
+        best = { kind: "charge", move: m };
+      }
+    }
+  }
+  if (cls === "archer" && charges >= 1) {
+    for (const targetId of getPushTargets(state, power, mover)) {
+      const score = scorePush(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "push", targetTokenId: targetId };
+      }
+    }
+  }
+  if (cls === "mage" && charges >= 1 && !power.reflipUsedThisTurn) {
+    const score = scoreReflip(moves.length, flip, rand);
+    if (score > bestScore) {
+      bestScore = score;
+      best = { kind: "reflip" };
+    }
+  }
+  return best;
+}
+
 // api/ws.ts
 var config = { maxDuration: 300 };
 var ROOM_TTL_S = 4 * 60 * 60;
 var AUTO_SKIP_DELAY_MS = 500;
 var BOT_THINK_MS = 900;
+var BOT_RESCUE_THINK_MS = 300;
 var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+var MK_CLASSES = ["archer", "mage", "warrior"];
 var REDIS_URL = process.env.REDIS_URL ?? process.env.KV_URL ?? process.env.UPSTASH_REDIS_URL;
+function toWirePower(p) {
+  return { ...p, safeTokens: [...p.safeTokens] };
+}
+function fromWirePower(w) {
+  return { ...w, safeTokens: new Set(w.safeTokens) };
+}
 var roomKey = (code) => `room:${code}`;
 var roomChannel = (code) => `room:${code}:ch`;
 var CAS_LUA = `
@@ -189,10 +519,10 @@ if cjson.decode(cur).version ~= tonumber(ARGV[1]) then return 0 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
 return 1
 `;
-function freshMatchFields() {
+function freshMatchFields(variant) {
   const state = initialState();
   return {
-    phase: "opening",
+    phase: variant === "masterKiller" ? "classPick" : "opening",
     openingFlips: { p1: null, p2: null },
     state,
     currentFlip: null,
@@ -202,7 +532,10 @@ function freshMatchFields() {
     lastMovePlayer: null,
     wasSkipped: false,
     skippedPlayer: null,
-    skipReason: null
+    skipReason: null,
+    mk: variant === "masterKiller" ? toWirePower(initialPowerState()) : null,
+    classesPicked: { p1: false, p2: false },
+    currentPowerMoves: null
   };
 }
 function GET(request) {
@@ -265,6 +598,18 @@ function GET(request) {
     };
     const sendStateView = (doc) => {
       if (!mySeat || !doc.started) return;
+      if (doc.phase === "classPick" && doc.mk) {
+        prevPhase = "classPick";
+        send({
+          type: "classPick",
+          classes: {
+            p1: doc.classesPicked.p1 ? doc.mk.classes.p1 : null,
+            p2: doc.classesPicked.p2 ? doc.mk.classes.p2 : null
+          },
+          ready: doc.classesPicked.p1 && (doc.classesPicked.p2 || doc.vsCpu)
+        });
+        return;
+      }
       if (doc.phase === "opening") {
         prevPhase = "opening";
         const { p1, p2 } = doc.openingFlips;
@@ -276,7 +621,7 @@ function GET(request) {
         });
         return;
       }
-      if (prevPhase === "opening") {
+      if (prevPhase === "opening" || prevPhase === "classPick") {
         prevPhase = "play";
         send({
           type: "opening",
@@ -286,12 +631,21 @@ function GET(request) {
         });
       }
       if (doc.state.winner === null) lastAnnouncedWinner = null;
-      const legalMoves = doc.currentFlip !== null && doc.state.currentPlayer === mySeat ? getLegalMoves(doc.state, doc.currentFlip) : null;
+      const legalMoves = doc.variant === "classic" && doc.currentFlip !== null && doc.state.currentPlayer === mySeat ? getLegalMoves(doc.state, doc.currentFlip) : null;
+      const powerMoves = doc.variant === "masterKiller" && doc.state.currentPlayer === mySeat ? doc.currentPowerMoves : null;
+      const power = doc.mk ? {
+        classes: { ...doc.mk.classes },
+        charges: { ...doc.mk.charges },
+        safeTokens: [...doc.mk.safeTokens],
+        pushTargets: doc.mk.classes[doc.state.currentPlayer] === "archer" ? getPushTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : []
+      } : void 0;
       send({
         type: "state",
         state: doc.state,
         flip: doc.currentFlip,
         legalMoves,
+        powerMoves,
+        power,
         lastMove: doc.lastMove,
         lastMovePlayer: doc.lastMovePlayer,
         wasSkipped: doc.wasSkipped,
@@ -312,6 +666,28 @@ function GET(request) {
       const turnOwner = doc.state.currentPlayer;
       if (doc.vsCpu) return mySeat === "p1";
       return turnOwner === mySeat;
+    };
+    const maybeDriveClassPick = async (doc) => {
+      if (!mySeat || !doc.started || doc.phase !== "classPick" || !doc.mk) return;
+      if (doc.vsCpu && !doc.classesPicked.p2 && mySeat === "p1") {
+        scheduleVersioned(doc, BOT_THINK_MS, async (cur) => {
+          if (cur.phase !== "classPick" || cur.classesPicked.p2 || !cur.mk) return;
+          const cls = MK_CLASSES[Math.floor(Math.random() * MK_CLASSES.length)];
+          await commit({
+            ...cur,
+            mk: { ...cur.mk, classes: { ...cur.mk.classes, p2: cls } },
+            classesPicked: { ...cur.classesPicked, p2: true }
+          });
+        });
+      }
+      if (!doc.classesPicked.p1 || !doc.classesPicked.p2 && !doc.vsCpu) return;
+      console.log(`[${doc.code}] classes: p1=${doc.mk.classes.p1} p2=${doc.mk.classes.p2}`);
+      const next = { ...doc, phase: "opening" };
+      if (await commit(next)) await maybeDriveOpening(next);
+      else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDriveClassPick(reloaded);
+      }
     };
     const maybeDriveOpening = async (doc) => {
       if (!mySeat || !doc.started || doc.phase !== "opening") return;
@@ -346,9 +722,20 @@ function GET(request) {
       if (!doc.started || doc.phase !== "play" || doc.state.winner || !iDrive(doc)) return;
       if (doc.currentFlip === null) {
         const commitTurnFlip = async (cur) => {
+          const flip = flipCoins();
+          let mk = cur.mk;
+          let currentPowerMoves = null;
+          if (cur.variant === "masterKiller" && mk) {
+            let power = fromWirePower(mk);
+            if (flip === 0) power = grantZeroFlipCharge(power, cur.state.currentPlayer);
+            mk = toWirePower(power);
+            currentPowerMoves = getLegalPowerMoves(cur.state, power, flip);
+          }
           const next = {
             ...cur,
-            currentFlip: flipCoins(),
+            currentFlip: flip,
+            mk,
+            currentPowerMoves,
             turns: cur.turns + 1,
             // A fresh flip consumes the previous announcement.
             lastMove: null,
@@ -374,7 +761,18 @@ function GET(request) {
         }
         return;
       }
-      const moves = getLegalMoves(doc.state, doc.currentFlip);
+      const moves = doc.variant === "masterKiller" ? doc.currentPowerMoves ?? [] : getLegalMoves(doc.state, doc.currentFlip);
+      const isBotTurn = doc.vsCpu && doc.state.currentPlayer === "p2";
+      if (isBotTurn && doc.variant === "masterKiller" && moves.length === 0) {
+        const versionAtSchedule = doc.version;
+        scheduleVersioned(doc, BOT_RESCUE_THINK_MS, async (cur) => {
+          if (cur.version !== versionAtSchedule || !cur.mk || cur.currentFlip === null) return;
+          if (cur.state.currentPlayer !== "p2") return;
+          const power = fromWirePower(cur.mk);
+          const action = pickBotPowerAction(cur.state, power, cur.currentPowerMoves ?? [], cur.currentFlip, Math.random);
+          if (action) await applyBotPowerAction(cur, "p2", action);
+        });
+      }
       if (moves.length === 0) {
         const versionAtSchedule = doc.version;
         if (pendingTimer) clearTimeout(pendingTimer);
@@ -386,6 +784,7 @@ function GET(request) {
             ...cur,
             state: applyNoMove(cur.state),
             currentFlip: null,
+            currentPowerMoves: null,
             wasSkipped: true,
             skippedPlayer: skipped,
             skipReason: cur.currentFlip === 0 ? "flip-zero" : "no-legal-move"
@@ -394,13 +793,20 @@ function GET(request) {
         }, AUTO_SKIP_DELAY_MS);
         return;
       }
-      if (doc.vsCpu && doc.state.currentPlayer === "p2") {
+      if (isBotTurn) {
         const versionAtSchedule = doc.version;
         if (pendingTimer) clearTimeout(pendingTimer);
         pendingTimer = setTimeout(async () => {
           const cur = await loadDoc(doc.code);
           if (!cur || cur.version !== versionAtSchedule) return;
           if (cur.currentFlip === null || cur.state.currentPlayer !== "p2") return;
+          if (cur.variant === "masterKiller" && cur.mk) {
+            const power = fromWirePower(cur.mk);
+            const botMoves2 = cur.currentPowerMoves ?? [];
+            const action = pickBotPowerAction(cur.state, power, botMoves2, cur.currentFlip, Math.random);
+            if (action) await applyBotPowerAction(cur, "p2", action);
+            return;
+          }
           const botMoves = getLegalMoves(cur.state, cur.currentFlip);
           if (botMoves.length === 0) return;
           await applyChosenMove(cur, "p2", pickBotMove(cur.state, botMoves));
@@ -451,11 +857,172 @@ function GET(request) {
         if (reloaded) await maybeDrive(reloaded);
       }
     };
+    const applyMasterKillerMove = async (doc, seat, move) => {
+      if (!doc.mk) return;
+      const captureCount = move.captures.length + move.bonusCaptures.length;
+      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat);
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
+        lastMove: move,
+        lastMovePlayer: seat,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(
+          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin}`
+        );
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyMasterKillerCharge = async (doc, seat, move) => {
+      if (!doc.mk) return;
+      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
+      const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat);
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
+        lastMove: move,
+        lastMovePlayer: seat,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [CHARGE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} win=${move.causesWin}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyMasterKillerPush = async (doc, seat, targetTokenId) => {
+      if (!doc.mk) return;
+      const r = applyPush(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [PUSH] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyMasterKillerReflip = async (doc, seat) => {
+      if (!doc.mk) return;
+      let power = applyReflip(fromWirePower(doc.mk), seat);
+      const flip = flipCoins();
+      if (flip === 0) power = grantZeroFlipCharge(power, seat);
+      const next = {
+        ...doc,
+        mk: toWirePower(power),
+        currentFlip: flip,
+        currentPowerMoves: getLegalPowerMoves(doc.state, power, flip)
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] ${seat} re-flipped -> ${flip}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyBotPowerAction = async (doc, seat, action) => {
+      switch (action.kind) {
+        case "move":
+          await applyMasterKillerMove(doc, seat, action.move);
+          break;
+        case "charge":
+          await applyMasterKillerCharge(doc, seat, action.move);
+          break;
+        case "push":
+          await applyMasterKillerPush(doc, seat, action.targetTokenId);
+          break;
+        case "reflip":
+          await applyMasterKillerReflip(doc, seat);
+          break;
+      }
+    };
+    const handlePickClass = async (doc, seat, cls) => {
+      if (doc.phase !== "classPick" || !doc.mk || doc.classesPicked[seat]) return;
+      const next = {
+        ...doc,
+        mk: { ...doc.mk, classes: { ...doc.mk.classes, [seat]: cls } },
+        classesPicked: { ...doc.classesPicked, [seat]: true }
+      };
+      if (await commit(next)) await maybeDriveClassPick(next);
+      else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDriveClassPick(reloaded);
+      }
+    };
+    const handleUsePower = async (doc, seat, action) => {
+      if (doc.variant !== "masterKiller" || !doc.mk) {
+        send({ type: "error", message: "Not a Master Killer room" });
+        return;
+      }
+      if (doc.state.winner !== null) {
+        send({ type: "error", message: "Game is over" });
+        return;
+      }
+      if (doc.phase !== "play" || doc.state.currentPlayer !== seat) {
+        send({ type: "error", message: "Not your turn" });
+        return;
+      }
+      const cls = doc.mk.classes[seat];
+      if (action.kind === "reflip") {
+        if (cls !== "mage") return send({ type: "error", message: "Only a Mage can Re-flip" });
+        if (doc.mk.charges[seat] < 1) return send({ type: "error", message: "No charge available" });
+        if (doc.mk.reflipUsedThisTurn) return send({ type: "error", message: "Already re-flipped this turn" });
+        await applyMasterKillerReflip(doc, seat);
+        return;
+      }
+      if (action.kind === "push") {
+        if (cls !== "archer") return send({ type: "error", message: "Only an Archer can Push" });
+        if (doc.mk.charges[seat] < 1) return send({ type: "error", message: "No charge available" });
+        if (!getPushTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid push target" });
+        }
+        await applyMasterKillerPush(doc, seat, action.targetTokenId);
+        return;
+      }
+      if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Charge" });
+      if (doc.mk.charges[seat] < 1) return send({ type: "error", message: "No charge available" });
+      if (!doc.currentPowerMoves || action.moveIndex < 0 || action.moveIndex >= doc.currentPowerMoves.length) {
+        return send({ type: "error", message: "Invalid move index" });
+      }
+      const move = doc.currentPowerMoves[action.moveIndex];
+      if (!move.chargeAvailable) return send({ type: "error", message: "Charge not available for that move" });
+      await applyMasterKillerCharge(doc, seat, move);
+    };
     const subscribeToRoom = async (code) => {
       await sub.subscribe(roomChannel(code));
       sub.on("message", async (_channel, payload) => {
         const doc = JSON.parse(payload);
         sendStateView(doc);
+        await maybeDriveClassPick(doc);
         await maybeDriveOpening(doc);
         await maybeDrive(doc);
       });
@@ -469,6 +1036,7 @@ function GET(request) {
         player: seat,
         room: doc.code,
         vsCpu: doc.vsCpu,
+        variant: doc.variant,
         seatToken: token
       });
     };
@@ -499,6 +1067,7 @@ function GET(request) {
           return;
         }
         await seatIn(next, "p2", token);
+        await maybeDriveClassPick(next);
         await maybeDriveOpening(next);
         return;
       }
@@ -509,12 +1078,14 @@ function GET(request) {
           (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]
         ).join("");
         const token = randomUUID();
+        const variant = msg.variant === "masterKiller" ? "masterKiller" : "classic";
         const doc = {
           code,
           vsCpu: msg.mode === "cpu",
           seats: { p1: token, p2: msg.mode === "cpu" ? "BOT" : null },
           started: msg.mode === "cpu",
-          ...freshMatchFields(),
+          variant,
+          ...freshMatchFields(variant),
           version: 1
         };
         const created = await redis.set(
@@ -528,6 +1099,7 @@ function GET(request) {
           await seatIn(doc, "p1", token);
           if (doc.started) {
             sendStateView(doc);
+            await maybeDriveClassPick(doc);
             await maybeDriveOpening(doc);
           } else {
             send({ type: "waiting", reason: "Waiting for opponent" });
@@ -551,6 +1123,7 @@ function GET(request) {
       await seatIn(doc, msg.seat, msg.seatToken);
       sendStateView(doc);
       if (!doc.started) send({ type: "waiting", reason: "Waiting for opponent" });
+      await maybeDriveClassPick(doc);
       await maybeDriveOpening(doc);
       await maybeDrive(doc);
     };
@@ -577,9 +1150,32 @@ function GET(request) {
             openingFlips: { ...doc.openingFlips, [mySeat]: flipCoins() }
           };
           if (await commit(next)) await maybeDriveOpening(next);
+        } else if (msg.type === "pickClass") {
+          const doc = await loadDoc(myRoom);
+          if (doc) await handlePickClass(doc, mySeat, msg.class);
+        } else if (msg.type === "usePower") {
+          const doc = await loadDoc(myRoom);
+          if (doc) await handleUsePower(doc, mySeat, msg.action);
         } else if (msg.type === "chooseMove") {
           const doc = await loadDoc(myRoom);
-          if (doc) await applyChosenMove(doc, mySeat, msg.moveIndex);
+          if (!doc) return;
+          if (doc.variant === "masterKiller") {
+            if (doc.state.winner !== null) {
+              send({ type: "error", message: "Game is over" });
+              return;
+            }
+            if (doc.phase !== "play" || doc.state.currentPlayer !== mySeat) {
+              send({ type: "error", message: "Not your turn" });
+              return;
+            }
+            if (!doc.mk || !doc.currentPowerMoves || msg.moveIndex < 0 || msg.moveIndex >= doc.currentPowerMoves.length) {
+              send({ type: "error", message: "Invalid move index" });
+              return;
+            }
+            await applyMasterKillerMove(doc, mySeat, doc.currentPowerMoves[msg.moveIndex]);
+          } else {
+            await applyChosenMove(doc, mySeat, msg.moveIndex);
+          }
         } else if (msg.type === "newMatch") {
           const doc = await loadDoc(myRoom);
           if (!doc) return;
@@ -588,8 +1184,11 @@ function GET(request) {
             return;
           }
           lastAnnouncedWinner = null;
-          const next = { ...doc, ...freshMatchFields() };
-          if (await commit(next)) await maybeDriveOpening(next);
+          const next = { ...doc, ...freshMatchFields(doc.variant) };
+          if (await commit(next)) {
+            await maybeDriveClassPick(next);
+            await maybeDriveOpening(next);
+          }
         }
       } catch (err) {
         console.error("ws message error", err);
