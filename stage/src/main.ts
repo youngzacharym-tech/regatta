@@ -255,7 +255,15 @@ function updateMugs(now: number): void {
       tilt = maxTilt * Math.sin(Math.min(phase, 1) * Math.PI * 0.5) * (kind === "sip" && t > 0.55 ? 1 - (t - 0.55) / 0.45 : 1);
       lift = (kind === "slam" ? 0.55 : 0.4) * Math.sin(Math.min(phase, 1) * Math.PI * 0.5) * (kind === "sip" && t > 0.55 ? 1 - (t - 0.55) / 0.45 : 1);
     }
-    rig.root.rotation.x = -tilt;
+    // Tilt about the WORLD x-axis, toward the drinker: my mug tips back
+    // toward me (+z), theirs toward them (-z). Tilting the local axis of a
+    // yawed mug sends it sideways into the table.
+    const toward = rig === myMug ? 1 : -1;
+    rig.root.quaternion
+      .setFromAxisAngle(new THREE.Vector3(0, 1, 0), rig.baseRotY)
+      .premultiply(
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), toward * tilt),
+      );
     rig.root.position.y = rig.basePos.y + lift;
     // foam shrinks at the drink's peak, once
     if (t > 0.5 && rig.sips < (kind === "slam" ? 4 : rig.sips + 1)) {
