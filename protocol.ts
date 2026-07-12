@@ -5,6 +5,10 @@
 // ============================================================================
 
 import type { GameState, Move, PlayerId } from "./rulebook";
+// Master Killer mode's message shapes below are ADDITIVE ONLY — every field
+// they touch on existing message types is optional and populated only in
+// masterKiller rooms. Classic-mode broadcasts are byte-identical to before.
+import type { PlayerClass, PowerMove } from "./master-killer";
 
 /** Server -> Client */
 export type ServerMessage =
@@ -20,10 +24,22 @@ export type ServerMessage =
        *  lifetime, so clients reconnect and present this to resume their
        *  seat mid-game. */
       seatToken: string;
+      /** Which ruleset this room plays. Classic omits this in spirit (it's
+       *  always "classic" there) — clients branch their whole UI flow on it. */
+      variant: "classic" | "masterKiller";
     }
   | {
       type: "waiting";
       reason: string;
+    }
+  | {
+      /** Master Killer mode only: both players pick a class before the
+       *  opening flip-off. Broadcast whenever a pick changes; `ready` flips
+       *  true once both are set, at which point the normal opening flow
+       *  (the existing "opening" message) takes over. */
+      type: "classPick";
+      classes: { p1: PlayerClass | null; p2: PlayerClass | null };
+      ready: boolean;
     }
   | {
       /** The human opponent disconnected; the room is dissolved. The client
@@ -58,6 +74,20 @@ export type ServerMessage =
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
+      /** Master Killer mode only. `powerMoves` mirrors `legalMoves`'
+       *  security rule — populated only for the current player, so power
+       *  info (chargeAvailable, sweep previews) can't leak to the opponent.
+       *  `power` (classes/charges/safety/valid Push targets) is visible to
+       *  both — it's public table-state, same as knowing whose turn it is. */
+      powerMoves?: PowerMove[] | null;
+      power?: {
+        classes: Record<PlayerId, PlayerClass>;
+        charges: Record<PlayerId, number>;
+        safeTokens: number[];
+        /** Valid Push targets for the CURRENT player, if they're an Archer
+         *  with a charge and it's their turn — empty otherwise. */
+        pushTargets: number[];
+      };
     }
   | {
       type: "gameOver";
@@ -85,6 +115,27 @@ export type ClientMessage =
       mode: "cpu" | "create" | "join";
       /** Required for mode "join". */
       room?: string;
+      /** Ruleset for a NEW room (mode "cpu"/"create"). Ignored for mode
+       *  "join" — you play whatever the room you're joining already is. */
+      variant?: "classic" | "masterKiller";
+    }
+  | {
+      /** Master Killer mode only: choose a class before the opening
+       *  flip-off. Ignored outside class-pick phase or once already picked. */
+      type: "pickClass";
+      class: PlayerClass;
+    }
+  | {
+      /** Master Killer mode only: spend a charge on an active ability
+       *  instead of (Push/Charge) or before (Re-flip) a normal move.
+       *  `moveIndex` indexes the last-received `powerMoves` list — never
+       *  raw move data, so the server re-verifies against its own state,
+       *  same trust model as chooseMove. */
+      type: "usePower";
+      action:
+        | { kind: "push"; targetTokenId: number }
+        | { kind: "reflip" }
+        | { kind: "charge"; moveIndex: number };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

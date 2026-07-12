@@ -37,10 +37,28 @@ import {
 } from "./rulebook.ts";
 import type { ServerMessage, ClientMessage } from "./protocol.ts";
 import { pickBotMove } from "./bot.ts";
+// Master Killer mode — additive only. Everything below is inert in classic
+// rooms (variant === "classic" guards every branch that touches it).
+import {
+  applyCharge as mkApplyCharge,
+  applyPowerMove,
+  applyPush as mkApplyPush,
+  applyReflip as mkApplyReflip,
+  getLegalPowerMoves,
+  getPushTargets,
+  grantZeroFlipCharge,
+  initialPowerState,
+  type PlayerClass,
+  type PowerAction,
+  type PowerMove,
+  type PowerState,
+} from "./master-killer.ts";
+import { pickBotPowerAction } from "./master-killer-bot.ts";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const AUTO_SKIP_DELAY_MS = 500; // gives clients time to render the flip=0/no-move outcome
 const BOT_THINK_MS = 900; // human-feeling pause before the CPU moves
+const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior"];
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const STATIC_DIR = resolve(__dirname, "stage", "dist");
@@ -70,17 +88,20 @@ const MIME_TYPES: Record<string, string> = {
 class Match {
   state: GameState;
   currentFlip: number | null = null;
-  currentLegalMoves: Move[] | null = null;
+  currentLegalMoves: Move[] | null = null; // classic mode only
   clients: Map<PlayerId, WebSocket> = new Map();
   /** Room code this match lives under (used for logs + invites). */
   readonly code: string;
   /** When true, p2 is the server-side bot — the room is "full" with 1 human. */
   readonly vsCpu: boolean;
+  /** Which ruleset this room plays. */
+  readonly variant: "classic" | "masterKiller";
   /** Monotonic turn stamp so a stale bot timer can't fire into a new turn. */
   private botTurnStamp = 0;
   /** Every match opens with a flip-off: both players flip, higher count
-   *  moves first, ties re-flip. Normal turns don't start until resolved. */
-  phase: "opening" | "play" = "opening";
+   *  moves first, ties re-flip. Normal turns don't start until resolved.
+   *  Master Killer rooms insert "classPick" before "opening". */
+  phase: "classPick" | "opening" | "play" = "opening";
   openingFlips: { p1: number | null; p2: number | null } = { p1: null, p2: null };
   // Stats tracked for the win-screen display.
   turns = 0;
@@ -93,12 +114,38 @@ class Match {
   skippedPlayer: PlayerId | null = null;
   skipReason: "flip-zero" | "no-legal-move" | null = null;
 
-  constructor(code: string, vsCpu: boolean) {
+  // ---- Master Killer mode only (all null/unused in classic rooms) --------
+  mk: PowerState | null = null;
+  currentPowerMoves: PowerMove[] | null = null;
+  private classesPicked: Record<PlayerId, boolean> = { p1: false, p2: false };
+  /** Bumped whenever a fresh flip lands or a Re-flip replaces one — lets a
+   *  scheduled auto-skip notice it's stale (a Re-flip arrived in the same
+   *  window) and quietly no-op instead of skipping the wrong flip. */
+  private flipStamp = 0;
+
+  constructor(code: string, vsCpu: boolean, variant: "classic" | "masterKiller" = "classic") {
     this.code = code;
     this.vsCpu = vsCpu;
+    this.variant = variant;
     this.state = initialState();
     // Randomize first player each match to counter the 52/48 first-mover edge.
     this.state.currentPlayer = Math.random() < 0.5 ? "p1" : "p2";
+    if (variant === "masterKiller") this.mk = initialPowerState();
+  }
+
+  /** Entry point once the room is full (fresh join, or a rematch). Classic
+   *  rooms go straight to the opening flip-off; Master Killer rooms pick
+   *  classes first. */
+  beginMatch(): void {
+    if (this.variant === "masterKiller") {
+      this.phase = "classPick";
+      this.classesPicked = { p1: false, p2: false };
+      this.mk = initialPowerState();
+      this.broadcastClassPick();
+      this.scheduleBotClassPick();
+    } else {
+      this.startOpening();
+    }
   }
 
   addClient(ws: WebSocket): PlayerId | null {
@@ -130,19 +177,73 @@ class Match {
   }
 
   private broadcastState(): void {
+    const mkPublic = this.mk
+      ? {
+          classes: { ...this.mk.classes },
+          charges: { ...this.mk.charges },
+          safeTokens: [...this.mk.safeTokens],
+          pushTargets:
+            this.mk.classes[this.state.currentPlayer] === "archer"
+              ? getPushTargets(this.state, this.mk, this.state.currentPlayer)
+              : [],
+        }
+      : undefined;
+
     for (const role of ["p1", "p2"] as PlayerId[]) {
+      const isCurrent = this.state.currentPlayer === role;
       this.send(role, {
         type: "state",
         state: this.state,
         flip: this.currentFlip,
         legalMoves:
-          this.state.currentPlayer === role ? this.currentLegalMoves : null,
+          this.variant === "classic" && isCurrent ? this.currentLegalMoves : null,
+        powerMoves:
+          this.variant === "masterKiller" && isCurrent ? this.currentPowerMoves : null,
+        power: mkPublic,
         lastMove: this.lastMove,
         lastMovePlayer: this.lastMovePlayer,
         wasSkipped: this.wasSkipped,
         skippedPlayer: this.skippedPlayer,
         skipReason: this.skipReason,
       });
+    }
+  }
+
+  // ---- Master Killer: class pick ------------------------------------------
+
+  private broadcastClassPick(): void {
+    if (!this.mk) return;
+    this.broadcast({
+      type: "classPick",
+      classes: {
+        p1: this.classesPicked.p1 ? this.mk.classes.p1 : null,
+        p2: this.classesPicked.p2 ? this.mk.classes.p2 : null,
+      },
+      ready: this.classesPicked.p1 && (this.classesPicked.p2 || this.vsCpu),
+    });
+  }
+
+  private scheduleBotClassPick(): void {
+    if (!this.vsCpu) return;
+    const stamp = ++this.botTurnStamp;
+    setTimeout(() => {
+      if (stamp !== this.botTurnStamp) return;
+      if (this.phase === "classPick" && !this.classesPicked.p2) {
+        this.handlePickClass("p2", MK_CLASSES[Math.floor(Math.random() * MK_CLASSES.length)]);
+      }
+    }, BOT_THINK_MS);
+  }
+
+  handlePickClass(role: PlayerId, cls: PlayerClass): void {
+    if (this.phase !== "classPick" || !this.mk || this.classesPicked[role]) return;
+    this.mk = { ...this.mk, classes: { ...this.mk.classes, [role]: cls } };
+    this.classesPicked = { ...this.classesPicked, [role]: true };
+    this.broadcastClassPick();
+
+    if (this.classesPicked.p1 && (this.classesPicked.p2 || this.vsCpu)) {
+      this.phase = "opening";
+      console.log(`[${this.code}] classes: p1=${this.mk.classes.p1} p2=${this.mk.classes.p2}`);
+      this.startOpening();
     }
   }
 
@@ -238,54 +339,185 @@ class Match {
 
     this.turns++;
     this.currentFlip = flipCoins();
-    this.currentLegalMoves = getLegalMoves(this.state, this.currentFlip);
+    this.flipStamp++;
+
+    if (this.variant === "masterKiller" && this.mk) {
+      if (this.currentFlip === 0) this.mk = grantZeroFlipCharge(this.mk, this.state.currentPlayer);
+      this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
+      this.currentLegalMoves = null;
+    } else {
+      this.currentLegalMoves = getLegalMoves(this.state, this.currentFlip);
+      this.currentPowerMoves = null;
+    }
+
     this.broadcastState();
     // Once the state is out, the announcement is spent. Anything the next
     // call to broadcastState() shows should be fresh.
     this.clearAnnouncement();
 
-    // CPU turn: think briefly, then move. The stamp guards against a stale
-    // timer firing after a skip/new-match already advanced the game.
-    if (
-      this.vsCpu &&
-      this.state.currentPlayer === "p2" &&
-      this.currentLegalMoves.length > 0
-    ) {
-      const stamp = ++this.botTurnStamp;
-      setTimeout(() => {
-        if (stamp !== this.botTurnStamp) return;
-        if (this.currentLegalMoves === null || this.state.currentPlayer !== "p2") return;
-        this.handleChooseMove("p2", pickBotMove(this.state, this.currentLegalMoves));
-      }, BOT_THINK_MS);
+    if (this.vsCpu && this.state.currentPlayer === "p2") {
+      if (this.variant === "masterKiller") this.scheduleBotPowerTurn();
+      else this.scheduleBotClassicMove();
     }
 
-    if (this.currentLegalMoves.length === 0) {
-      // Let clients see the flip result before we auto-skip.
-      const skippedPlayer = this.state.currentPlayer;
-      const reason: "flip-zero" | "no-legal-move" =
-        this.currentFlip === 0 ? "flip-zero" : "no-legal-move";
-      setTimeout(() => {
-        this.state = applyNoMove(this.state);
-        this.currentFlip = null;
-        this.currentLegalMoves = null;
-        this.wasSkipped = true;
-        this.skippedPlayer = skippedPlayer;
-        this.skipReason = reason;
-        this.advance();
-      }, AUTO_SKIP_DELAY_MS);
+    this.scheduleAutoSkipIfNeeded();
+  }
+
+  /** CPU turn, classic mode: think briefly, then move. The stamp guards
+   *  against a stale timer firing after a skip/new-match already advanced
+   *  the game. */
+  private scheduleBotClassicMove(): void {
+    if (!this.currentLegalMoves || this.currentLegalMoves.length === 0) return;
+    const stamp = ++this.botTurnStamp;
+    setTimeout(() => {
+      if (stamp !== this.botTurnStamp) return;
+      if (this.currentLegalMoves === null || this.state.currentPlayer !== "p2") return;
+      this.handleChooseMove("p2", pickBotMove(this.state, this.currentLegalMoves));
+    }, BOT_THINK_MS);
+  }
+
+  /** CPU turn, Master Killer mode. Always scheduled (even with zero legal
+   *  moves) — a Mage bot might still rescue the turn via Re-flip; if the
+   *  bot has no action at all, pickBotPowerAction returns null and the
+   *  already-scheduled auto-skip handles it untouched. */
+  private scheduleBotPowerTurn(): void {
+    if (!this.mk || this.currentFlip === null) return;
+    const stamp = ++this.botTurnStamp;
+    const flip = this.currentFlip;
+    setTimeout(() => {
+      if (stamp !== this.botTurnStamp) return;
+      if (!this.mk || this.state.currentPlayer !== "p2") return;
+      const action = pickBotPowerAction(this.state, this.mk, this.currentPowerMoves ?? [], flip, Math.random);
+      if (action) this.dispatchPowerAction("p2", action);
+    }, BOT_THINK_MS);
+  }
+
+  /** Schedule the classic auto-skip if the current flip has no legal
+   *  action. Reflip-aware: captures flipStamp at schedule time, and a
+   *  Re-flip (which bumps flipStamp) silently supersedes this specific
+   *  timer rather than letting it fire on stale data — the Re-flip's own
+   *  code re-arms this same check against its fresh flip if still needed. */
+  private scheduleAutoSkipIfNeeded(): void {
+    const empty =
+      this.variant === "masterKiller"
+        ? (this.currentPowerMoves?.length ?? 0) === 0
+        : (this.currentLegalMoves?.length ?? 0) === 0;
+    if (!empty) return;
+
+    const skippedPlayer = this.state.currentPlayer;
+    const reason: "flip-zero" | "no-legal-move" = this.currentFlip === 0 ? "flip-zero" : "no-legal-move";
+    const stampAtSchedule = this.flipStamp;
+    setTimeout(() => {
+      if (this.flipStamp !== stampAtSchedule) return; // superseded by a Re-flip
+      this.state = applyNoMove(this.state);
+      this.currentFlip = null;
+      this.currentLegalMoves = null;
+      this.currentPowerMoves = null;
+      this.wasSkipped = true;
+      this.skippedPlayer = skippedPlayer;
+      this.skipReason = reason;
+      this.advance();
+    }, AUTO_SKIP_DELAY_MS);
+  }
+
+  // ---- Master Killer: turn-ending actions (shared by human + CPU paths) --
+
+  private applyMasterKillerMove(role: PlayerId, move: PowerMove): void {
+    if (!this.mk) return;
+    const captureCount = move.captures.length + move.bonusCaptures.length;
+    this.captures[role] += captureCount;
+    this.lastMove = move; // PowerMove is a structural superset of Move
+    this.lastMovePlayer = role;
+    const r = applyPowerMove(this.state, this.mk, move, role);
+    this.state = r.state;
+    this.mk = r.power;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(
+      `[MOVE] ${role} tok${move.tokenId} ${move.from}->${move.to}`,
+      `caps=${captureCount}`, `snipe=${move.bonusCaptures.length > 0}`,
+      `shield=${move.landsOnShield}`, `breaksWard=${move.breaksWard}`, `win=${move.causesWin}`,
+    );
+    this.advance();
+  }
+
+  private applyMasterKillerCharge(role: PlayerId, move: PowerMove): void {
+    if (!this.mk) return;
+    const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
+    this.captures[role] += captureCount;
+    this.lastMove = move;
+    this.lastMovePlayer = role;
+    const r = mkApplyCharge(this.state, this.mk, move, role);
+    this.state = r.state;
+    this.mk = r.power;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(`[CHARGE] ${role} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} win=${move.causesWin}`);
+    this.advance();
+  }
+
+  private applyMasterKillerPush(role: PlayerId, targetTokenId: number): void {
+    if (!this.mk) return;
+    const r = mkApplyPush(this.state, this.mk, targetTokenId, role);
+    this.state = r.state;
+    this.mk = r.power;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(`[PUSH] ${role} -> tok${targetTokenId}`);
+    this.advance();
+  }
+
+  /** Re-flip does NOT end the turn — it replaces the flip and re-broadcasts,
+   *  same player still to act. */
+  private applyMasterKillerReflip(role: PlayerId): void {
+    if (!this.mk) return;
+    this.mk = mkApplyReflip(this.mk, role);
+    this.currentFlip = flipCoins();
+    this.flipStamp++;
+    if (this.currentFlip === 0) this.mk = grantZeroFlipCharge(this.mk, role);
+    this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
+    console.log(`[${this.code}] ${role} re-flipped -> ${this.currentFlip}`);
+    this.broadcastState();
+    this.scheduleAutoSkipIfNeeded();
+  }
+
+  private dispatchPowerAction(role: PlayerId, action: PowerAction): void {
+    switch (action.kind) {
+      case "move":
+        this.applyMasterKillerMove(role, action.move);
+        break;
+      case "charge":
+        this.applyMasterKillerCharge(role, action.move);
+        break;
+      case "push":
+        this.applyMasterKillerPush(role, action.targetTokenId);
+        break;
+      case "reflip":
+        this.applyMasterKillerReflip(role);
+        break;
     }
   }
 
-  /** Handle a chooseMove message. Returns true if the game continues. */
+  /** Handle a chooseMove message — a normal (possibly power-boosted) move. */
   handleChooseMove(role: PlayerId, moveIndex: number): void {
     if (this.state.winner !== null) {
       this.send(role, { type: "error", message: "Game is over" });
       return;
     }
-    if (this.state.currentPlayer !== role) {
+    if (this.phase !== "play" || this.state.currentPlayer !== role) {
       this.send(role, { type: "error", message: "Not your turn" });
       return;
     }
+
+    if (this.variant === "masterKiller") {
+      if (!this.mk || this.currentPowerMoves === null || moveIndex < 0 || moveIndex >= this.currentPowerMoves.length) {
+        this.send(role, { type: "error", message: "Invalid move index" });
+        return;
+      }
+      this.applyMasterKillerMove(role, this.currentPowerMoves[moveIndex]);
+      return;
+    }
+
     if (
       this.currentLegalMoves === null ||
       moveIndex < 0 ||
@@ -315,6 +547,52 @@ class Match {
     this.advance();
   }
 
+  /** Handle a usePower message — Master Killer's Push/Re-flip/Charge. */
+  handleUsePower(role: PlayerId, action: Extract<ClientMessage, { type: "usePower" }>["action"]): void {
+    if (this.variant !== "masterKiller" || !this.mk) {
+      this.send(role, { type: "error", message: "Not a Master Killer room" });
+      return;
+    }
+    if (this.state.winner !== null) {
+      this.send(role, { type: "error", message: "Game is over" });
+      return;
+    }
+    if (this.phase !== "play" || this.state.currentPlayer !== role) {
+      this.send(role, { type: "error", message: "Not your turn" });
+      return;
+    }
+
+    const cls = this.mk.classes[role];
+
+    if (action.kind === "reflip") {
+      if (cls !== "mage") return this.send(role, { type: "error", message: "Only a Mage can Re-flip" });
+      if (this.mk.charges[role] < 1) return this.send(role, { type: "error", message: "No charge available" });
+      if (this.mk.reflipUsedThisTurn) return this.send(role, { type: "error", message: "Already re-flipped this turn" });
+      this.applyMasterKillerReflip(role);
+      return;
+    }
+
+    if (action.kind === "push") {
+      if (cls !== "archer") return this.send(role, { type: "error", message: "Only an Archer can Push" });
+      if (this.mk.charges[role] < 1) return this.send(role, { type: "error", message: "No charge available" });
+      if (!getPushTargets(this.state, this.mk, role).includes(action.targetTokenId)) {
+        return this.send(role, { type: "error", message: "Invalid push target" });
+      }
+      this.applyMasterKillerPush(role, action.targetTokenId);
+      return;
+    }
+
+    // charge
+    if (cls !== "warrior") return this.send(role, { type: "error", message: "Only a Warrior can Charge" });
+    if (this.mk.charges[role] < 1) return this.send(role, { type: "error", message: "No charge available" });
+    if (!this.currentPowerMoves || action.moveIndex < 0 || action.moveIndex >= this.currentPowerMoves.length) {
+      return this.send(role, { type: "error", message: "Invalid move index" });
+    }
+    const move = this.currentPowerMoves[action.moveIndex];
+    if (!move.chargeAvailable) return this.send(role, { type: "error", message: "Charge not available for that move" });
+    this.applyMasterKillerCharge(role, move);
+  }
+
   /**
    * Handle a newMatch request. Only starts a new game once the current one
    * has ended, so a mid-game misclick from a stale button can't reset play.
@@ -327,15 +605,17 @@ class Match {
       });
       return;
     }
-    // Fresh state + stats; the opening flip-off decides who moves first.
+    // Fresh state + stats; class pick (Master Killer) or the opening
+    // flip-off (classic) decides how the new match starts.
     this.state = initialState();
     this.currentFlip = null;
     this.currentLegalMoves = null;
+    this.currentPowerMoves = null;
     this.turns = 0;
     this.captures = { p1: 0, p2: 0 };
     this.clearAnnouncement();
     console.log(`new match started (requested by ${role})`);
-    this.startOpening();
+    this.beginMatch();
   }
 }
 
@@ -448,13 +728,13 @@ wss.on("connection", (ws) => {
       room = target;
     } else {
       const code = newRoomCode();
-      room = new Match(code, msg.mode === "cpu");
+      room = new Match(code, msg.mode === "cpu", msg.variant === "masterKiller" ? "masterKiller" : "classic");
       rooms.set(code, room);
     }
 
     role = room.addClient(ws)!;
     console.log(
-      `[+] ${role} seated in room ${room.code}` +
+      `[+] ${role} seated in room ${room.code} (${room.variant})` +
         (room.vsCpu ? " (vs CPU)" : ` (${room.clients.size}/2)`),
     );
     // The local referee dissolves rooms on disconnect, so seat tokens are
@@ -464,12 +744,13 @@ wss.on("connection", (ws) => {
       player: role,
       room: room.code,
       vsCpu: room.vsCpu,
+      variant: room.variant,
       seatToken: Math.random().toString(36).slice(2),
     });
 
     if (room.isFull()) {
-      console.log(`[${room.code}] match starting — opening flip-off`);
-      room.startOpening();
+      console.log(`[${room.code}] match starting`);
+      room.beginMatch();
     } else {
       sendMsg({ type: "waiting", reason: "Waiting for opponent" });
     }
@@ -500,6 +781,10 @@ wss.on("connection", (ws) => {
       sendMsg({ type: "error", message: "Join a room first" });
     } else if (msg.type === "openingFlip") {
       room.handleOpeningFlip(role);
+    } else if (msg.type === "pickClass") {
+      room.handlePickClass(role, msg.class);
+    } else if (msg.type === "usePower") {
+      room.handleUsePower(role, msg.action);
     } else if (msg.type === "chooseMove") {
       room.handleChooseMove(role, msg.moveIndex);
     } else if (msg.type === "newMatch") {
