@@ -49,6 +49,22 @@ export const PUSH_DISTANCE = 1;
 export type WardScope = "all" | "most-advanced";
 export const WARD_SCOPE: WardScope = "most-advanced";
 
+/** Archer's Push can target a warded token (previously impossible — Push
+ *  used to treat Ward as full immunity, same as everyone else). This is the
+ *  charge cost for pushing a WARDED target specifically; a normal push still
+ *  costs 1.
+ *  (Was 2 — the "base reposition (1) + piercing Ward (1 more)" framing, on
+ *  the theory that draining the whole CHARGE_CAP bank in one shot suits
+ *  bypassing the game's strongest defensive ability. Simulation showed 2
+ *  brought Archer vs Mage from 30.6/69.3 to 37.6/62.4 — a real improvement,
+ *  but still the widest margin of the three matchups (24.8 pts, vs ~17-21
+ *  for the other two edges). Dropping to 1 instead brought it to 40.2/59.8
+ *  (19.6 pts) — landing right in line with archer-vs-warrior (19.8) and
+ *  mage-vs-warrior (15.0), the most even the whole RPS triangle has been.
+ *  Kept at 1: same cost as a normal push, still gated on `charges >=
+ *  PUSH_WARD_COST` so it scales cleanly if ever retuned back up.) */
+export const PUSH_WARD_COST = 1;
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -162,10 +178,18 @@ function hasTransientSafety(power: PowerState, token: TokenState): boolean {
 /** Universal "is this token capturable/pushable/sweepable AT ALL right
  *  now" check, used everywhere EXCEPT the main landing-capture path (which
  *  needs to distinguish ward-protection specifically, since that's the one
- *  case a Warrior's landing can pierce via Shieldbreaker). Shield tiles and
- *  transient safety block every class with no exception. */
+ *  case a Warrior's landing can pierce via Shieldbreaker) and Push (which
+ *  can also pierce Ward, at a price — see getPushTargets/pushCost). Shield
+ *  tiles and transient safety block every class with no exception. */
 function isProtected(state: GameState, power: PowerState, token: TokenState): boolean {
   return onShieldTile(token) || hasTransientSafety(power, token) || isWarded(state, power, token);
+}
+
+/** What a Push against this specific target will cost: PUSH_WARD_COST if
+ *  it's currently warded, 1 otherwise. Evaluated against the pre-push
+ *  state/target, since isWarded is derived from live board position. */
+function pushCost(state: GameState, power: PowerState, target: TokenState): number {
+  return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
 }
 
 function addCharge(power: PowerState, player: PlayerId): PowerState {
@@ -415,17 +439,23 @@ export function applyCharge(
   );
 }
 
-/** Archer's Push: valid targets are unprotected enemy tokens on a contested
- *  tile. Spends the turn (no token of the pusher's moves). Deliberately
- *  never grants a charge back, even in the knocked-overboard case — Push is
- *  a repositioning tool, not a capture tool, and its cost is meant to be a
- *  clean 1-charge spend with no chance to chain into a refund. */
+/** Archer's Push: valid targets are enemy tokens on a contested tile that
+ *  aren't shield/transient-safety blocked. A warded token is ALSO a valid
+ *  target, but only if the Archer can afford PUSH_WARD_COST — baking
+ *  affordability into the target list itself (rather than a separate
+ *  legality branch at the call site) so the UI's target highlights and the
+ *  server's legality check can never drift apart. Spends the turn (no token
+ *  of the pusher's moves). Deliberately never grants a charge back, even in
+ *  the knocked-overboard case — Push is a repositioning tool, not a capture
+ *  tool, and its cost is meant to be a clean spend with no chance to chain
+ *  into a refund. */
 export function getPushTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !isProtected(state, power, t))
+    .filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t))
+    .filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST)
     .map((t) => t.id);
 }
 
@@ -436,6 +466,7 @@ export function applyPush(
   mover: PlayerId,
 ): { state: GameState; power: PowerState } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
+  const cost = pushCost(state, power, target);
   const rawTo = target.position - PUSH_DISTANCE;
   // Same-owner tokens share a lane everywhere, so any position match is a
   // real collision. Different-owner tokens only physically share a tile in
@@ -462,7 +493,7 @@ export function applyPush(
   }
   const spentPower: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
     safeTokens,
   };
   const nextState: GameState = {

@@ -12,6 +12,7 @@ import { PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState 
 import {
   CHARGE_CAP,
   PUSH_DISTANCE,
+  PUSH_WARD_COST,
   applyCharge,
   applyPowerMove,
   applyPush,
@@ -332,6 +333,61 @@ function check(name: string, cond: boolean, detail?: string) {
   const s3 = state("p1", { 0: PATH_LENGTH_PER_PLAYER, 1: -1, 2: -1, 3: -1 });
   const anyToken = s3.tokens.find((t) => t.id === 0)!;
   check("Ward: no on-board tokens means nothing is warded", !isWarded(s3, pw, anyToken));
+}
+
+// ---------------------------------------------------------------------------
+// 9. Push vs Ward: Archer can target a warded token, but only by paying
+//    PUSH_WARD_COST (both charges) instead of the normal 1.
+// ---------------------------------------------------------------------------
+{
+  // p2 mage's only on-board token (id4) is trivially most-advanced -> warded.
+  const s = state("p1", { 4: 6 });
+
+  const pwPoor = power({ p1: "archer", p2: "mage" }, { p1: PUSH_WARD_COST - 1, p2: CHARGE_CAP });
+  check(
+    "Push: a warded target is NOT offered when the Archer can't afford PUSH_WARD_COST",
+    !getPushTargets(s, pwPoor, "p1").includes(4),
+  );
+
+  const pwRich = power({ p1: "archer", p2: "mage" }, { p1: PUSH_WARD_COST, p2: CHARGE_CAP });
+  check(
+    "Push: a warded target IS offered once the Archer can afford PUSH_WARD_COST",
+    getPushTargets(s, pwRich, "p1").includes(4),
+  );
+
+  const r = applyPush(s, pwRich, 4, "p1");
+  check(
+    "Push: costs PUSH_WARD_COST against a warded target, not 1",
+    r.power.charges.p1 === PUSH_WARD_COST - PUSH_WARD_COST,
+    `left with ${r.power.charges.p1} charges`,
+  );
+
+  // Soft push (no collision): the warded token is still the mage's only
+  // on-board token afterward, so it's STILL most-advanced/warded — a single
+  // non-collision push doesn't strip Ward by itself, it just costs tempo.
+  const sSoft = state("p1", { 4: 8, 5: 3 }); // id4 most-advanced/warded; id5 far behind
+  const rSoft = applyPush(sSoft, pwRich, 4, "p1");
+  const movedSoft = rSoft.state.tokens.find((t) => t.id === 4)!;
+  check(
+    "Push: a soft push against a warded token still lands it as most-advanced -> still warded",
+    movedSoft.position === 8 - PUSH_DISTANCE && isWarded(rSoft.state, rSoft.power, movedSoft),
+  );
+
+  // Collision push: id4 (warded) is knocked into id5 (same owner) and bounces
+  // to reserve — Ward is now permanently gone from id4 (reserved tokens are
+  // never warded) and fully hands off to id5, the mage's only remaining
+  // on-board token. This is the real, hard answer to a lone warded rusher.
+  const sHard = state("p1", { 4: 6, 5: 5 }); // id4 warded @6; id5 sits at the push's landing tile
+  check("Push: sanity — id4 is warded before the push", isWarded(sHard, pwRich, sHard.tokens.find((t) => t.id === 4)!));
+  const rHard = applyPush(sHard, pwRich, 4, "p1");
+  const movedHard = rHard.state.tokens.find((t) => t.id === 4)!;
+  const survivor = rHard.state.tokens.find((t) => t.id === 5)!;
+  check("Push: a warded token can be knocked to reserve just like any other target", movedHard.position === -1);
+  check("Push: a reserved token is never warded, even freshly post-push", !isWarded(rHard.state, rHard.power, movedHard));
+  check(
+    "Push: Ward fully hands off to the mage's remaining on-board token once the warded one is reserved",
+    isWarded(rHard.state, rHard.power, survivor),
+  );
 }
 
 // ---------------------------------------------------------------------------
