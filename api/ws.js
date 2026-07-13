@@ -181,6 +181,7 @@ var CHARGE_CAP = 2;
 var PUSH_DISTANCE = 1;
 var WARD_SCOPE = "most-advanced";
 var PUSH_WARD_COST = 1;
+var PUSH_WARD_DISTANCE = 3;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
@@ -220,6 +221,9 @@ function isProtected(state, power, token) {
 }
 function pushCost(state, power, target) {
   return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
+}
+function pushDistance(state, power, target) {
+  return isWarded(state, power, target) ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
 }
 function addCharge(power, player) {
   const current = power.charges[player];
@@ -279,7 +283,7 @@ function getLegalPowerMoves(state, power, flip) {
       }
     }
     const bonusCaptures = [];
-    if (cls === "archer" && to + 1 <= 11) {
+    if (cls === "archer" && BOARD_LAYOUT[to + 1].isContested) {
       const sniped = state.tokens.find(
         (t) => t.position === to + 1 && t.owner !== player && t.id !== enemy?.id
       );
@@ -390,7 +394,7 @@ function getPushTargets(state, power, mover) {
 function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
   const cost = pushCost(state, power, target);
-  const rawTo = target.position - PUSH_DISTANCE;
+  const rawTo = target.position - pushDistance(state, power, target);
   const contestedLanding = rawTo >= 0 && rawTo < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[rawTo].isContested;
   const collides = state.tokens.some(
     (t) => t.id !== targetTokenId && t.position === rawTo && (t.owner === target.owner || contestedLanding)
@@ -453,14 +457,14 @@ function scoreMove(state, m, extraCaptures, rand) {
 }
 function scorePush(state, power, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
-  const rawTo = target.position - PUSH_DISTANCE;
+  const warded = isWarded(state, power, target);
+  const rawTo = target.position - (warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE);
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
   );
   const sendsHome = collides || rawTo < 0;
-  const warded = isWarded(state, power, target);
   let score = (sendsHome ? 350 : 180) + target.position * 8;
-  if (warded) score += sendsHome ? 250 : -40;
+  if (warded) score += sendsHome ? 250 : 60;
   score += rand() * 20;
   return score;
 }

@@ -65,6 +65,25 @@ export const WARD_SCOPE: WardScope = "most-advanced";
  *  PUSH_WARD_COST` so it scales cleanly if ever retuned back up.) */
 export const PUSH_WARD_COST = 1;
 
+/** How far a Push knocks back a WARDED target specifically — a normal push
+ *  still uses PUSH_DISTANCE. PUSH_WARD_COST is already at its floor (1, same
+ *  as a normal push), so this is the next lever: a bigger knockback doesn't
+ *  touch Ward's actual promise (still fully uncapturable — Push never
+ *  captures), it just makes the one thing Archer CAN do to a warded token
+ *  hit harder. Scoped by construction to matchups against a Mage (isWarded
+ *  is never true otherwise), so archer-mirror/archer-vs-warrior can't drift
+ *  from this — see the isWarded branch in applyPush.
+ *  (Tried 2: archer-vs-mage barely moved, 34.0/66.0 -> 35.8/64.2 — the
+ *  contested zone is only 8 tiles, so a 2-tile shove rarely crosses back
+ *  into the private lane. Tried 4: overshot to 55.1/44.9 (archer favored).
+ *  Landed on 3: 46.6/53.4 on a 5000-game sample — now the TIGHTEST margin
+ *  in the whole triangle (mage-vs-warrior, untouched by this change, is
+ *  the widest at 19.2 and is the next open balance thread). Confirms the
+ *  scoping claim too: archer-vs-warrior and archer-mirror held flat across
+ *  every value tried, exactly as expected since isWarded can't be true
+ *  without a Mage on the other side.) */
+export const PUSH_WARD_DISTANCE = 3;
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -190,6 +209,12 @@ function isProtected(state: GameState, power: PowerState, token: TokenState): bo
  *  state/target, since isWarded is derived from live board position. */
 function pushCost(state: GameState, power: PowerState, target: TokenState): number {
   return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
+}
+
+/** How far a Push against this specific target knocks it back:
+ *  PUSH_WARD_DISTANCE if it's currently warded, PUSH_DISTANCE otherwise. */
+function pushDistance(state: GameState, power: PowerState, target: TokenState): number {
+  return isWarded(state, power, target) ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
 }
 
 function addCharge(power: PowerState, player: PlayerId): PowerState {
@@ -476,7 +501,7 @@ export function applyPush(
 ): { state: GameState; power: PowerState } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const cost = pushCost(state, power, target);
-  const rawTo = target.position - PUSH_DISTANCE;
+  const rawTo = target.position - pushDistance(state, power, target);
   // Same-owner tokens share a lane everywhere, so any position match is a
   // real collision. Different-owner tokens only physically share a tile in
   // the contested zone (positions 4-11 are the SAME square for both

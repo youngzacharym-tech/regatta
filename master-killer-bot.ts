@@ -13,6 +13,7 @@ import {
   getPushTargets,
   isWarded,
   PUSH_DISTANCE,
+  PUSH_WARD_DISTANCE,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -66,22 +67,23 @@ function scoreMove(state: GameState, m: PowerMove, extraCaptures: number[], rand
  *  for normal captures, scaled down a bit since it costs a charge and (for
  *  the non-collision case) doesn't remove the token outright.
  *
- *  A warded target costs PUSH_WARD_COST (both charges) instead of 1, so it's
- *  only worth taking when the push actually pays that off: sending it home
- *  strips Ward permanently (a big deal, scored well above a normal
- *  send-home) while a non-collision push against a warded token just
- *  reshuffles which token Ward lands on next — real, but not worth burning
- *  the whole bank over, so it's scored below a normal non-collision push. */
+ *  A warded target costs the same PUSH_WARD_COST as a normal push (both are
+ *  1), but travels PUSH_WARD_DISTANCE instead of PUSH_DISTANCE — same price,
+ *  bigger effect. Sending it home strips Ward permanently (scored well above
+ *  a normal send-home); even the non-collision case is worth a bit more
+ *  than an equivalent normal push, since the longer knockback is more likely
+ *  to shove the target out of the contested zone entirely or hand Ward off
+ *  to a different token. */
 function scorePush(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
-  const rawTo = target.position - PUSH_DISTANCE;
+  const warded = isWarded(state, power, target);
+  const rawTo = target.position - (warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE);
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo,
   );
   const sendsHome = collides || rawTo < 0;
-  const warded = isWarded(state, power, target);
   let score = (sendsHome ? 350 : 180) + target.position * 8;
-  if (warded) score += sendsHome ? 250 : -40;
+  if (warded) score += sendsHome ? 250 : 60;
   score += rand() * 20;
   return score;
 }
