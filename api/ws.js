@@ -180,6 +180,7 @@ function otherPlayerId(p) {
 var CHARGE_CAP = 2;
 var PUSH_DISTANCE = 1;
 var WARD_SCOPE = "most-advanced";
+var PUSH_WARD_COST = 1;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
@@ -216,6 +217,9 @@ function hasTransientSafety(power, token) {
 }
 function isProtected(state, power, token) {
   return onShieldTile(token) || hasTransientSafety(power, token) || isWarded(state, power, token);
+}
+function pushCost(state, power, target) {
+  return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
 }
 function addCharge(power, player) {
   const current = power.charges[player];
@@ -381,10 +385,11 @@ function applyCharge(state, power, move, mover) {
 }
 function getPushTargets(state, power, mover) {
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !isProtected(state, power, t)).map((t) => t.id);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).map((t) => t.id);
 }
 function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
+  const cost = pushCost(state, power, target);
   const rawTo = target.position - PUSH_DISTANCE;
   const contestedLanding = rawTo >= 0 && rawTo < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[rawTo].isContested;
   const collides = state.tokens.some(
@@ -399,7 +404,7 @@ function applyPush(state, power, targetTokenId, mover) {
   }
   const spentPower = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
     safeTokens
   };
   const nextState = {
@@ -446,14 +451,16 @@ function scoreMove(state, m, extraCaptures, rand) {
   score += rand() * 20;
   return score;
 }
-function scorePush(state, targetId, rand) {
+function scorePush(state, power, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
-  const rawTo = target.position - 2;
+  const rawTo = target.position - PUSH_DISTANCE;
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
   );
   const sendsHome = collides || rawTo < 0;
+  const warded = isWarded(state, power, target);
   let score = (sendsHome ? 350 : 180) + target.position * 8;
+  if (warded) score += sendsHome ? 250 : -40;
   score += rand() * 20;
   return score;
 }
@@ -483,7 +490,7 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
   }
   if (cls === "archer" && charges >= 1) {
     for (const targetId of getPushTargets(state, power, mover)) {
-      const score = scorePush(state, targetId, rand);
+      const score = scorePush(state, power, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "push", targetTokenId: targetId };

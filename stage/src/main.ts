@@ -919,9 +919,12 @@ function renderHud(state: GameState, flip: number | null) {
   let powerLine = "";
   if (currentPower) {
     const mySide: PlayerId = myRole ?? "p1";
+    const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
     const cls = currentPower.classes[mySide];
+    const theirCls = currentPower.classes[theirSide];
     const charges = currentPower.charges[mySide];
-    powerLine = `<div>Class: <b>${classLabel(cls)}</b> · Charges: <b>${charges}/${CHARGE_CAP}</b></div>`;
+    powerLine = `<div>Class: <b>${classLabel(cls)}</b> · Charges: <b>${charges}/${CHARGE_CAP}</b></div>
+      <div>Opponent: <b>${classLabel(theirCls)}</b></div>`;
   }
   hud.innerHTML = `
     <div>You: <b>${myColor}</b></div>
@@ -1782,6 +1785,57 @@ const GUIDE_SPREADS: [string, string][] = [
        ale</span> — your mug glows; tap it and drink to the crossing.</li>
        <li>First to bring <b>all four stones home</b> wins the race — and
        drains the mug.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>Master Killer</h2>
+     <p>A darker table, offered from the menu before you sit down: each crew
+     picks a <span class="gold">class</span> before the flip-off and plays
+     the whole match armed with its powers. It does not mix with the classic
+     rules mid-match — pick it fresh from the menu.</p>
+     <p>Every capture, every zero you roll, and every shield tile you land on
+     fills your <span class="gold">charge</span> — up to two banked at once.
+     Spend a charge to fire your class's active power, offered as a button
+     beside your coins whenever you can afford it.</p>
+     <p style="margin-top:14px; font-style:italic;">Turn the page to meet the
+     three classes &rsaquo;</p>`,
+    `<h2>The Archer</h2>
+     <ul>
+       <li><b>Snipe</b> (passive, free): move onto shared water, and if an
+       unprotected enemy stone sits exactly one pace further along, it is
+       captured too — no charge spent.</li>
+       <li><b>Push</b> (active, 1 charge): shove an enemy stone in shared
+       water back one pace. Land it on your own stone, or off the front of
+       the board, and it is sent all the way home to their hand.</li>
+       <li>Push can even reach a <span class="gold">Warded</span> Mage
+       stone. Send it all the way home and the Ward goes with it; a lesser
+       shove just costs it a pace while the Ward holds.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>The Mage</h2>
+     <ul>
+       <li><b>Ward</b> (passive, free): the moment your bank holds a full
+       two charges, your furthest-along stone still on the water cannot be
+       captured — by anyone but a Warrior's Shieldbreaker, and a Push can
+       still knock it home.</li>
+       <li><b>Re-flip</b> (active, 1 charge): dislike your roll? Spend a
+       charge to flip again instead of moving — once per turn, and it does
+       not end your turn.</li>
+       <li>Ward always follows whichever of your stones is furthest along —
+       send that one all the way home and it passes to whichever stone
+       takes the lead.</li>
+     </ul>`,
+    `<h2>The Warrior</h2>
+     <ul>
+       <li><b>Shieldbreaker</b> (passive, free): walk onto a Warded enemy
+       stone and the Ward breaks — captured all the same, and your stone
+       stands safe from capture until it next moves.</li>
+       <li><b>Charge</b> (active, 1 charge): make your move a sweep — every
+       unprotected enemy stone in shared water between where you started and
+       where you land is captured too.</li>
+       <li>The Warrior is the one class no Ward can stop cold — everyone
+       else needs a Push or a lucky Re-flip instead.</li>
      </ul>`,
   ],
 ];
