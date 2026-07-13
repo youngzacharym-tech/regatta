@@ -115,10 +115,19 @@ export function resetTurnFlags(power: PowerState): PowerState {
   return { ...power, reflipUsedThisTurn: false };
 }
 
+/** On-board only (0 <= position < PATH_LENGTH_PER_PLAYER) — escaped tokens
+ *  sit at position 15, which would otherwise always outrank real board
+ *  positions and permanently (and pointlessly — an escaped token can't be
+ *  captured) hog "most advanced", including multiple escaped tokens tying
+ *  and warding simultaneously once more than one has come home. */
 function isMostAdvanced(state: GameState, token: TokenState): boolean {
-  const mine = state.tokens.filter((t) => t.owner === token.owner);
+  if (token.position < 0 || token.position >= PATH_LENGTH_PER_PLAYER) return false;
+  const mine = state.tokens.filter(
+    (t) => t.owner === token.owner && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+  );
+  if (mine.length === 0) return false;
   const best = Math.max(...mine.map((t) => t.position));
-  return token.position === best && token.position >= 0;
+  return token.position === best;
 }
 
 /** Is this token currently protected by its owner's Ward? Derived, not
@@ -428,8 +437,20 @@ export function applyPush(
 ): { state: GameState; power: PowerState } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const rawTo = target.position - PUSH_DISTANCE;
+  // Same-owner tokens share a lane everywhere, so any position match is a
+  // real collision. Different-owner tokens only physically share a tile in
+  // the contested zone (positions 4-11 are the SAME square for both
+  // players' path numbering) — a match outside it is two different tiles
+  // that just happen to have the same index, not a collision. Without the
+  // contested check here, a push could silently land an enemy token on top
+  // of the pusher's own token (both owners, same contested tile), which
+  // getLegalPowerMoves's single-token-per-tile assumptions can't handle.
+  const contestedLanding = rawTo >= 0 && rawTo < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[rawTo].isContested;
   const collides = state.tokens.some(
-    (t) => t.id !== targetTokenId && t.owner === target.owner && t.position === rawTo,
+    (t) =>
+      t.id !== targetTokenId &&
+      t.position === rawTo &&
+      (t.owner === target.owner || contestedLanding),
   );
   const landing = collides || rawTo < 0 ? -1 : rawTo;
 

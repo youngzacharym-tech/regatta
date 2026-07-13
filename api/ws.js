@@ -193,9 +193,13 @@ function resetTurnFlags(power) {
   return { ...power, reflipUsedThisTurn: false };
 }
 function isMostAdvanced(state, token) {
-  const mine = state.tokens.filter((t) => t.owner === token.owner);
+  if (token.position < 0 || token.position >= PATH_LENGTH_PER_PLAYER) return false;
+  const mine = state.tokens.filter(
+    (t) => t.owner === token.owner && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER
+  );
+  if (mine.length === 0) return false;
   const best = Math.max(...mine.map((t) => t.position));
-  return token.position === best && token.position >= 0;
+  return token.position === best;
 }
 function isWarded(state, power, token) {
   if (power.classes[token.owner] !== "mage") return false;
@@ -382,8 +386,9 @@ function getPushTargets(state, power, mover) {
 function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
   const rawTo = target.position - PUSH_DISTANCE;
+  const contestedLanding = rawTo >= 0 && rawTo < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[rawTo].isContested;
   const collides = state.tokens.some(
-    (t) => t.id !== targetTokenId && t.owner === target.owner && t.position === rawTo
+    (t) => t.id !== targetTokenId && t.position === rawTo && (t.owner === target.owner || contestedLanding)
   );
   const landing = collides || rawTo < 0 ? -1 : rawTo;
   const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);

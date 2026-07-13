@@ -19,6 +19,7 @@ import {
   getLegalPowerMoves,
   getPushTargets,
   initialPowerState,
+  isWarded,
   type PowerState,
 } from "./master-killer.ts";
 
@@ -266,6 +267,71 @@ function check(name: string, cond: boolean, detail?: string) {
     !!mReserve && mReserve.chargeAvailable === false,
     JSON.stringify(mReserve),
   );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Push: cross-owner collisions (regression for a live playtest bug where
+//    a pushed enemy could land on top of the pusher's own token)
+// ---------------------------------------------------------------------------
+{
+  // Pusher's own token sits at the computed landing tile, in the CONTESTED
+  // zone (positions 4-11 are the same physical tile for both players) — this
+  // must send the target to reserve, not stack two owners on one tile.
+  const s = state("p1", { 0: 5, 4: 6 }); // p1 token at 5, p2 target at 6
+  const pw = power({ p1: "archer" }, { p1: 1 });
+  const r = applyPush(s, pw, 4, "p1"); // rawTo = 6 - PUSH_DISTANCE(1) = 5
+  const moved = r.state.tokens.find((t) => t.id === 4)!;
+  check(
+    "Push: colliding with the PUSHER's own token in the contested zone sends it to reserve",
+    moved.position === -1,
+    `landed at ${moved.position}`,
+  );
+  // No two tokens should ever end up sharing a tile.
+  const occupied = r.state.tokens.filter((t) => t.position >= 0).map((t) => t.position);
+  check(
+    "Push: never leaves two tokens sharing one tile",
+    new Set(occupied).size === occupied.length,
+    JSON.stringify(r.state.tokens),
+  );
+
+  // Same numeric index, but OUTSIDE the contested zone (each player's private
+  // lane is a physically separate tile despite the shared index) — must NOT
+  // be treated as a collision.
+  const sPrivate = state("p1", { 0: 3, 4: 4 }); // p1 token at ITS OWN index 3; p2 target at 4
+  const rPrivate = applyPush(sPrivate, pw, 4, "p1"); // rawTo = 4 - 1 = 3 (p2's own private lane)
+  const movedPrivate = rPrivate.state.tokens.find((t) => t.id === 4)!;
+  check(
+    "Push: a same-index private-lane token (different owner) is NOT a collision",
+    movedPrivate.position === 3,
+    `landed at ${movedPrivate.position}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Ward: excludes escaped tokens (regression for a live playtest bug where
+//    a warded token would keep glowing after escaping, and multiple escaped
+//    tokens would all read as warded simultaneously)
+// ---------------------------------------------------------------------------
+{
+  // p1 mage at full charge: one token escaped (15), one still on the board.
+  // The on-board token should be the one warded — not the escaped one.
+  const s = state("p1", { 0: PATH_LENGTH_PER_PLAYER, 1: 6 });
+  const pw = power({ p1: "mage" }, { p1: CHARGE_CAP });
+  const escaped = s.tokens.find((t) => t.id === 0)!;
+  const onBoard = s.tokens.find((t) => t.id === 1)!;
+  check("Ward: an escaped token is never warded", !isWarded(s, pw, escaped));
+  check("Ward: an on-board token wards even after a teammate has escaped", isWarded(s, pw, onBoard));
+
+  // Two escaped tokens (tied at position 15) — neither should ward.
+  const s2 = state("p1", { 0: PATH_LENGTH_PER_PLAYER, 1: PATH_LENGTH_PER_PLAYER });
+  const e1 = s2.tokens.find((t) => t.id === 0)!;
+  const e2 = s2.tokens.find((t) => t.id === 1)!;
+  check("Ward: two escaped tokens never both ward", !isWarded(s2, pw, e1) && !isWarded(s2, pw, e2));
+
+  // All of the mage's tokens off the board (escaped/reserve) — nothing to ward.
+  const s3 = state("p1", { 0: PATH_LENGTH_PER_PLAYER, 1: -1, 2: -1, 3: -1 });
+  const anyToken = s3.tokens.find((t) => t.id === 0)!;
+  check("Ward: no on-board tokens means nothing is warded", !isWarded(s3, pw, anyToken));
 }
 
 // ---------------------------------------------------------------------------
