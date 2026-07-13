@@ -90,6 +90,37 @@ function check(name: string, cond: boolean, detail?: string) {
   const moves3 = getLegalPowerMoves(s3, pw3, 2);
   const m3 = moves3.find((mv) => mv.tokenId === 0 && mv.to === 8);
   check("Snipe: does not fire through a warded target", !!m3 && m3.bonusCaptures.length === 0, JSON.stringify(m3));
+
+  // Regression: Snipe must not leak into either player's private lane
+  // (tiles 0-3 / 12-14) — the SAME index there is a different physical
+  // tile per owner, which is what makes "home base" safe at all. p1's
+  // archer enters ITS OWN lane at tile 0; p2 has a token at tile 1 in
+  // P2's OWN private lane — a completely different square, not "one tile
+  // ahead" of anything. Found via playtest confusion over enemy tokens
+  // getting captured on home base.
+  const s4 = state("p1", { 4: 1 });
+  const pw4 = power({ p1: "archer" });
+  const moves4 = getLegalPowerMoves(s4, pw4, 1); // token 0: from -1 -> to 0
+  const m4 = moves4.find((mv) => mv.tokenId === 0 && mv.to === 0);
+  check(
+    "Snipe: does not leak into the enemy's own private lane (home base)",
+    !!m4 && m4.bonusCaptures.length === 0,
+    JSON.stringify(m4),
+  );
+
+  // Sanity: the legitimate private-lane/contested BOUNDARY case still
+  // works — archer's own last private tile (3) looking one ahead into the
+  // genuinely contested first shared tile (4) is a real, physical
+  // adjacency and should still snipe.
+  const s5 = state("p1", { 0: 2, 4: 4 });
+  const pw5 = power({ p1: "archer" });
+  const moves5 = getLegalPowerMoves(s5, pw5, 1); // token 0: from 2 -> to 3
+  const m5 = moves5.find((mv) => mv.tokenId === 0 && mv.to === 3);
+  check(
+    "Snipe: still fires across the private-lane/contested boundary",
+    !!m5 && m5.bonusCaptures.includes(4),
+    JSON.stringify(m5),
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -279,9 +279,18 @@ export function getLegalPowerMoves(
     }
 
     // Archer Snipe (passive, free): a second unprotected enemy exactly one
-    // tile further along the shared contested row.
+    // tile further along the shared contested row. MUST check that to+1 is
+    // itself a contested tile, not just "<= 11" — tiles 0-3 and 12-14 are
+    // each player's own private lane, where the SAME index numbers a
+    // completely different physical square for each owner (this is what
+    // makes "home base" safe at all). Without this check, an Archer sitting
+    // in their own private lane could snipe an enemy token that merely
+    // shares a numeric index in ITS OWN separate private lane — a real bug
+    // found via playtest confusion ("why are we attacking tokens on the
+    // home base?"), confirmed with a repro: archer enters at to=0, enemy
+    // sits at their own private position 1, Snipe fired anyway.
     const bonusCaptures: number[] = [];
-    if (cls === "archer" && to + 1 <= 11) {
+    if (cls === "archer" && BOARD_LAYOUT[to + 1].isContested) {
       const sniped = state.tokens.find(
         (t) => t.position === to + 1 && t.owner !== player && t.id !== enemy?.id,
       );
