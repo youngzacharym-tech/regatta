@@ -1806,10 +1806,12 @@ const GUIDE_SPREADS: [string, string][] = [
        captured too — no charge spent.</li>
        <li><b>Push</b> (active, 1 charge): shove an enemy stone in shared
        water back one pace. Land it on your own stone, or off the front of
-       the board, and it is sent all the way home to their hand.</li>
+       the board, and it is sent all the way home to their hand — and your
+       charge comes right back, since that's really a capture.</li>
        <li>Push can even reach a <span class="gold">Warded</span> Mage
-       stone. Send it all the way home and the Ward goes with it; a lesser
-       shove just costs it a pace while the Ward holds.</li>
+       stone, shoving it back <em>three</em> paces instead of one. Send it
+       all the way home and the Ward goes with it; a lesser shove still
+       costs it real ground while the Ward holds.</li>
      </ul>`,
   ],
   [
@@ -1831,9 +1833,10 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Shieldbreaker</b> (passive, free): walk onto a Warded enemy
        stone and the Ward breaks — captured all the same, and your stone
        stands safe from capture until it next moves.</li>
-       <li><b>Charge</b> (active, 1 charge): make your move a sweep — every
-       unprotected enemy stone in shared water between where you started and
-       where you land is captured too.</li>
+       <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
+       enemy stone in shared water between where you started and where you
+       land is captured too, Warded or not. Shieldbreaker means Warriors
+       cut through a Ward wherever they meet one, mid-sweep included.</li>
        <li>The Warrior is the one class no Ward can stop cold — everyone
        else needs a Push or a lucky Re-flip instead.</li>
      </ul>`,
