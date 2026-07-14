@@ -809,6 +809,8 @@ function updateTokenTints(state: GameState) {
         charges: currentPower.charges,
         safeTokens: new Set(),
         reflipUsedThisTurn: false,
+        shieldStreak: { p1: 0, p2: 0 },
+        ultimateReady: { p1: false, p2: false },
       }
     : null;
   state.tokens.forEach((token, idx) => {
@@ -1347,6 +1349,7 @@ function announceFromState(msg: {
   lastMovePlayer: PlayerId | null;
   lastPush?: { targetTokenId: number } | null;
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
+  lastRainOfArrows?: { targetTokenId: number | null } | null;
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
   skipReason: "flip-zero" | "no-legal-move" | null;
@@ -1387,6 +1390,14 @@ function announceFromState(msg: {
 
     if (m.causesWin) {
       // Win screen will handle the celebration; don't double-announce.
+      return;
+    }
+    if (msg.lastRainOfArrows) {
+      const targetPhrase =
+        msg.lastRainOfArrows.targetTokenId != null
+          ? `strikes ${isMe ? "an opponent's" : "your"} token`
+          : "finds no target";
+      showAnnouncement(`${subject} chained 3 shields — Rain of Arrows ${targetPhrase}!${suffix}`, "ultimate");
       return;
     }
     if (m.landsOnShield) {
@@ -1860,6 +1871,12 @@ const GUIDE_SPREADS: [string, string][] = [
        stone, shoving it back <em>three</em> paces instead of one. Send it
        all the way home and the Ward goes with it; a lesser shove still
        costs it real ground while the Ward holds.</li>
+       <li><b>Rain of Arrows</b> (passive, free — the Archer's ultimate):
+       land on a shield tile three times in a row, with your turn never
+       once passing to the opponent in between, and that third landing
+       strikes down a random enemy stone anywhere in shared water — even
+       one standing on a shield, or warded by a Mage. Rare by design: only
+       three shield tiles exist on the whole board.</li>
      </ul>`,
   ],
   [

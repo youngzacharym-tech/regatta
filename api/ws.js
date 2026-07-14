@@ -183,13 +183,16 @@ var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
 var PUSH_WARD_COST = 1;
 var PUSH_WARD_DISTANCE = 3;
+var ULTIMATE_STREAK = 3;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
     // placeholder until picked
     charges: { p1: 0, p2: 0 },
     safeTokens: /* @__PURE__ */ new Set(),
-    reflipUsedThisTurn: false
+    reflipUsedThisTurn: false,
+    shieldStreak: { p1: 0, p2: 0 },
+    ultimateReady: { p1: false, p2: false }
   };
 }
 function resetTurnFlags(power) {
@@ -326,24 +329,52 @@ function getLegalPowerMoves(state, power, flip) {
   }
   return moves;
 }
-function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, grantsSafety) {
+function getRainOfArrowsTargets(state, power, mover) {
+  const foe = otherPlayerId(mover);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !hasTransientSafety(power, t)).map((t) => t.id);
+}
+function breakShieldStreak(power, player) {
+  if (power.shieldStreak[player] === 0) return power;
+  return { ...power, shieldStreak: { ...power.shieldStreak, [player]: 0 } };
+}
+function resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand) {
+  if (!landsOnShield) return { power: breakShieldStreak(power, mover), rainOfArrows: null };
+  const next = power.shieldStreak[mover] + 1;
+  if (next < ULTIMATE_STREAK) {
+    return { power: { ...power, shieldStreak: { ...power.shieldStreak, [mover]: next } }, rainOfArrows: null };
+  }
+  const reset = { ...power, shieldStreak: { ...power.shieldStreak, [mover]: 0 } };
+  const cls = power.classes[mover];
+  if (cls !== "archer") {
+    return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
+  }
+  const pool = getRainOfArrowsTargets(state, reset, mover).filter((id) => !allCaptures.includes(id));
+  if (pool.length === 0) return { power: reset, rainOfArrows: { targetTokenId: null } };
+  const picked = pool[Math.floor(rand() * pool.length)];
+  return { power: reset, rainOfArrows: { targetTokenId: picked } };
+}
+function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, grantsSafety, rand = Math.random) {
+  const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
+  power = streakResult.power;
+  const rainOfArrows = streakResult.rainOfArrows;
+  const finalCaptures = rainOfArrows?.targetTokenId != null ? [...allCaptures, rainOfArrows.targetTokenId] : allCaptures;
   const tokens = state.tokens.map((t) => {
     if (t.id === tokenId) return { ...t, position: to };
-    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    if (finalCaptures.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
   let safeTokens = power.safeTokens;
-  if (safeTokens.has(tokenId) || allCaptures.some((id) => safeTokens.has(id))) {
+  if (safeTokens.has(tokenId) || finalCaptures.some((id) => safeTokens.has(id))) {
     safeTokens = new Set(safeTokens);
     safeTokens.delete(tokenId);
-    for (const id of allCaptures) safeTokens.delete(id);
+    for (const id of finalCaptures) safeTokens.delete(id);
   }
   if (grantsSafety) {
     safeTokens = new Set(safeTokens);
     safeTokens.add(tokenId);
   }
   let nextPower = { ...power, safeTokens };
-  if (allCaptures.length > 0 || landsOnShield) {
+  if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
   const extraTurn = landsOnShield;
@@ -354,9 +385,9 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     winner: causesWin ? mover : null,
     extraTurn
   };
-  return { state: nextState, power: resetTurnFlags(nextPower) };
+  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows };
 }
-function applyPowerMove(state, power, move, mover) {
+function applyPowerMove(state, power, move, mover, rand = Math.random) {
   const allCaptures = [...move.captures, ...move.bonusCaptures];
   return resolveTurn(
     state,
@@ -367,10 +398,11 @@ function applyPowerMove(state, power, move, mover) {
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard
+    move.breaksWard,
+    rand
   );
 }
-function applyCharge(state, power, move, mover) {
+function applyCharge(state, power, move, mover, rand = Math.random) {
   const allCaptures = [...move.captures, ...move.bonusCaptures, ...move.chargeSweepCaptures];
   const spent = {
     ...power,
@@ -385,7 +417,8 @@ function applyCharge(state, power, move, mover) {
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard
+    move.breaksWard,
+    rand
   );
 }
 function getPushTargets(state, power, mover) {
@@ -414,6 +447,7 @@ function applyPush(state, power, targetTokenId, mover) {
     safeTokens
   };
   if (sendsHome) spentPower = addCharge(spentPower, mover);
+  spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -557,7 +591,8 @@ function freshMatchFields(variant) {
     currentPowerMoves: null,
     lastPush: null,
     lastChargeEvent: null,
-    zeroFlipChargeBefore: null
+    zeroFlipChargeBefore: null,
+    lastRainOfArrows: null
   };
 }
 function GET(request) {
@@ -672,6 +707,7 @@ function GET(request) {
         lastMovePlayer: doc.lastMovePlayer,
         lastPush: doc.lastPush,
         lastChargeEvent: doc.lastChargeEvent,
+        lastRainOfArrows: doc.lastRainOfArrows,
         wasSkipped: doc.wasSkipped,
         skippedPlayer: doc.skippedPlayer,
         skipReason: doc.skipReason
@@ -770,6 +806,7 @@ function GET(request) {
             lastMovePlayer: null,
             lastPush: null,
             lastChargeEvent: null,
+            lastRainOfArrows: null,
             wasSkipped: false,
             skippedPlayer: null,
             skipReason: null,
@@ -817,9 +854,11 @@ function GET(request) {
             const delta = cur.mk.charges[skipped] - cur.zeroFlipChargeBefore;
             lastChargeEvent = delta !== 0 ? { player: skipped, delta } : null;
           }
+          const mk = cur.mk ? toWirePower(breakShieldStreak(fromWirePower(cur.mk), skipped)) : cur.mk;
           const next = {
             ...cur,
             state: applyNoMove(cur.state),
+            mk,
             currentFlip: null,
             currentPowerMoves: null,
             wasSkipped: true,
@@ -898,10 +937,11 @@ function GET(request) {
     };
     const applyMasterKillerMove = async (doc, seat, move) => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + rainHit;
       const next = {
         ...doc,
         state: r.state,
@@ -913,13 +953,14 @@ function GET(request) {
         lastMovePlayer: seat,
         lastPush: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null
       };
       if (await commit(next)) {
         console.log(
-          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin}`
+          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin} rainOfArrows=${rainHit === 1}`
         );
         await maybeDrive(next);
       } else {
@@ -929,10 +970,11 @@ function GET(request) {
     };
     const applyMasterKillerCharge = async (doc, seat, move) => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
       const next = {
         ...doc,
         state: r.state,
@@ -944,6 +986,7 @@ function GET(request) {
         lastMovePlayer: seat,
         lastPush: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null
@@ -971,6 +1014,7 @@ function GET(request) {
         lastMovePlayer: seat,
         lastPush: { targetTokenId },
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null
@@ -997,6 +1041,7 @@ function GET(request) {
         currentPowerMoves: getLegalPowerMoves(doc.state, power, flip),
         lastMove: null,
         lastPush: null,
+        lastRainOfArrows: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null
       };
       if (await commit(next)) {

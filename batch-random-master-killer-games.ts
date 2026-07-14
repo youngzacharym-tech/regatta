@@ -37,7 +37,7 @@ interface GameResult {
   turns: number; // player control-cycles (a reflip does NOT add to this)
   flips: number; // total coin flips, including reflips
   maxSweepCaptures: number; // largest single-move capture count observed
-  usage: { snipe: number; push: number; reflip: number; charge: number };
+  usage: { snipe: number; push: number; reflip: number; charge: number; rainOfArrows: number };
 }
 
 /** Drive one player's turn to completion, including a possible Re-flip
@@ -73,21 +73,33 @@ function takeTurn(
 
   switch (action.kind) {
     case "move": {
-      const r = applyPowerMove(state, power, action.move, mover);
-      const sweepSize = action.move.captures.length + action.move.bonusCaptures.length;
+      const r = applyPowerMove(state, power, action.move, mover, rand);
+      const rainHit = r.rainOfArrows?.targetTokenId != null;
+      const sweepSize = action.move.captures.length + action.move.bonusCaptures.length + (rainHit ? 1 : 0);
       return {
         state: r.state,
         power: r.power,
         flips,
         sweepSize,
-        usage: action.move.bonusCaptures.length > 0 ? { snipe: 1 } : {},
+        usage: {
+          ...(action.move.bonusCaptures.length > 0 ? { snipe: 1 } : {}),
+          ...(rainHit ? { rainOfArrows: 1 } : {}),
+        },
       };
     }
     case "charge": {
-      const r = applyCharge(state, power, action.move, mover);
+      const r = applyCharge(state, power, action.move, mover, rand);
+      const rainHit = r.rainOfArrows?.targetTokenId != null;
       const sweepSize =
-        action.move.captures.length + action.move.bonusCaptures.length + action.move.chargeSweepCaptures.length;
-      return { state: r.state, power: r.power, flips, sweepSize, usage: { charge: 1 } };
+        action.move.captures.length + action.move.bonusCaptures.length + action.move.chargeSweepCaptures.length +
+        (rainHit ? 1 : 0);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize,
+        usage: rainHit ? { charge: 1, rainOfArrows: 1 } : { charge: 1 },
+      };
     }
     case "push": {
       const r = applyPush(state, power, action.targetTokenId, mover);
@@ -102,7 +114,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
   let turns = 0;
   let flips = 0;
   let maxSweepCaptures = 0;
-  const usage = { snipe: 0, push: 0, reflip: 0, charge: 0 };
+  const usage = { snipe: 0, push: 0, reflip: 0, charge: 0, rainOfArrows: 0 };
   const rand = Math.random;
 
   while (state.winner === null && turns < MAX_TURNS_PER_GAME) {
@@ -117,6 +129,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.snipe) usage.snipe++;
     if (r.usage.push) usage.push++;
     if (r.usage.charge) usage.charge++;
+    if (r.usage.rainOfArrows) usage.rainOfArrows++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -170,11 +183,13 @@ for (const [a, b] of matchups) {
   const avgPush = mean(results.map((r) => r.usage.push));
   const avgReflip = mean(results.map((r) => r.usage.reflip));
   const avgCharge = mean(results.map((r) => r.usage.charge));
+  const avgRainOfArrows = mean(results.map((r) => r.usage.rainOfArrows));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
     `  turns=${avgTurns.toFixed(1).padStart(6)}  maxTurns=${maxTurns}  flips=${avgFlips.toFixed(1).padStart(6)}  maxSweep=${maxSweep}` +
-      `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}`,
+      `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
+      `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

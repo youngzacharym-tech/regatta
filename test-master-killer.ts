@@ -8,19 +8,22 @@
 // Run: npx tsx test-master-killer.ts
 // ============================================================================
 
-import { PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
+import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
 import {
   CHARGE_CAP,
   CHARGE_SWEEP_CAP,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
+  ULTIMATE_STREAK,
   applyCharge,
   applyPowerMove,
   applyPush,
   applyReflip,
+  breakShieldStreak,
   getLegalPowerMoves,
   getPushTargets,
+  getRainOfArrowsTargets,
   initialPowerState,
   isWarded,
   type PowerState,
@@ -543,6 +546,151 @@ function check(name: string, cond: boolean, detail?: string) {
   const rHome = applyPush(sHome, pw, 4, "p1");
   check("Push: ends the turn even when sending the target home", rHome.state.currentPlayer === "p2");
   check("Push: extraTurn flag is false even when sending the target home", rHome.state.extraTurn === false);
+}
+
+// ---------------------------------------------------------------------------
+// 12. Ultimates: 3 consecutive shield landings in one unbroken turn-chain.
+//     Archer's Rain of Arrows fires immediately; Mage/Warrior instead bank
+//     ultimateReady for a not-yet-built active ability.
+// ---------------------------------------------------------------------------
+{
+  const seed = (n: number) => (pw: PowerState) => ({ ...pw, shieldStreak: { ...pw.shieldStreak, p1: n } });
+
+  // Fires exactly on the 3rd consecutive landing — not the 2nd, not the 4th.
+  const pwArcher2 = seed(2)(power({ p1: "archer" }));
+  const s1 = state("p1", { 0: 6, 4: 9 }); // token0 6->7 (shield); enemy4 alone at 9 (contested)
+  const m1 = getLegalPowerMoves(s1, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  check("Ultimate: move to a shield tile is legal and available for this fixture", !!m1);
+  const r1 = applyPowerMove(s1, pwArcher2, m1, "p1", () => 0);
+  check("Ultimate: fires Rain of Arrows on the 3rd consecutive shield landing", r1.rainOfArrows?.targetTokenId === 4);
+  check("Ultimate: streak resets to 0 once it fires", r1.power.shieldStreak.p1 === 0);
+  check(
+    "Ultimate: a successful Rain of Arrows hit grants a charge, like any other capture",
+    r1.power.charges.p1 === 1,
+    `got ${r1.power.charges.p1}`,
+  );
+
+  // 1st and 2nd landings accumulate without firing.
+  const pwArcher0 = power({ p1: "archer" });
+  const r0 = applyPowerMove(s1, pwArcher0, m1, "p1", () => 0);
+  check("Ultimate: 1st landing accumulates without firing", r0.rainOfArrows === null && r0.power.shieldStreak.p1 === 1);
+  const pwArcher1 = seed(1)(power({ p1: "archer" }));
+  const rMid = applyPowerMove(s1, pwArcher1, m1, "p1", () => 0);
+  check(
+    "Ultimate: 2nd landing accumulates without firing",
+    rMid.rainOfArrows === null && rMid.power.shieldStreak.p1 === 2,
+  );
+
+  // Bypasses shield-tile protection: the sole eligible candidate sits ON a
+  // shield tile (7, contested) while the Archer's own landing is elsewhere
+  // (13, the private-lane shield) — Rain of Arrows can still pick it.
+  const sShieldTarget = state("p1", { 0: 12, 4: 7 }); // token0 12->13 (shield); enemy4 ON shield tile 7
+  const mShield = getLegalPowerMoves(sShieldTarget, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 13)!;
+  check("Ultimate: sanity — enemy candidate really is on a shield tile", BOARD_LAYOUT[7].type === "shield");
+  const rShield = applyPowerMove(sShieldTarget, pwArcher2, mShield, "p1", () => 0);
+  check(
+    "Ultimate: Rain of Arrows bypasses shield-tile protection for its target",
+    rShield.rainOfArrows?.targetTokenId === 4,
+  );
+
+  // Bypasses Ward: the sole eligible candidate is a maxed Mage's warded token.
+  const pwVsMage2 = seed(2)(power({ p1: "archer", p2: "mage" }, { p2: CHARGE_CAP }));
+  const mageEnemy = s1.tokens.find((t) => t.id === 4)!;
+  check("Ultimate: sanity — the candidate really is warded", isWarded(s1, pwVsMage2, mageEnemy));
+  const rWard = applyPowerMove(s1, pwVsMage2, m1, "p1", () => 0);
+  check("Ultimate: Rain of Arrows bypasses Ward for its target", rWard.rainOfArrows?.targetTokenId === 4);
+
+  // Respects transient safety: the sole eligible candidate is safe — pool is
+  // empty, so it fires into nothing (streak still consumed, not a silent no-op).
+  const pwSafe: PowerState = { ...pwArcher2, safeTokens: new Set([4]) };
+  const rSafe = applyPowerMove(s1, pwSafe, m1, "p1", () => 0);
+  check(
+    "Ultimate: respects transient safety — whiffs rather than picking a safe token",
+    rSafe.rainOfArrows?.targetTokenId === null,
+  );
+  check("Ultimate: streak still resets to 0 on a whiff", rSafe.power.shieldStreak.p1 === 0);
+
+  // Empty pool entirely (no enemies anywhere): also a clean whiff, and no
+  // phantom charge beyond the ordinary landsOnShield grant.
+  const sEmpty = state("p1", { 0: 6 });
+  const mEmpty = getLegalPowerMoves(sEmpty, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  const rEmpty = applyPowerMove(sEmpty, pwArcher2, mEmpty, "p1", () => 0);
+  check("Ultimate: whiffs cleanly with no enemies on the board at all", rEmpty.rainOfArrows?.targetTokenId === null);
+  check(
+    "Ultimate: an empty-pool whiff still only grants the ordinary shield-landing charge",
+    rEmpty.power.charges.p1 === 1,
+    `got ${rEmpty.power.charges.p1}`,
+  );
+
+  // Streak resets to 0 on any resolving move that doesn't land on a shield.
+  const sPlain = state("p1", { 0: 4 });
+  const mPlain = getLegalPowerMoves(sPlain, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 5)!;
+  check("Ultimate: sanity — this move does not land on a shield", !mPlain.landsOnShield);
+  const rPlain = applyPowerMove(sPlain, pwArcher2, mPlain, "p1");
+  check("Ultimate: streak resets to 0 on any non-shield-landing move", rPlain.power.shieldStreak.p1 === 0);
+
+  // Streak resets via Push (never lands the mover on a shield).
+  const sPush = state("p1", { 4: 6 });
+  const rPush = applyPush(sPush, seed(2)(power({ p1: "archer" }, { p1: 1 })), 4, "p1");
+  check("Ultimate: streak resets to 0 via Push", rPush.power.shieldStreak.p1 === 0);
+
+  // Re-flip is turn-neutral and doesn't touch the streak either way.
+  const afterReflip = applyReflip(pwArcher2, "p1");
+  check("Ultimate: Re-flip leaves the streak untouched", afterReflip.shieldStreak.p1 === 2);
+
+  // Uniform-random selection spans the full candidate pool under
+  // deterministic rand stand-ins: first, middle, and last. Enemies sit at
+  // 9,10,11 (not 8 = to+1) specifically so Snipe doesn't ALSO fire on this
+  // same shield-landing move and exclude one of them from the pool.
+  const sPool = state("p1", { 0: 6, 4: 9, 5: 10, 6: 11 }); // token0 6->7 (shield); 3 enemies at 9,10,11
+  const mPool = getLegalPowerMoves(sPool, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  check("Ultimate: sanity — Snipe does not also fire on this move", mPool.bonusCaptures.length === 0);
+  const pool = getRainOfArrowsTargets(sPool, pwArcher2, "p1");
+  check("Ultimate: sanity — the candidate pool has all 3 enemies in id order", JSON.stringify(pool) === JSON.stringify([4, 5, 6]));
+  const rFirst = applyPowerMove(sPool, pwArcher2, mPool, "p1", () => 0);
+  const rMidPool = applyPowerMove(sPool, pwArcher2, mPool, "p1", () => 0.4);
+  const rLast = applyPowerMove(sPool, pwArcher2, mPool, "p1", () => 0.999999);
+  check("Ultimate: rand=0 picks the first pool candidate", rFirst.rainOfArrows?.targetTokenId === 4);
+  check("Ultimate: rand=0.4 picks the middle pool candidate", rMidPool.rainOfArrows?.targetTokenId === 5);
+  check("Ultimate: rand near 1 picks the last pool candidate", rLast.rainOfArrows?.targetTokenId === 6);
+
+  // Never double-captures a token this same move already captured via Snipe.
+  const sSnipe = state("p1", { 0: 6, 4: 8 }); // token0 6->7 (shield); Snipe should hit enemy4 at 8 (to+1)
+  const mSnipe = getLegalPowerMoves(sSnipe, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  check("Ultimate: sanity — Snipe fires on this same shield-landing move", mSnipe.bonusCaptures.includes(4));
+  const rSnipe = applyPowerMove(sSnipe, pwArcher2, mSnipe, "p1", () => 0);
+  check(
+    "Ultimate: does not re-target a token this same move already captured via Snipe",
+    rSnipe.rainOfArrows?.targetTokenId === null,
+  );
+
+  // Mage/Warrior completing the combo bank ultimateReady instead of firing
+  // Rain of Arrows — no capture, no rainOfArrows signal either way.
+  const pwMage2 = seed(2)(power({ p1: "mage" }));
+  const mMage = getLegalPowerMoves(s1, pwMage2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  const rMage = applyPowerMove(s1, pwMage2, mMage, "p1", () => 0);
+  check(
+    "Ultimate: Mage completing the combo banks ultimateReady, not Rain of Arrows",
+    rMage.rainOfArrows === null && rMage.power.ultimateReady.p1 === true && rMage.power.shieldStreak.p1 === 0,
+  );
+  const pwWarrior2 = seed(2)(power({ p1: "warrior" }));
+  const mWarrior = getLegalPowerMoves(s1, pwWarrior2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  const rWarrior = applyPowerMove(s1, pwWarrior2, mWarrior, "p1", () => 0);
+  check(
+    "Ultimate: Warrior completing the combo banks ultimateReady, not Rain of Arrows",
+    rWarrior.rainOfArrows === null && rWarrior.power.ultimateReady.p1 === true && rWarrior.power.shieldStreak.p1 === 0,
+  );
+
+  // breakShieldStreak: no-op at 0 (same reference back), resets a nonzero
+  // streak to exactly 0, and works for any class (no gate anymore).
+  const pwZero = power({ p1: "archer" });
+  check("Ultimate: breakShieldStreak no-ops when already 0", breakShieldStreak(pwZero, "p1") === pwZero);
+  const brokenArcher = breakShieldStreak(pwArcher2, "p1");
+  check("Ultimate: breakShieldStreak resets a nonzero streak to 0", brokenArcher.shieldStreak.p1 === 0);
+  const brokenWarrior = breakShieldStreak(seed(2)(power({ p1: "warrior" })), "p1");
+  check("Ultimate: breakShieldStreak works for non-Archer classes too", brokenWarrior.shieldStreak.p1 === 0);
+
+  check("Ultimate: ULTIMATE_STREAK is set to the expected combo length", ULTIMATE_STREAK === 3);
 }
 
 // ---------------------------------------------------------------------------

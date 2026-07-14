@@ -45,6 +45,7 @@ import {
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
+  breakShieldStreak,
   getLegalPowerMoves,
   getPushTargets,
   grantZeroFlipCharge,
@@ -124,6 +125,11 @@ interface RoomDoc {
    *  can't just be lastChargeEvent itself. Persisted (not an in-memory
    *  field) since this architecture round-trips RoomDoc through Redis. */
   zeroFlipChargeBefore: number | null;
+  /** Archer's Rain of Arrows ultimate — non-null exactly on the broadcast
+   *  where a 3rd consecutive shield landing resolved. targetTokenId is null
+   *  when it fired into an empty eligible pool (streak still consumed).
+   *  Same lifecycle as lastPush. */
+  lastRainOfArrows: { targetTokenId: number | null } | null;
 }
 
 const roomKey = (code: string) => `room:${code}`;
@@ -146,7 +152,7 @@ function freshMatchFields(
   | "state" | "currentFlip" | "turns" | "captures"
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargeEvent"
-  | "zeroFlipChargeBefore"
+  | "zeroFlipChargeBefore" | "lastRainOfArrows"
 > {
   // currentPlayer is decided by the opening flip-off, not randomized here.
   const state = initialState();
@@ -168,6 +174,7 @@ function freshMatchFields(
     lastPush: null,
     lastChargeEvent: null,
     zeroFlipChargeBefore: null,
+    lastRainOfArrows: null,
   };
 }
 
@@ -325,6 +332,7 @@ export function GET(request: Request) {
         lastMovePlayer: doc.lastMovePlayer,
         lastPush: doc.lastPush,
         lastChargeEvent: doc.lastChargeEvent,
+        lastRainOfArrows: doc.lastRainOfArrows,
         wasSkipped: doc.wasSkipped,
         skippedPlayer: doc.skippedPlayer,
         skipReason: doc.skipReason,
@@ -450,6 +458,7 @@ export function GET(request: Request) {
             lastMovePlayer: null,
             lastPush: null,
             lastChargeEvent: null,
+            lastRainOfArrows: null,
             wasSkipped: false,
             skippedPlayer: null,
             skipReason: null,
@@ -508,9 +517,14 @@ export function GET(request: Request) {
             const delta = cur.mk.charges[skipped] - cur.zeroFlipChargeBefore;
             lastChargeEvent = delta !== 0 ? { player: skipped, delta } : null;
           }
+          // applyNoMove only touches GameState — the turn is genuinely
+          // ending here without a shield landing, so the shield-streak
+          // combo breaks.
+          const mk = cur.mk ? toWirePower(breakShieldStreak(fromWirePower(cur.mk), skipped)) : cur.mk;
           const next: RoomDoc = {
             ...cur,
             state: applyNoMove(cur.state),
+            mk,
             currentFlip: null,
             currentPowerMoves: null,
             wasSkipped: true,
@@ -605,10 +619,11 @@ export function GET(request: Request) {
       move: PowerMove,
     ): Promise<void> => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + rainHit;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
@@ -620,13 +635,14 @@ export function GET(request: Request) {
         lastMovePlayer: seat,
         lastPush: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
       };
       if (await commit(next)) {
         console.log(
-          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin}`,
+          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin} rainOfArrows=${rainHit === 1}`,
         );
         await maybeDrive(next);
       } else {
@@ -641,10 +657,11 @@ export function GET(request: Request) {
       move: PowerMove,
     ): Promise<void> => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = mkApplyCharge(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = mkApplyCharge(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
@@ -656,6 +673,7 @@ export function GET(request: Request) {
         lastMovePlayer: seat,
         lastPush: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -688,6 +706,7 @@ export function GET(request: Request) {
         lastMovePlayer: seat,
         lastPush: { targetTokenId },
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -722,6 +741,7 @@ export function GET(request: Request) {
         currentPowerMoves: getLegalPowerMoves(doc.state, power, flip),
         lastMove: null,
         lastPush: null,
+        lastRainOfArrows: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
       };
       if (await commit(next)) {

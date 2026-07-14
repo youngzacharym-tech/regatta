@@ -42,6 +42,11 @@ const NEUTRAL_POWER: PowerState = {
   charges: { p1: 0, p2: 0 },
   safeTokens: new Set(),
   reflipUsedThisTurn: false,
+  // Rain of Arrows is Archer-only (this fixture is Warrior-vs-Warrior, gated
+  // out entirely) and getLegalPowerMoves itself never reads these fields —
+  // see test-master-killer.ts for the ultimate's dedicated scenario coverage.
+  shieldStreak: { p1: 0, p2: 0 },
+  ultimateReady: { p1: false, p2: false },
 };
 
 function sharedFieldsMatch(a: Move, b: PowerMove): boolean {

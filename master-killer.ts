@@ -94,6 +94,24 @@ export const PUSH_WARD_COST = 1;
  *  without a Mage on the other side.) */
 export const PUSH_WARD_DISTANCE = 3;
 
+/** Ultimates: how many CONSECUTIVE shield-tile landings, within one unbroken
+ *  turn-chain, it takes to earn a class's ultimate. Shared by all three
+ *  classes — Archer's Rain of Arrows fires immediately on the 3rd landing;
+ *  Mage's and Warrior's ultimates (not yet built) instead bank an
+ *  ultimateReady flag to spend later. Only 3 shield tiles exist on the whole
+ *  board, so this is rare by construction even at 3.
+ *  (Balance-sim confirmed at 3, 5000 games/matchup against a freshly
+ *  captured pre-change baseline: rainOfArrows/g stayed at 0.007-0.016 —
+ *  fires in roughly 1-in-100 games, confirming the rarity — while every
+ *  matchup's win split moved less than ~1.5 points from baseline, well
+ *  inside normal run-to-run sampling noise (warrior mirror, which should be
+ *  mathematically untouched since Rain of Arrows never applies there,
+ *  settled to an exact 50.0/50.0). Matchups not involving an Archer showed
+ *  rainOfArrows/g=0.0000 exactly, confirming Mage/Warrior's banked
+ *  ultimateReady flag has zero gameplay leakage since nothing consumes it
+ *  yet. No retuning needed at 3.) */
+export const ULTIMATE_STREAK = 3;
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -110,6 +128,25 @@ export interface PowerState {
   /** Guards Mage's Re-flip to once per turn. Reset whenever a fresh flip
    *  is dealt (a new turn, or after auto-skip). */
   reflipUsedThisTurn: boolean;
+  /** Consecutive shield-tile landings within one unbroken turn-chain, 0-2
+   *  (fires/banks and resets to 0 the instant it would become
+   *  ULTIMATE_STREAK). Shared by all three classes. Deliberately NOT reset
+   *  by resetTurnFlags — that fires on every resolved turn, including the
+   *  shield landing's own extra turn, which is exactly the turn this streak
+   *  has to survive. Only cleared by resolveShieldStreak (a non-landing
+   *  move/charge that ends the turn), applyPush (never lands the mover on a
+   *  shield), or breakShieldStreak (called directly by the server's
+   *  auto-skip paths, which resolve a turn-end without going through
+   *  resolveTurn at all — same shape of problem zeroFlipChargeBefore in
+   *  referee.ts/api/ws.ts already solves for the charge economy). */
+  shieldStreak: Record<PlayerId, number>;
+  /** True once a Mage or Warrior has completed the shield-streak combo —
+   *  their ultimate (not yet built) is banked and spendable on a future
+   *  turn of their choosing, unlike Archer's, which resolves immediately
+   *  and never sets this. Persists indefinitely until spent: never touched
+   *  by resetTurnFlags, and not yet consumed by anything (no ultimate
+   *  action exists yet), so it just sits true once earned. */
+  ultimateReady: Record<PlayerId, boolean>;
 }
 
 /** Superset of rulebook.Move — same fields, plus power-derived ones. */
@@ -152,6 +189,8 @@ export function initialPowerState(): PowerState {
     charges: { p1: 0, p2: 0 },
     safeTokens: new Set(),
     reflipUsedThisTurn: false,
+    shieldStreak: { p1: 0, p2: 0 },
+    ultimateReady: { p1: false, p2: false },
   };
 }
 
@@ -392,6 +431,62 @@ export function getLegalPowerMoves(
 // APPLYING MOVES / ACTIONS
 // ============================================================================
 
+/** Rain of Arrows' target pool (Archer's ultimate only): enemy tokens,
+ *  on-board, anywhere in the contested zone — deliberately skipping
+ *  onShieldTile/isWarded, since punching through both is the whole point.
+ *  Only hasTransientSafety still guards against it. */
+export function getRainOfArrowsTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  const foe = otherPlayerId(mover);
+  return state.tokens
+    .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => BOARD_LAYOUT[t.position].isContested)
+    .filter((t) => !hasTransientSafety(power, t))
+    .map((t) => t.id);
+}
+
+/** Breaks a player's shield-streak combo — called both from applyPush
+ *  (which never lands the mover on a shield, so it always ends any live
+ *  streak) and directly by the server's auto-skip paths (referee.ts/
+ *  api/ws.ts resolve a turn-end without ever going through resolveTurn,
+ *  same shape of problem grantZeroFlipCharge already solves for the charge
+ *  economy). No class gate needed — every class tracks this now. */
+export function breakShieldStreak(power: PowerState, player: PlayerId): PowerState {
+  if (power.shieldStreak[player] === 0) return power;
+  return { ...power, shieldStreak: { ...power.shieldStreak, [player]: 0 } };
+}
+
+/** Advances or breaks the mover's shield-streak for this resolving action,
+ *  and resolves whatever completing it means for their class. Archer's
+ *  ultimate (Rain of Arrows) fires immediately; Mage/Warrior instead bank
+ *  ultimateReady for a not-yet-built active ability to spend later. */
+function resolveShieldStreak(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+  landsOnShield: boolean,
+  allCaptures: number[],
+  rand: () => number,
+): { power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
+  if (!landsOnShield) return { power: breakShieldStreak(power, mover), rainOfArrows: null };
+
+  const next = power.shieldStreak[mover] + 1;
+  if (next < ULTIMATE_STREAK) {
+    return { power: { ...power, shieldStreak: { ...power.shieldStreak, [mover]: next } }, rainOfArrows: null };
+  }
+
+  // Completed the combo — consumed either way, regardless of class or target availability.
+  const reset: PowerState = { ...power, shieldStreak: { ...power.shieldStreak, [mover]: 0 } };
+  const cls = power.classes[mover];
+  if (cls !== "archer") {
+    return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
+  }
+
+  const pool = getRainOfArrowsTargets(state, reset, mover).filter((id) => !allCaptures.includes(id));
+  if (pool.length === 0) return { power: reset, rainOfArrows: { targetTokenId: null } };
+  const picked = pool[Math.floor(rand() * pool.length)];
+  return { power: reset, rainOfArrows: { targetTokenId: picked } };
+}
+
 /** Shared plumbing: send a set of token ids to reserve, advance the mover,
  *  clear any of their SPENT (stale, prior-turn) Shieldbreaker safety, grant
  *  fresh safety if THIS move just broke a ward, grant a charge for a
@@ -411,18 +506,25 @@ function resolveTurn(
   landsOnShield: boolean,
   causesWin: boolean,
   grantsSafety: boolean,
-): { state: GameState; power: PowerState } {
+  rand: () => number = Math.random,
+): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
+  const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
+  power = streakResult.power;
+  const rainOfArrows = streakResult.rainOfArrows;
+  const finalCaptures =
+    rainOfArrows?.targetTokenId != null ? [...allCaptures, rainOfArrows.targetTokenId] : allCaptures;
+
   const tokens = state.tokens.map((t) => {
     if (t.id === tokenId) return { ...t, position: to };
-    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    if (finalCaptures.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
 
   let safeTokens = power.safeTokens;
-  if (safeTokens.has(tokenId) || allCaptures.some((id) => safeTokens.has(id))) {
+  if (safeTokens.has(tokenId) || finalCaptures.some((id) => safeTokens.has(id))) {
     safeTokens = new Set(safeTokens);
     safeTokens.delete(tokenId); // this token moved — any OLD safety it carried is spent
-    for (const id of allCaptures) safeTokens.delete(id); // captured tokens carry none forward
+    for (const id of finalCaptures) safeTokens.delete(id); // captured tokens carry none forward
   }
   if (grantsSafety) {
     safeTokens = new Set(safeTokens);
@@ -430,7 +532,7 @@ function resolveTurn(
   }
 
   let nextPower: PowerState = { ...power, safeTokens };
-  if (allCaptures.length > 0 || landsOnShield) {
+  if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
 
@@ -442,7 +544,7 @@ function resolveTurn(
     winner: causesWin ? mover : null,
     extraTurn,
   };
-  return { state: nextState, power: resetTurnFlags(nextPower) };
+  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows };
 }
 
 export function applyPowerMove(
@@ -450,7 +552,8 @@ export function applyPowerMove(
   power: PowerState,
   move: PowerMove,
   mover: PlayerId,
-): { state: GameState; power: PowerState } {
+  rand: () => number = Math.random,
+): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
   const allCaptures = [...move.captures, ...move.bonusCaptures];
   return resolveTurn(
     state,
@@ -462,6 +565,7 @@ export function applyPowerMove(
     move.landsOnShield,
     move.causesWin,
     move.breaksWard,
+    rand,
   );
 }
 
@@ -472,7 +576,8 @@ export function applyCharge(
   power: PowerState,
   move: PowerMove,
   mover: PlayerId,
-): { state: GameState; power: PowerState } {
+  rand: () => number = Math.random,
+): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
   const allCaptures = [...move.captures, ...move.bonusCaptures, ...move.chargeSweepCaptures];
   const spent: PowerState = {
     ...power,
@@ -492,6 +597,7 @@ export function applyCharge(
     move.landsOnShield,
     move.causesWin,
     move.breaksWard,
+    rand,
   );
 }
 
@@ -559,6 +665,7 @@ export function applyPush(
     safeTokens,
   };
   if (sendsHome) spentPower = addCharge(spentPower, mover);
+  spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
   // shield-tile landing — currentPlayer stays the mover) was meant to stop
   // Push from costing the Archer's own board progress, matching how

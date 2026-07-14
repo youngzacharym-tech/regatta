@@ -44,6 +44,7 @@ import {
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
+  breakShieldStreak,
   getLegalPowerMoves,
   getPushTargets,
   grantZeroFlipCharge,
@@ -135,6 +136,11 @@ class Match {
    *  the two are separate broadcasts, and clearAnnouncement() runs between
    *  them, so this can't just be lastChargeEvent itself. */
   private zeroFlipChargeBefore: number | null = null;
+  /** Archer's Rain of Arrows ultimate — non-null exactly on the broadcast
+   *  where a 3rd consecutive shield landing resolved. targetTokenId is null
+   *  when it fired into an empty eligible pool (streak still consumed —
+   *  announce "no target," not silence). Same lifecycle as lastPush. */
+  lastRainOfArrows: { targetTokenId: number | null } | null = null;
 
   constructor(code: string, vsCpu: boolean, variant: "classic" | "masterKiller" = "classic") {
     this.code = code;
@@ -217,6 +223,7 @@ class Match {
         lastMovePlayer: this.lastMovePlayer,
         lastPush: this.lastPush,
         lastChargeEvent: this.lastChargeEvent,
+        lastRainOfArrows: this.lastRainOfArrows,
         wasSkipped: this.wasSkipped,
         skippedPlayer: this.skippedPlayer,
         skipReason: this.skipReason,
@@ -334,6 +341,7 @@ class Match {
     this.lastMovePlayer = null;
     this.lastPush = null;
     this.lastChargeEvent = null;
+    this.lastRainOfArrows = null;
     this.wasSkipped = false;
     this.skippedPlayer = null;
     this.skipReason = null;
@@ -436,6 +444,9 @@ class Match {
     setTimeout(() => {
       if (this.flipStamp !== stampAtSchedule) return; // superseded by a Re-flip
       this.state = applyNoMove(this.state);
+      // applyNoMove only touches GameState — the turn is genuinely ending
+      // here without a shield landing, so the shield-streak combo breaks.
+      if (this.mk) this.mk = breakShieldStreak(this.mk, skippedPlayer);
       this.currentFlip = null;
       this.currentLegalMoves = null;
       this.currentPowerMoves = null;
@@ -455,15 +466,17 @@ class Match {
 
   private applyMasterKillerMove(role: PlayerId, move: PowerMove): void {
     if (!this.mk) return;
-    const captureCount = move.captures.length + move.bonusCaptures.length;
-    this.captures[role] += captureCount;
     this.lastMove = move; // PowerMove is a structural superset of Move
     this.lastMovePlayer = role;
     this.lastPush = null;
     const chargesBefore = this.mk.charges[role];
-    const r = applyPowerMove(this.state, this.mk, move, role);
+    const r = applyPowerMove(this.state, this.mk, move, role, Math.random);
     this.state = r.state;
     this.mk = r.power;
+    this.lastRainOfArrows = r.rainOfArrows;
+    const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+    const captureCount = move.captures.length + move.bonusCaptures.length + rainHit;
+    this.captures[role] += captureCount;
     const chargeDelta = this.mk.charges[role] - chargesBefore;
     this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentFlip = null;
@@ -472,21 +485,24 @@ class Match {
       `[MOVE] ${role} tok${move.tokenId} ${move.from}->${move.to}`,
       `caps=${captureCount}`, `snipe=${move.bonusCaptures.length > 0}`,
       `shield=${move.landsOnShield}`, `breaksWard=${move.breaksWard}`, `win=${move.causesWin}`,
+      `rainOfArrows=${rainHit === 1}`,
     );
     this.advance();
   }
 
   private applyMasterKillerCharge(role: PlayerId, move: PowerMove): void {
     if (!this.mk) return;
-    const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
-    this.captures[role] += captureCount;
     this.lastMove = move;
     this.lastMovePlayer = role;
     this.lastPush = null;
     const chargesBefore = this.mk.charges[role];
-    const r = mkApplyCharge(this.state, this.mk, move, role);
+    const r = mkApplyCharge(this.state, this.mk, move, role, Math.random);
     this.state = r.state;
     this.mk = r.power;
+    this.lastRainOfArrows = r.rainOfArrows;
+    const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+    const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
+    this.captures[role] += captureCount;
     const chargeDelta = this.mk.charges[role] - chargesBefore;
     this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentFlip = null;
@@ -500,6 +516,7 @@ class Match {
     this.lastMove = null;
     this.lastMovePlayer = role;
     this.lastPush = { targetTokenId };
+    this.lastRainOfArrows = null;
     const chargesBefore = this.mk.charges[role];
     const r = mkApplyPush(this.state, this.mk, targetTokenId, role);
     this.state = r.state;
@@ -529,6 +546,7 @@ class Match {
     const chargeDelta = this.mk.charges[role] - chargesBefore;
     this.lastMove = null;
     this.lastPush = null;
+    this.lastRainOfArrows = null;
     this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
     console.log(`[${this.code}] ${role} re-flipped -> ${this.currentFlip}`);

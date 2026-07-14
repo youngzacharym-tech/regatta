@@ -104,6 +104,13 @@ export type ServerMessage =
        *  charge-economy rules the way a reimplementation could. Omitted/null
        *  when nothing changed. */
       lastChargeEvent?: { player: PlayerId; delta: number } | null;
+      /** Master Killer mode only: Archer's Rain of Arrows ultimate. Non-null
+       *  exactly on the broadcast where a 3rd consecutive shield landing
+       *  resolved. `targetTokenId` is null when it fired into an empty
+       *  eligible pool (streak still consumed — announce "no target," not
+       *  nothing). Server-computed, never re-derived client-side, same
+       *  reasoning as lastChargeEvent. */
+      lastRainOfArrows?: { targetTokenId: number | null } | null;
     }
   | {
       type: "gameOver";
