@@ -1332,13 +1332,28 @@ function tileDisplay(pos: number): string {
   return String(pos + 1);
 }
 
+/** "(+1⚡)" / "(-1⚡)" — appended to whichever announcement is already
+ *  showing, so a charge change never has to invent its own separate toast.
+ *  `delta` comes straight from the server's own before/after diff
+ *  (lastChargeEvent) — never re-derived from the move shape here, so the
+ *  client can't drift from the real charge-economy rules. */
+function chargeSuffix(delta: number): string {
+  return ` (${delta > 0 ? "+" : ""}${delta}⚡)`;
+}
+
 function announceFromState(msg: {
-  lastMove: Move | null;
+  state: GameState;
+  lastMove: Move | PowerMove | null;
   lastMovePlayer: PlayerId | null;
+  lastPush?: { targetTokenId: number } | null;
+  lastChargeEvent?: { player: PlayerId; delta: number } | null;
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
   skipReason: "flip-zero" | "no-legal-move" | null;
 }) {
+  const chargeFor = (player: PlayerId): string =>
+    msg.lastChargeEvent && msg.lastChargeEvent.player === player ? chargeSuffix(msg.lastChargeEvent.delta) : "";
+
   if (msg.wasSkipped && msg.skippedPlayer) {
     const who = playerLabel(msg.skippedPlayer);
     const isMe = msg.skippedPlayer === myRole;
@@ -1347,39 +1362,72 @@ function announceFromState(msg: {
       msg.skipReason === "flip-zero"
         ? "flipped 0 — skip"
         : "no legal move — skip";
-    showAnnouncement(`${label} turn: ${reason}`, "skip");
+    showAnnouncement(`${label} turn: ${reason}${chargeFor(msg.skippedPlayer)}`, "skip");
     return;
   }
-  const m = msg.lastMove;
-  if (!m || !msg.lastMovePlayer) return;
-  const who = playerLabel(msg.lastMovePlayer);
-  const isMe = msg.lastMovePlayer === myRole;
-  const subject = isMe ? "You" : who;
 
-  if (m.causesWin) {
-    // Win screen will handle the celebration; don't double-announce.
+  if (msg.lastPush && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "opponent's" : "your";
+    const targetToken = msg.state.tokens.find((t) => t.id === msg.lastPush!.targetTokenId);
+    const sentHome = !targetToken || targetToken.position === -1;
+    const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
+    showAnnouncement(`${subject} pushed ${target} token ${where}${chargeFor(msg.lastMovePlayer)}`, "capture");
     return;
   }
-  if (m.landsOnShield) {
-    showAnnouncement(
-      `${subject} landed on shield (${tileDisplay(m.to)}) — extra turn`,
-      "shield",
-    );
+
+  const m = msg.lastMove;
+  if (m && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const suffix = chargeFor(msg.lastMovePlayer);
+
+    if (m.causesWin) {
+      // Win screen will handle the celebration; don't double-announce.
+      return;
+    }
+    if (m.landsOnShield) {
+      showAnnouncement(`${subject} landed on shield (${tileDisplay(m.to)}) — extra turn${suffix}`, "shield");
+      return;
+    }
+    // Master Killer moves may carry Snipe/Charge-sweep bonus captures on
+    // top of captures — PowerMove is a structural superset of Move, so
+    // these fields are simply absent (undefined) on a classic Move.
+    const bonusCaptures = "bonusCaptures" in m ? m.bonusCaptures.length : 0;
+    const sweepCaptures = "chargeSweepCaptures" in m ? m.chargeSweepCaptures.length : 0;
+    const totalCaptures = m.captures.length + bonusCaptures + sweepCaptures;
+    if (totalCaptures > 0) {
+      const target = isMe ? "opponent's" : "your";
+      showAnnouncement(
+        `${subject} captured ${target} token${totalCaptures > 1 ? "s" : ""} on ${tileDisplay(m.to)}${suffix}`,
+        "capture",
+      );
+      return;
+    }
+    if (m.to >= PATH_LENGTH) {
+      showAnnouncement(`${subject} escaped a token`, "escape");
+      return;
+    }
+    // Normal quiet move — no announcement, UNLESS it still earned a charge
+    // (a zero-flip is handled by the skip branch above, so this is really
+    // just defensive — normal moves earn a charge only via capture/shield,
+    // both already handled — but keep the fallthrough safe regardless).
+    if (suffix) showAnnouncement(`${subject} moved${suffix}`, "capture");
     return;
   }
-  if (m.captures.length > 0) {
-    const target = isMe ? "opponent's" : `your` + (m.captures.length > 1 ? "" : "");
-    showAnnouncement(
-      `${subject} captured ${target} token${m.captures.length > 1 ? "s" : ""} on ${tileDisplay(m.to)}`,
-      "capture",
-    );
-    return;
+
+  // No move, no push, no skip — the only thing left that can still change
+  // a charge count is a Re-flip (which doesn't end the turn, so none of
+  // the above fire). Give it its own small confirmation.
+  if (msg.lastChargeEvent) {
+    const who = playerLabel(msg.lastChargeEvent.player);
+    const isMe = msg.lastChargeEvent.player === myRole;
+    const subject = isMe ? "You" : who;
+    showAnnouncement(`${subject} re-flipped${chargeSuffix(msg.lastChargeEvent.delta)}`, "shield");
   }
-  if (m.to >= PATH_LENGTH) {
-    showAnnouncement(`${subject} escaped a token`, "escape");
-    return;
-  }
-  // Normal quiet move — no announcement.
 }
 
 // ---------------------------------------------------------------------------

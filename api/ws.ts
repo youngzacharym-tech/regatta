@@ -100,7 +100,7 @@ interface RoomDoc {
   currentFlip: number | null;
   turns: number;
   captures: { p1: number; p2: number };
-  lastMove: Move | null;
+  lastMove: Move | PowerMove | null;
   lastMovePlayer: PlayerId | null;
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -112,6 +112,18 @@ interface RoomDoc {
   mk: WirePowerState | null;
   classesPicked: { p1: boolean; p2: boolean };
   currentPowerMoves: PowerMove[] | null;
+  /** Push doesn't produce a Move-shaped lastMove — its own "how did we get
+   *  here" slot, same lifecycle as lastMove/lastMovePlayer. */
+  lastPush: { targetTokenId: number } | null;
+  /** Net charge change for one player from whatever this broadcast is
+   *  reporting — a real before/after diff, never re-derived client-side. */
+  lastChargeEvent: { player: PlayerId; delta: number } | null;
+  /** Bridges a zero-flip's charge grant (dealt in commitTurnFlip) to the
+   *  auto-skip broadcast that announces it — the two are separate RoomDoc
+   *  commits, and the announcement fields get cleared between them, so this
+   *  can't just be lastChargeEvent itself. Persisted (not an in-memory
+   *  field) since this architecture round-trips RoomDoc through Redis. */
+  zeroFlipChargeBefore: number | null;
 }
 
 const roomKey = (code: string) => `room:${code}`;
@@ -133,7 +145,8 @@ function freshMatchFields(
   | "phase" | "openingFlips"
   | "state" | "currentFlip" | "turns" | "captures"
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
-  | "mk" | "classesPicked" | "currentPowerMoves"
+  | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargeEvent"
+  | "zeroFlipChargeBefore"
 > {
   // currentPlayer is decided by the opening flip-off, not randomized here.
   const state = initialState();
@@ -152,6 +165,9 @@ function freshMatchFields(
     mk: variant === "masterKiller" ? toWirePower(initialPowerState()) : null,
     classesPicked: { p1: false, p2: false },
     currentPowerMoves: null,
+    lastPush: null,
+    lastChargeEvent: null,
+    zeroFlipChargeBefore: null,
   };
 }
 
@@ -307,6 +323,8 @@ export function GET(request: Request) {
         power,
         lastMove: doc.lastMove,
         lastMovePlayer: doc.lastMovePlayer,
+        lastPush: doc.lastPush,
+        lastChargeEvent: doc.lastChargeEvent,
         wasSkipped: doc.wasSkipped,
         skippedPlayer: doc.skippedPlayer,
         skipReason: doc.skipReason,
@@ -408,9 +426,16 @@ export function GET(request: Request) {
           const flip = flipCoins();
           let mk = cur.mk;
           let currentPowerMoves: PowerMove[] | null = null;
+          let zeroFlipChargeBefore: number | null = null;
           if (cur.variant === "masterKiller" && mk) {
             let power = fromWirePower(mk);
-            if (flip === 0) power = grantZeroFlipCharge(power, cur.state.currentPlayer);
+            if (flip === 0) {
+              // Stash the pre-grant count — the auto-skip commit (if this
+              // flip has no legal action) picks it up to show "+1 charge"
+              // alongside "flipped 0 — skip" as ONE message.
+              zeroFlipChargeBefore = power.charges[cur.state.currentPlayer];
+              power = grantZeroFlipCharge(power, cur.state.currentPlayer);
+            }
             mk = toWirePower(power);
             currentPowerMoves = getLegalPowerMoves(cur.state, power, flip);
           }
@@ -423,9 +448,12 @@ export function GET(request: Request) {
             // A fresh flip consumes the previous announcement.
             lastMove: null,
             lastMovePlayer: null,
+            lastPush: null,
+            lastChargeEvent: null,
             wasSkipped: false,
             skippedPlayer: null,
             skipReason: null,
+            zeroFlipChargeBefore,
           };
           if (await commit(next)) await maybeDrive(next);
           else {
@@ -474,6 +502,12 @@ export function GET(request: Request) {
           const cur = await loadDoc(doc.code);
           if (!cur || cur.version !== versionAtSchedule) return; // superseded
           const skipped = cur.state.currentPlayer;
+          const skipReason = cur.currentFlip === 0 ? "flip-zero" : "no-legal-move";
+          let lastChargeEvent: RoomDoc["lastChargeEvent"] = null;
+          if (skipReason === "flip-zero" && cur.mk && cur.zeroFlipChargeBefore !== null) {
+            const delta = cur.mk.charges[skipped] - cur.zeroFlipChargeBefore;
+            lastChargeEvent = delta !== 0 ? { player: skipped, delta } : null;
+          }
           const next: RoomDoc = {
             ...cur,
             state: applyNoMove(cur.state),
@@ -481,7 +515,9 @@ export function GET(request: Request) {
             currentPowerMoves: null,
             wasSkipped: true,
             skippedPlayer: skipped,
-            skipReason: cur.currentFlip === 0 ? "flip-zero" : "no-legal-move",
+            skipReason,
+            lastChargeEvent,
+            zeroFlipChargeBefore: null,
           };
           if (await commit(next)) await maybeDrive(next);
         }, AUTO_SKIP_DELAY_MS);
@@ -570,7 +606,9 @@ export function GET(request: Request) {
     ): Promise<void> => {
       if (!doc.mk) return;
       const captureCount = move.captures.length + move.bonusCaptures.length;
+      const chargesBefore = doc.mk.charges[seat];
       const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
@@ -580,6 +618,8 @@ export function GET(request: Request) {
         captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
         lastMove: move,
         lastMovePlayer: seat,
+        lastPush: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -602,7 +642,9 @@ export function GET(request: Request) {
     ): Promise<void> => {
       if (!doc.mk) return;
       const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
+      const chargesBefore = doc.mk.charges[seat];
       const r = mkApplyCharge(doc.state, fromWirePower(doc.mk), move, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
@@ -612,6 +654,8 @@ export function GET(request: Request) {
         captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
         lastMove: move,
         lastMovePlayer: seat,
+        lastPush: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -631,13 +675,19 @@ export function GET(request: Request) {
       targetTokenId: number,
     ): Promise<void> => {
       if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
       const r = mkApplyPush(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
         mk: toWirePower(r.power),
         currentFlip: null,
         currentPowerMoves: null,
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastPush: { targetTokenId },
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -657,14 +707,22 @@ export function GET(request: Request) {
      *  new flip is still a dead end. */
     const applyMasterKillerReflip = async (doc: RoomDoc, seat: PlayerId): Promise<void> => {
       if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
       let power = mkApplyReflip(fromWirePower(doc.mk), seat);
       const flip = flipCoins();
+      // A re-rolled zero also grants a charge, right here in the same
+      // synchronous step — report the NET delta across both the spend and
+      // the possible grant, since only one lastChargeEvent field exists.
       if (flip === 0) power = grantZeroFlipCharge(power, seat);
+      const chargeDelta = power.charges[seat] - chargesBefore;
       const next: RoomDoc = {
         ...doc,
         mk: toWirePower(power),
         currentFlip: flip,
         currentPowerMoves: getLegalPowerMoves(doc.state, power, flip),
+        lastMove: null,
+        lastPush: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
       };
       if (await commit(next)) {
         console.log(`[${doc.code}] ${seat} re-flipped -> ${flip}`);

@@ -69,7 +69,10 @@ export type ServerMessage =
       state: GameState;
       flip: number | null;
       legalMoves: Move[] | null;
-      lastMove: Move | null;
+      /** Master Killer moves/Charges are broadcast here too — PowerMove is a
+       *  structural superset of Move, so this is really `Move | PowerMove`
+       *  at runtime for those rooms (see referee.ts's own comment on this). */
+      lastMove: Move | PowerMove | null;
       lastMovePlayer: PlayerId | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
@@ -88,6 +91,19 @@ export type ServerMessage =
          *  with a charge and it's their turn — empty otherwise. */
         pushTargets: number[];
       };
+      /** Master Killer mode only: Push doesn't produce a Move-shaped object
+       *  (no token of the pusher's own moves), so it gets its own "how did
+       *  we get here" field, same idea as lastMove/lastMovePlayer. The
+       *  client looks up the target's resulting position in `state.tokens`
+       *  itself to tell a partial shove from a send-home. */
+      lastPush?: { targetTokenId: number } | null;
+      /** Master Killer mode only: the net charge change for one player from
+       *  whatever just happened (move/charge/push/re-flip/zero-flip skip).
+       *  Computed server-side as an authoritative before/after diff — never
+       *  re-derived client-side — so the client can't drift from the real
+       *  charge-economy rules the way a reimplementation could. Omitted/null
+       *  when nothing changed. */
+      lastChargeEvent?: { player: PlayerId; delta: number } | null;
     }
   | {
       type: "gameOver";

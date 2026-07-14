@@ -108,7 +108,7 @@ class Match {
   captures = { p1: 0, p2: 0 };
   // "How did we get to this state" — reset every new turn's coin flip, set by
   // handleChooseMove / applyNoMove so the state broadcast can announce it.
-  lastMove: Move | null = null;
+  lastMove: Move | PowerMove | null = null;
   lastMovePlayer: PlayerId | null = null;
   wasSkipped = false;
   skippedPlayer: PlayerId | null = null;
@@ -122,6 +122,19 @@ class Match {
    *  scheduled auto-skip notice it's stale (a Re-flip arrived in the same
    *  window) and quietly no-op instead of skipping the wrong flip. */
   private flipStamp = 0;
+  /** Push doesn't produce a Move-shaped lastMove — this is its own "how did
+   *  we get here" slot, same lifecycle as lastMove (set by
+   *  applyMasterKillerPush, cleared by clearAnnouncement). */
+  lastPush: { targetTokenId: number } | null = null;
+  /** Net charge change for one player from whatever the broadcast is
+   *  reporting — always a real before/after diff of this.mk.charges, never
+   *  a re-derivation of "why", so it can't drift from the actual rules. */
+  lastChargeEvent: { player: PlayerId; delta: number } | null = null;
+  /** Bridges a zero-flip's charge grant (in advance()) to the auto-skip
+   *  broadcast that announces it (~500ms later, scheduleAutoSkipIfNeeded) —
+   *  the two are separate broadcasts, and clearAnnouncement() runs between
+   *  them, so this can't just be lastChargeEvent itself. */
+  private zeroFlipChargeBefore: number | null = null;
 
   constructor(code: string, vsCpu: boolean, variant: "classic" | "masterKiller" = "classic") {
     this.code = code;
@@ -202,6 +215,8 @@ class Match {
         power: mkPublic,
         lastMove: this.lastMove,
         lastMovePlayer: this.lastMovePlayer,
+        lastPush: this.lastPush,
+        lastChargeEvent: this.lastChargeEvent,
         wasSkipped: this.wasSkipped,
         skippedPlayer: this.skippedPlayer,
         skipReason: this.skipReason,
@@ -317,6 +332,8 @@ class Match {
   private clearAnnouncement(): void {
     this.lastMove = null;
     this.lastMovePlayer = null;
+    this.lastPush = null;
+    this.lastChargeEvent = null;
     this.wasSkipped = false;
     this.skippedPlayer = null;
     this.skipReason = null;
@@ -342,7 +359,16 @@ class Match {
     this.flipStamp++;
 
     if (this.variant === "masterKiller" && this.mk) {
-      if (this.currentFlip === 0) this.mk = grantZeroFlipCharge(this.mk, this.state.currentPlayer);
+      if (this.currentFlip === 0) {
+        // Stash the pre-grant charge count — the auto-skip broadcast (if
+        // this flip has no legal action) picks it up ~500ms from now to
+        // show "+1 charge" alongside "flipped 0 — skip" as ONE message,
+        // since clearAnnouncement() runs between now and then.
+        this.zeroFlipChargeBefore = this.mk.charges[this.state.currentPlayer];
+        this.mk = grantZeroFlipCharge(this.mk, this.state.currentPlayer);
+      } else {
+        this.zeroFlipChargeBefore = null;
+      }
       this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
       this.currentLegalMoves = null;
     } else {
@@ -416,6 +442,11 @@ class Match {
       this.wasSkipped = true;
       this.skippedPlayer = skippedPlayer;
       this.skipReason = reason;
+      if (reason === "flip-zero" && this.mk && this.zeroFlipChargeBefore !== null) {
+        const delta = this.mk.charges[skippedPlayer] - this.zeroFlipChargeBefore;
+        this.lastChargeEvent = delta !== 0 ? { player: skippedPlayer, delta } : null;
+      }
+      this.zeroFlipChargeBefore = null;
       this.advance();
     }, AUTO_SKIP_DELAY_MS);
   }
@@ -428,9 +459,13 @@ class Match {
     this.captures[role] += captureCount;
     this.lastMove = move; // PowerMove is a structural superset of Move
     this.lastMovePlayer = role;
+    this.lastPush = null;
+    const chargesBefore = this.mk.charges[role];
     const r = applyPowerMove(this.state, this.mk, move, role);
     this.state = r.state;
     this.mk = r.power;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentFlip = null;
     this.currentPowerMoves = null;
     console.log(
@@ -447,9 +482,13 @@ class Match {
     this.captures[role] += captureCount;
     this.lastMove = move;
     this.lastMovePlayer = role;
+    this.lastPush = null;
+    const chargesBefore = this.mk.charges[role];
     const r = mkApplyCharge(this.state, this.mk, move, role);
     this.state = r.state;
     this.mk = r.power;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentFlip = null;
     this.currentPowerMoves = null;
     console.log(`[CHARGE] ${role} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} win=${move.causesWin}`);
@@ -458,9 +497,15 @@ class Match {
 
   private applyMasterKillerPush(role: PlayerId, targetTokenId: number): void {
     if (!this.mk) return;
+    this.lastMove = null;
+    this.lastMovePlayer = role;
+    this.lastPush = { targetTokenId };
+    const chargesBefore = this.mk.charges[role];
     const r = mkApplyPush(this.state, this.mk, targetTokenId, role);
     this.state = r.state;
     this.mk = r.power;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentFlip = null;
     this.currentPowerMoves = null;
     console.log(`[PUSH] ${role} -> tok${targetTokenId}`);
@@ -471,10 +516,20 @@ class Match {
    *  same player still to act. */
   private applyMasterKillerReflip(role: PlayerId): void {
     if (!this.mk) return;
+    const chargesBefore = this.mk.charges[role];
     this.mk = mkApplyReflip(this.mk, role);
     this.currentFlip = flipCoins();
     this.flipStamp++;
+    // A re-rolled zero also grants a charge, right here in the same
+    // synchronous step (unlike the normal turn flow, there's no later
+    // broadcast to attach it to) — report the NET delta across both the
+    // spend and the possible grant, since only one lastChargeEvent exists
+    // per broadcast.
     if (this.currentFlip === 0) this.mk = grantZeroFlipCharge(this.mk, role);
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastMove = null;
+    this.lastPush = null;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
     console.log(`[${this.code}] ${role} re-flipped -> ${this.currentFlip}`);
     this.broadcastState();
