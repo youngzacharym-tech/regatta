@@ -179,6 +179,7 @@ function otherPlayerId(p) {
 }
 var CHARGE_CAP = 2;
 var PUSH_DISTANCE = 1;
+var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
 var PUSH_WARD_COST = 1;
 var PUSH_WARD_DISTANCE = 3;
@@ -304,7 +305,7 @@ function getLegalPowerMoves(state, power, flip) {
           break;
         }
         const foe = occ.find((t) => t.owner !== player);
-        if (foe && !isProtected(state, power, foe)) {
+        if (foe && chargeSweepCaptures.length < CHARGE_SWEEP_CAP && !onShieldTile(foe) && !hasTransientSafety(power, foe)) {
           chargeSweepCaptures.push(foe.id);
         }
       }
@@ -400,17 +401,19 @@ function applyPush(state, power, targetTokenId, mover) {
     (t) => t.id !== targetTokenId && t.position === rawTo && (t.owner === target.owner || contestedLanding)
   );
   const landing = collides || rawTo < 0 ? -1 : rawTo;
+  const sendsHome = landing === -1;
   const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let safeTokens = power.safeTokens;
   if (safeTokens.has(targetTokenId)) {
     safeTokens = new Set(safeTokens);
     safeTokens.delete(targetTokenId);
   }
-  const spentPower = {
+  let spentPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
     safeTokens
   };
+  if (sendsHome) spentPower = addCharge(spentPower, mover);
   const nextState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -484,7 +487,7 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
       bestScore = score;
       best = { kind: "move", move: m };
     }
-    if (cls === "warrior" && m.chargeAvailable && charges >= 1) {
+    if (cls === "warrior" && m.chargeAvailable && m.chargeSweepCaptures.length > 0 && charges >= 1) {
       const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand) + 20;
       if (chargeScore > bestScore) {
         bestScore = chargeScore;

@@ -41,6 +41,16 @@ export const CHARGE_CAP = 2;
  *  without making Push useless.) */
 export const PUSH_DISTANCE = 1;
 
+/** Warrior's Charge sweep: how many EXTRA enemies it can capture beyond the
+ *  primary landing tile, in a single move. Matches Snipe's own bonus-capture
+ *  ceiling (1) on principle — no class's single move should out-capture the
+ *  others by more than one extra. (Was uncapped — a bot-quality bug meant
+ *  Warriors almost never spent Charge on a real multi-capture sweep, so the
+ *  ceiling never mattered in practice; once that bug was fixed, an uncapped
+ *  sweep made Charge worth far more per use than anything in Archer's kit,
+ *  flipping archer-vs-warrior from 51.6/48.4 to 43.5/56.5 warrior-favored.) */
+export const CHARGE_SWEEP_CAP = 1;
+
 /** Mage's Ward: "all" = every one of the mage's tokens is warded while at
  *  CHARGE_CAP. "most-advanced" = only their furthest-along token is warded.
  *  (Was "all" — simulation showed Archer vs Mage at 29.5/70.5, since only
@@ -328,7 +338,11 @@ export function getLegalPowerMoves(
     // intermediate contested tile must be clear of the Warrior's own
     // tokens. The sweep itself only touches contested tiles strictly
     // between from and to, and — like a normal move — never crosses a
-    // shield tile or a warded token.
+    // shield tile or a token under Warrior Shieldbreaker's own transient
+    // safety. A WARDED token in the sweep IS captured, same as a direct
+    // landing — Shieldbreaker's whole identity is "Warriors pierce Ward,"
+    // so the sweep shouldn't quietly disagree with that just because the
+    // token is in the middle of the lane instead of the landing tile.
     let chargeAvailable = false;
     const chargeSweepCaptures: number[] = [];
     if (cls === "warrior" && from >= 0) {
@@ -342,9 +356,17 @@ export function getLegalPowerMoves(
           break;
         }
         const foe = occ.find((t) => t.owner !== player);
-        if (foe && !isProtected(state, power, foe)) {
+        if (
+          foe &&
+          chargeSweepCaptures.length < CHARGE_SWEEP_CAP &&
+          !onShieldTile(foe) &&
+          !hasTransientSafety(power, foe)
+        ) {
           chargeSweepCaptures.push(foe.id);
         }
+        // Keep scanning past the cap anyway — laneClear still needs the
+        // WHOLE lane checked for the Warrior's own blocking tokens, even
+        // once no more captures will be recorded.
       }
       chargeAvailable = laneClear;
     }
@@ -479,10 +501,19 @@ export function applyCharge(
  *  affordability into the target list itself (rather than a separate
  *  legality branch at the call site) so the UI's target highlights and the
  *  server's legality check can never drift apart. Spends the turn (no token
- *  of the pusher's moves). Deliberately never grants a charge back, even in
- *  the knocked-overboard case — Push is a repositioning tool, not a capture
- *  tool, and its cost is meant to be a clean spend with no chance to chain
- *  into a refund. */
+ *  of the pusher's moves).
+ *
+ *  Refunds its charge (see applyPush) specifically when it sends the target
+ *  all the way home to reserve — that outcome is functionally a capture
+ *  (the token is off the board, back to square one), so it earns the same
+ *  refund any other capturing action gets under the shared charge economy.
+ *  A partial shove that leaves the target on the board is NOT a capture and
+ *  never refunds. (Was "never refunds, ever" — but every OTHER class's
+ *  active either IS a move that benefits from the universal capture-refund
+ *  rule (Warrior's Charge) or doesn't need one because it isn't
+ *  underperforming (Mage's Re-flip); Archer's Push was the one genuine
+ *  structural gap, confirmed by archer-vs-warrior sitting at 42.5/57.5 with
+ *  no capture-equivalent economy of its own at all.) */
 export function getPushTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
@@ -518,6 +549,7 @@ export function applyPush(
       (t.owner === target.owner || contestedLanding),
   );
   const landing = collides || rawTo < 0 ? -1 : rawTo;
+  const sendsHome = landing === -1; // functionally a capture — refund below
 
   const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let safeTokens = power.safeTokens;
@@ -525,11 +557,12 @@ export function applyPush(
     safeTokens = new Set(safeTokens);
     safeTokens.delete(targetTokenId);
   }
-  const spentPower: PowerState = {
+  let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
     safeTokens,
   };
+  if (sendsHome) spentPower = addCharge(spentPower, mover);
   const nextState: GameState = {
     tokens,
     currentPlayer: otherPlayerId(mover),

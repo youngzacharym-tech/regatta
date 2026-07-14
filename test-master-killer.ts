@@ -11,6 +11,7 @@
 import { PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
 import {
   CHARGE_CAP,
+  CHARGE_SWEEP_CAP,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
@@ -230,8 +231,9 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Charge: sweeps intermediate captures, stops at shield/ward, refuses
-//    when its own token blocks the lane
+// 6. Charge: sweeps intermediate captures (including warded ones — the
+//    sweep pierces Ward same as Shieldbreaker), stops at shield tiles and
+//    transient safety, refuses when its own token blocks the lane
 // ---------------------------------------------------------------------------
 {
   // p1 warrior at 4, flip 4 -> to 8. Intermediate contested tiles 5,6,7.
@@ -270,15 +272,48 @@ function check(name: string, cond: boolean, detail?: string) {
     JSON.stringify(mShield),
   );
 
-  // Warded intermediate enemy is also skipped by the sweep.
+  // A warded intermediate enemy IS swept — Shieldbreaker's whole identity
+  // is "Warriors pierce Ward," so the sweep shouldn't quietly disagree with
+  // that just because the token is mid-lane instead of the landing tile.
   const sWard = state("p1", { 0: 4, 4: 6 });
   const pwWard = power({ p1: "warrior", p2: "mage" }, { p1: 1, p2: CHARGE_CAP });
   const movesWard = getLegalPowerMoves(sWard, pwWard, 4);
   const mWard = movesWard.find((mv) => mv.tokenId === 0 && mv.to === 8);
   check(
-    "Charge: does not sweep a warded intermediate enemy",
-    !!mWard && !mWard.chargeSweepCaptures.includes(4),
+    "Charge: DOES sweep a warded intermediate enemy",
+    !!mWard && mWard.chargeSweepCaptures.includes(4),
     JSON.stringify(mWard),
+  );
+
+  // Transient safety (Shieldbreaker's own "just captured, briefly immune"
+  // grant) still blocks the sweep unconditionally, same as a shield tile —
+  // this is the one protection with no exception for anyone, including
+  // the Warrior that granted it.
+  const sSafe = state("p1", { 0: 4, 4: 6 });
+  const pwSafe: PowerState = { ...power({ p1: "warrior" }, { p1: 1 }), safeTokens: new Set([4]) };
+  const movesSafe = getLegalPowerMoves(sSafe, pwSafe, 4);
+  const mSafe = movesSafe.find((mv) => mv.tokenId === 0 && mv.to === 8);
+  check(
+    "Charge: does not sweep a transiently-safe enemy",
+    !!mSafe && !mSafe.chargeSweepCaptures.includes(4),
+    JSON.stringify(mSafe),
+  );
+
+  // CHARGE_SWEEP_CAP: two unprotected enemies sit in the lane, but only 1
+  // extra capture is recorded — matching Snipe's own bonus-capture ceiling
+  // so no class's single move can out-capture the others by more than one.
+  const sTwo = state("p1", { 0: 4, 4: 6, 5: 9 }); // p1 warrior 4 -> 11; p2 enemies at 6 and 9
+  const movesTwo = getLegalPowerMoves(sTwo, pw, 7);
+  const mTwo = movesTwo.find((mv) => mv.tokenId === 0 && mv.to === 11);
+  check(
+    "Charge: sweep captures are capped at CHARGE_SWEEP_CAP even with 2 sweepable enemies in the lane",
+    !!mTwo && mTwo.chargeSweepCaptures.length === CHARGE_SWEEP_CAP,
+    JSON.stringify(mTwo),
+  );
+  check(
+    "Charge: the lane is still fully scanned for laneClear despite the capture cap",
+    !!mTwo && mTwo.chargeAvailable === true,
+    JSON.stringify(mTwo),
   );
 
   // Own token blocking the lane makes Charge unavailable (plain move still legal).
@@ -439,6 +474,55 @@ function check(name: string, cond: boolean, detail?: string) {
   check(
     "Push: Ward fully hands off to the mage's remaining on-board token once the warded one is reserved",
     isWarded(rHard.state, rHard.power, survivor),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Push refunds a charge when (and only when) it sends the target home —
+//     that outcome is functionally a capture, so it earns the same refund
+//     under the shared charge economy; a partial shove does not.
+// ---------------------------------------------------------------------------
+{
+  // Sends home via collision -> refunded: net cost is 0, not 1.
+  const sHome = state("p1", { 4: 6, 5: 6 - PUSH_DISTANCE }); // p2's own token sits at the landing tile
+  const pw = power({ p1: "archer" }, { p1: 1 });
+  const rHome = applyPush(sHome, pw, 4, "p1");
+  const movedHome = rHome.state.tokens.find((t) => t.id === 4)!;
+  check("Push refund: sanity — this push does send the target home", movedHome.position === -1);
+  check(
+    "Push refund: sending the target home refunds the charge (net cost 0)",
+    rHome.power.charges.p1 === 1,
+    `left with ${rHome.power.charges.p1} charges`,
+  );
+
+  // A clean, non-collision shove leaves the target on the board -> no refund.
+  const sPartial = state("p1", { 4: 6 }); // alone — nothing to collide with
+  const rPartial = applyPush(sPartial, pw, 4, "p1");
+  const movedPartial = rPartial.state.tokens.find((t) => t.id === 4)!;
+  check("Push refund: sanity — this push does NOT send the target home", movedPartial.position !== -1);
+  check(
+    "Push refund: a partial shove is a pure 1-charge spend, no refund",
+    rPartial.power.charges.p1 === 0,
+    `left with ${rPartial.power.charges.p1} charges`,
+  );
+
+  // Underflow (pushed off tile 0) also counts as sent-home -> also refunds.
+  const sUnderflow = state("p1", { 4: 0 });
+  const rUnderflow = applyPush(sUnderflow, pw, 4, "p1");
+  check(
+    "Push refund: underflow off tile 0 also refunds (it's sent-home too)",
+    rUnderflow.power.charges.p1 === 1,
+    `left with ${rUnderflow.power.charges.p1} charges`,
+  );
+
+  // The refund still respects CHARGE_CAP — starting already at the cap
+  // minus the spend, refunding shouldn't be able to overshoot it.
+  const pwAtCap = power({ p1: "archer" }, { p1: CHARGE_CAP });
+  const rAtCap = applyPush(sHome, pwAtCap, 4, "p1");
+  check(
+    "Push refund: never overshoots CHARGE_CAP",
+    rAtCap.power.charges.p1 === CHARGE_CAP,
+    `left with ${rAtCap.power.charges.p1} charges`,
   );
 }
 

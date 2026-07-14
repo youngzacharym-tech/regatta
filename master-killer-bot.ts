@@ -127,7 +127,16 @@ export function pickBotPowerAction(
       bestScore = score;
       best = { kind: "move", move: m };
     }
-    if (cls === "warrior" && m.chargeAvailable && charges >= 1) {
+    // chargeSweepCaptures.length > 0 is required, not just chargeAvailable:
+    // chargeAvailable only means "the lane is clear of the Warrior's OWN
+    // tokens" — it says nothing about whether there's an enemy to actually
+    // sweep. Without this check the bot would spend a real charge on a
+    // Charge that captures nothing extra beyond the plain move it's
+    // wrapping, which is strictly worse (identical board outcome, minus a
+    // charge). Found via a suspiciously high charge/g stat in the balance
+    // sim (~40% of all turns in a warrior mirror game) that traced back to
+    // the +20 nudge below always winning over an empty-sweep plain move.
+    if (cls === "warrior" && m.chargeAvailable && m.chargeSweepCaptures.length > 0 && charges >= 1) {
       const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand) + 20; // small "use the cool ability" nudge
       if (chargeScore > bestScore) {
         bestScore = chargeScore;
