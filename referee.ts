@@ -40,13 +40,17 @@ import { pickBotMove } from "./bot.ts";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (variant === "classic" guards every branch that touches it).
 import {
+  applyBlinkStrike,
   applyCharge as mkApplyCharge,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
+  applyWarpath,
   breakShieldStreak,
+  getBlinkStrikeTargets,
   getLegalPowerMoves,
   getPushTargets,
+  getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
   type PlayerClass,
@@ -141,6 +145,9 @@ class Match {
    *  when it fired into an empty eligible pool (streak still consumed —
    *  announce "no target," not silence). Same lifecycle as lastPush. */
   lastRainOfArrows: { targetTokenId: number | null } | null = null;
+  /** Mage's Blink Strike or Warrior's Warpath — non-null exactly on the
+   *  broadcast where one of those resolved. Same lifecycle as lastPush. */
+  lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null = null;
 
   constructor(code: string, vsCpu: boolean, variant: "classic" | "masterKiller" = "classic") {
     this.code = code;
@@ -205,6 +212,15 @@ class Match {
             this.mk.classes[this.state.currentPlayer] === "archer"
               ? getPushTargets(this.state, this.mk, this.state.currentPlayer)
               : [],
+          ultimateReady: { ...this.mk.ultimateReady },
+          blinkStrikeTargets:
+            this.mk.classes[this.state.currentPlayer] === "mage" && this.mk.ultimateReady[this.state.currentPlayer]
+              ? getBlinkStrikeTargets(this.state, this.mk, this.state.currentPlayer)
+              : [],
+          warpathTargets:
+            this.mk.classes[this.state.currentPlayer] === "warrior" && this.mk.ultimateReady[this.state.currentPlayer]
+              ? getWarpathTargets(this.state, this.mk, this.state.currentPlayer)
+              : [],
         }
       : undefined;
 
@@ -224,6 +240,7 @@ class Match {
         lastPush: this.lastPush,
         lastChargeEvent: this.lastChargeEvent,
         lastRainOfArrows: this.lastRainOfArrows,
+        lastUltimate: this.lastUltimate,
         wasSkipped: this.wasSkipped,
         skippedPlayer: this.skippedPlayer,
         skipReason: this.skipReason,
@@ -342,6 +359,7 @@ class Match {
     this.lastPush = null;
     this.lastChargeEvent = null;
     this.lastRainOfArrows = null;
+    this.lastUltimate = null;
     this.wasSkipped = false;
     this.skippedPlayer = null;
     this.skipReason = null;
@@ -469,6 +487,7 @@ class Match {
     this.lastMove = move; // PowerMove is a structural superset of Move
     this.lastMovePlayer = role;
     this.lastPush = null;
+    this.lastUltimate = null;
     const chargesBefore = this.mk.charges[role];
     const r = applyPowerMove(this.state, this.mk, move, role, Math.random);
     this.state = r.state;
@@ -495,6 +514,7 @@ class Match {
     this.lastMove = move;
     this.lastMovePlayer = role;
     this.lastPush = null;
+    this.lastUltimate = null;
     const chargesBefore = this.mk.charges[role];
     const r = mkApplyCharge(this.state, this.mk, move, role, Math.random);
     this.state = r.state;
@@ -517,6 +537,7 @@ class Match {
     this.lastMovePlayer = role;
     this.lastPush = { targetTokenId };
     this.lastRainOfArrows = null;
+    this.lastUltimate = null;
     const chargesBefore = this.mk.charges[role];
     const r = mkApplyPush(this.state, this.mk, targetTokenId, role);
     this.state = r.state;
@@ -526,6 +547,46 @@ class Match {
     this.currentFlip = null;
     this.currentPowerMoves = null;
     console.log(`[PUSH] ${role} -> tok${targetTokenId}`);
+    this.advance();
+  }
+
+  private applyMasterKillerBlinkStrike(role: PlayerId, targetTokenId: number): void {
+    if (!this.mk) return;
+    this.lastMove = null;
+    this.lastMovePlayer = role;
+    this.lastPush = null;
+    this.lastRainOfArrows = null;
+    const chargesBefore = this.mk.charges[role];
+    const r = applyBlinkStrike(this.state, this.mk, targetTokenId, role);
+    this.state = r.state;
+    this.mk = r.power;
+    this.lastUltimate = { kind: "blinkStrike", targetTokenId, sweptTokenIds: r.sweptTokenIds };
+    this.captures[role] += 1 + r.sweptTokenIds.length;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(`[BLINK STRIKE] ${role} -> tok${targetTokenId}`);
+    this.advance();
+  }
+
+  private applyMasterKillerWarpath(role: PlayerId, targetTokenId: number): void {
+    if (!this.mk) return;
+    this.lastMove = null;
+    this.lastMovePlayer = role;
+    this.lastPush = null;
+    this.lastRainOfArrows = null;
+    const chargesBefore = this.mk.charges[role];
+    const r = applyWarpath(this.state, this.mk, targetTokenId, role);
+    this.state = r.state;
+    this.mk = r.power;
+    this.lastUltimate = { kind: "warpath", targetTokenId, sweptTokenIds: r.sweptTokenIds };
+    this.captures[role] += 1 + r.sweptTokenIds.length;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(`[WARPATH] ${role} -> tok${targetTokenId} swept=${r.sweptTokenIds.length}`);
     this.advance();
   }
 
@@ -547,6 +608,7 @@ class Match {
     this.lastMove = null;
     this.lastPush = null;
     this.lastRainOfArrows = null;
+    this.lastUltimate = null;
     this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
     this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
     console.log(`[${this.code}] ${role} re-flipped -> ${this.currentFlip}`);
@@ -567,6 +629,12 @@ class Match {
         break;
       case "reflip":
         this.applyMasterKillerReflip(role);
+        break;
+      case "blinkStrike":
+        this.applyMasterKillerBlinkStrike(role, action.targetTokenId);
+        break;
+      case "warpath":
+        this.applyMasterKillerWarpath(role, action.targetTokenId);
         break;
     }
   }
@@ -652,6 +720,26 @@ class Match {
         return this.send(role, { type: "error", message: "Invalid push target" });
       }
       this.applyMasterKillerPush(role, action.targetTokenId);
+      return;
+    }
+
+    if (action.kind === "blinkStrike") {
+      if (cls !== "mage") return this.send(role, { type: "error", message: "Only a Mage can Blink Strike" });
+      if (!this.mk.ultimateReady[role]) return this.send(role, { type: "error", message: "Ultimate not ready" });
+      if (!getBlinkStrikeTargets(this.state, this.mk, role).includes(action.targetTokenId)) {
+        return this.send(role, { type: "error", message: "Invalid Blink Strike target" });
+      }
+      this.applyMasterKillerBlinkStrike(role, action.targetTokenId);
+      return;
+    }
+
+    if (action.kind === "warpath") {
+      if (cls !== "warrior") return this.send(role, { type: "error", message: "Only a Warrior can Warpath" });
+      if (!this.mk.ultimateReady[role]) return this.send(role, { type: "error", message: "Ultimate not ready" });
+      if (!getWarpathTargets(this.state, this.mk, role).includes(action.targetTokenId)) {
+        return this.send(role, { type: "error", message: "Invalid Warpath target" });
+      }
+      this.applyMasterKillerWarpath(role, action.targetTokenId);
       return;
     }
 

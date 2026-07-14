@@ -3,14 +3,17 @@
 //
 // Mirrors bot.ts's approach (ranked heuristic, small jitter) but scores
 // across ALL available actions this turn — a normal/power-boosted move,
-// Archer's Push, Mage's Re-flip, or Warrior's Charge — and takes whichever
-// scores highest. Separate file from bot.ts so classic mode's bot (and
-// anything reading it, including Kasen's audit) stays untouched.
+// Archer's Push, Mage's Re-flip, Warrior's Charge, or (once banked) Mage's
+// Blink Strike / Warrior's Warpath ultimate — and takes whichever scores
+// highest. Separate file from bot.ts so classic mode's bot (and anything
+// reading it, including Kasen's audit) stays untouched.
 // ============================================================================
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState } from "./rulebook.ts";
 import {
+  getBlinkStrikeTargets,
   getPushTargets,
+  getWarpathTargets,
   isWarded,
   PUSH_DISTANCE,
   PUSH_WARD_DISTANCE,
@@ -88,6 +91,20 @@ function scorePush(state: GameState, power: PowerState, targetId: number, rand: 
   return score;
 }
 
+/** Score Mage's Blink Strike / Warrior's Warpath: both are a guaranteed hit
+ *  that bypasses shield-tile protection and Ward outright — scored like a
+ *  strong capture (same shape as scoreMove's capture bonus), plus a flat
+ *  bonus so the bot doesn't sit on a banked ultimateReady flag once a legal
+ *  target exists. Doesn't account for Warpath's extra sweep captures along
+ *  the way — target choice among a rarely-more-than-one-deep candidate pool
+ *  isn't worth the complexity of a speculative applyWarpath() call here. */
+function scoreUltimateStrike(state: GameState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  let score = 500 + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+
 /** Score Re-flip: only worth it when the CURRENT flip is bad — zero, or a
  *  flip that produces no legal moves at all (about to be skipped anyway). */
 function scoreReflip(currentMoveCount: number, flip: number, rand: () => number): number {
@@ -160,6 +177,26 @@ export function pickBotPowerAction(
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "reflip" };
+    }
+  }
+
+  if (cls === "mage" && power.ultimateReady[mover]) {
+    for (const targetId of getBlinkStrikeTargets(state, power, mover)) {
+      const score = scoreUltimateStrike(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "blinkStrike", targetTokenId: targetId };
+      }
+    }
+  }
+
+  if (cls === "warrior" && power.ultimateReady[mover]) {
+    for (const targetId of getWarpathTargets(state, power, mover)) {
+      const score = scoreUltimateStrike(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "warpath", targetTokenId: targetId };
+      }
     }
   }
 

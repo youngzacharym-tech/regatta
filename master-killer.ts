@@ -177,7 +177,9 @@ export type PowerAction =
   | { kind: "move"; move: PowerMove }
   | { kind: "push"; targetTokenId: number }
   | { kind: "reflip" }
-  | { kind: "charge"; move: PowerMove };
+  | { kind: "charge"; move: PowerMove }
+  | { kind: "blinkStrike"; targetTokenId: number }
+  | { kind: "warpath"; targetTokenId: number };
 
 // ============================================================================
 // STATE
@@ -212,6 +214,28 @@ function isMostAdvanced(state: GameState, token: TokenState): boolean {
   if (mine.length === 0) return false;
   const best = Math.max(...mine.map((t) => t.position));
   return token.position === best;
+}
+
+/** Mage's Blink Strike ultimate always moves the mover's most-advanced
+ *  on-board token (the same one Ward would protect) — null if they have no
+ *  on-board tokens at all. */
+function findMostAdvancedToken(state: GameState, mover: PlayerId): TokenState | null {
+  const mine = state.tokens.filter(
+    (t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+  );
+  if (mine.length === 0) return null;
+  return mine.reduce((best, t) => (t.position > best.position ? t : best));
+}
+
+/** Warrior's Warpath ultimate always moves the mover's LEAST-advanced
+ *  on-board token — the one that benefits most from an instant reposition —
+ *  null if they have no on-board tokens at all. */
+function findLeastAdvancedToken(state: GameState, mover: PlayerId): TokenState | null {
+  const mine = state.tokens.filter(
+    (t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+  );
+  if (mine.length === 0) return null;
+  return mine.reduce((best, t) => (t.position < best.position ? t : best));
 }
 
 /** Is this token currently protected by its owner's Ward? Derived, not
@@ -694,4 +718,153 @@ export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
     charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
     reflipUsedThisTurn: true,
   };
+}
+
+// ============================================================================
+// ULTIMATES — see ULTIMATE_STREAK. Archer's Rain of Arrows (above) is
+// passive and fully automatic; Mage's Blink Strike and Warrior's Warpath
+// are active — completing the shield-streak combo banks ultimateReady, and
+// these two are what a Mage/Warrior spends it on. Both auto-select WHICH of
+// the mover's own tokens relocates (Mage: most-advanced/Ward-carrying,
+// Warrior: least-advanced — the one that benefits most from a free
+// reposition) rather than letting the player choose a source token, keeping
+// the target-selection UI identical to Push's "tap one target" flow.
+// ============================================================================
+
+/** Mage's Blink Strike ultimate: valid targets are the same as Rain of
+ *  Arrows (contested-zone enemies, bypassing shield tiles and Ward, but not
+ *  transient safety) — reused directly since the underlying "who's
+ *  vulnerable to a shield/ward-piercing strike" rule is identical. Empty if
+ *  the mover has no on-board token to relocate at all. */
+export function getBlinkStrikeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (!findMostAdvancedToken(state, mover)) return [];
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Warrior's Warpath ultimate: same target eligibility as Blink Strike —
+ *  the sweep along the way (see applyWarpath) uses the same rule too.
+ *  Empty if the mover has no on-board token to relocate at all. */
+export function getWarpathTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (!findLeastAdvancedToken(state, mover)) return [];
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Mage's Blink Strike: instantly relocates the mover's most-advanced
+ *  on-board token onto the target's tile, capturing it — bypassing shield
+ *  tiles and Ward, same as Rain of Arrows, but not transient safety (see
+ *  getBlinkStrikeTargets). Spends the banked ultimateReady flag, not a
+ *  charge — but still grants a charge back on the capture, same as any
+ *  other capturing action. Always ends the turn, even if the destination
+ *  happens to be a shield tile — deliberately no extra-turn interaction
+ *  here, given this codebase's history with extra-turn balance blowups. */
+export function applyBlinkStrike(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
+  const mine = findMostAdvancedToken(state, mover)!;
+  const target = state.tokens.find((t) => t.id === targetTokenId)!;
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: target.position };
+    if (t.id === targetTokenId) return { ...t, position: -1 };
+    return t;
+  });
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(mine.id) || safeTokens.has(targetTokenId)) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(mine.id);
+    safeTokens.delete(targetTokenId);
+  }
+  let nextPower: PowerState = {
+    ...power,
+    safeTokens,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
+  nextPower = addCharge(nextPower, mover);
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  // sweptTokenIds is always empty for Blink Strike — kept in the return
+  // shape purely so callers can treat it and applyWarpath's result
+  // uniformly, since Blink Strike never sweeps.
+  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: [] };
+}
+
+/** Warrior's Warpath: instantly relocates the mover's LEAST-advanced
+ *  on-board token onto the target's tile, capturing it, AND sweeps every
+ *  unprotected enemy on a contested tile strictly between where that token
+ *  started and where it lands (either direction — this is a teleport, not
+ *  a real move, so "forward" doesn't matter) — uncapped, unlike Charge's
+ *  CHARGE_SWEEP_CAP. Same bypass rules as Blink Strike (shield + Ward, not
+ *  transient safety) for every token it hits, primary or swept. If it
+ *  breaks a Ward anywhere along the way, the landing token gets
+ *  Shieldbreaker's usual transient-safety grant — ties this back to
+ *  Warrior's core identity instead of being a bare reskin of Blink Strike.
+ *  Spends ultimateReady, not a charge; still grants exactly 1 charge back
+ *  on a successful capture, matching Charge's own sweep economy (one
+ *  capturing move = one charge, regardless of how many tokens it takes
+ *  down). Always ends the turn — no extra-turn interaction. */
+export function applyWarpath(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
+  const mine = findLeastAdvancedToken(state, mover)!;
+  const target = state.tokens.find((t) => t.id === targetTokenId)!;
+  const from = mine.position;
+  const to = target.position;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+
+  const sweepCaptures: number[] = [];
+  let brokeWard = isWarded(state, power, target);
+  for (let i = lo + 1; i < hi; i++) {
+    if (!BOARD_LAYOUT[i].isContested) continue;
+    const foe = state.tokens.find(
+      (t) => t.position === i && t.owner !== mover && t.id !== mine.id && t.id !== targetTokenId,
+    );
+    if (foe && !hasTransientSafety(power, foe)) {
+      sweepCaptures.push(foe.id);
+      if (isWarded(state, power, foe)) brokeWard = true;
+    }
+  }
+
+  const allCaptures = [targetTokenId, ...sweepCaptures];
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: to };
+    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    return t;
+  });
+
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(mine.id) || allCaptures.some((id) => safeTokens.has(id))) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(mine.id);
+    for (const id of allCaptures) safeTokens.delete(id);
+  }
+  if (brokeWard) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.add(mine.id);
+  }
+
+  let nextPower: PowerState = {
+    ...power,
+    safeTokens,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
+  nextPower = addCharge(nextPower, mover);
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: sweepCaptures };
 }

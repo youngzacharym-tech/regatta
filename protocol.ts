@@ -90,6 +90,17 @@ export type ServerMessage =
         /** Valid Push targets for the CURRENT player, if they're an Archer
          *  with a charge and it's their turn — empty otherwise. */
         pushTargets: number[];
+        /** True once a Mage/Warrior has completed the shield-streak combo
+         *  and can spend their ultimate — public table-state, same
+         *  visibility as charges (an opponent seeing "ultimate ready" is no
+         *  different from them seeing a charge count). */
+        ultimateReady: Record<PlayerId, boolean>;
+        /** Valid Blink Strike targets for the CURRENT player, if they're a
+         *  Mage with ultimateReady and it's their turn — empty otherwise. */
+        blinkStrikeTargets: number[];
+        /** Valid Warpath targets for the CURRENT player, if they're a
+         *  Warrior with ultimateReady and it's their turn — empty otherwise. */
+        warpathTargets: number[];
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
        *  (no token of the pusher's own moves), so it gets its own "how did
@@ -111,6 +122,12 @@ export type ServerMessage =
        *  nothing). Server-computed, never re-derived client-side, same
        *  reasoning as lastChargeEvent. */
       lastRainOfArrows?: { targetTokenId: number | null } | null;
+      /** Master Killer mode only: Mage's Blink Strike or Warrior's Warpath.
+       *  Non-null exactly on the broadcast where one of those resolved.
+       *  `sweptTokenIds` is Warpath's extra captures along the way (always
+       *  empty for Blink Strike, which never sweeps). Server-computed,
+       *  never re-derived client-side. */
+      lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
     }
   | {
       type: "gameOver";
@@ -158,7 +175,9 @@ export type ClientMessage =
       action:
         | { kind: "push"; targetTokenId: number }
         | { kind: "reflip" }
-        | { kind: "charge"; moveIndex: number };
+        | { kind: "charge"; moveIndex: number }
+        | { kind: "blinkStrike"; targetTokenId: number }
+        | { kind: "warpath"; targetTokenId: number };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

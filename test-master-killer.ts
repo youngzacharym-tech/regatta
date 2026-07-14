@@ -16,14 +16,18 @@ import {
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
   ULTIMATE_STREAK,
+  applyBlinkStrike,
   applyCharge,
   applyPowerMove,
   applyPush,
   applyReflip,
+  applyWarpath,
   breakShieldStreak,
+  getBlinkStrikeTargets,
   getLegalPowerMoves,
   getPushTargets,
   getRainOfArrowsTargets,
+  getWarpathTargets,
   initialPowerState,
   isWarded,
   type PowerState,
@@ -691,6 +695,163 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Ultimate: breakShieldStreak works for non-Archer classes too", brokenWarrior.shieldStreak.p1 === 0);
 
   check("Ultimate: ULTIMATE_STREAK is set to the expected combo length", ULTIMATE_STREAK === 3);
+}
+
+// ---------------------------------------------------------------------------
+// 13. Ultimates: Mage's Blink Strike & Warrior's Warpath — the active
+//     payoffs spent from a banked ultimateReady flag (see section 12 for how
+//     that flag gets set).
+// ---------------------------------------------------------------------------
+{
+  const readyPower = (cls: "mage" | "warrior"): PowerState => {
+    const base = power({ p1: cls });
+    return { ...base, ultimateReady: { ...base.ultimateReady, p1: true } };
+  };
+
+  // --- Blink Strike (Mage) -------------------------------------------------
+
+  // Basic: relocates the mover's on-board token onto the target's tile,
+  // capturing it and bypassing the target's shield-tile protection — and
+  // the turn still ends even though the destination is a shield tile
+  // (deliberately no extra-turn interaction).
+  const sBlink = state("p1", { 0: 5, 4: 7 }); // mover token0 at 5; target enemy4 ON shield tile 7
+  const pwBlink = readyPower("mage");
+  check(
+    "Blink Strike: target eligibility matches Rain of Arrows' rule (reused)",
+    JSON.stringify(getBlinkStrikeTargets(sBlink, pwBlink, "p1")) === JSON.stringify(getRainOfArrowsTargets(sBlink, pwBlink, "p1")),
+  );
+  const rBlink = applyBlinkStrike(sBlink, pwBlink, 4, "p1");
+  check("Blink Strike: relocates the mover's token onto the target's tile", rBlink.state.tokens.find((t) => t.id === 0)!.position === 7);
+  check("Blink Strike: bypasses shield-tile protection, capturing the target", rBlink.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Blink Strike: sweptTokenIds is always empty", rBlink.sweptTokenIds.length === 0);
+  check("Blink Strike: clears ultimateReady on use", rBlink.power.ultimateReady.p1 === false);
+  check("Blink Strike: grants a charge on the capture", rBlink.power.charges.p1 === 1, `got ${rBlink.power.charges.p1}`);
+  check(
+    "Blink Strike: always ends the turn, even landing on a shield tile",
+    rBlink.state.currentPlayer === "p2" && rBlink.state.extraTurn === false,
+  );
+
+  // Picks the MOST advanced on-board token when the mover has more than one.
+  const sBlinkPick = state("p1", { 0: 3, 1: 9, 4: 10 }); // token1 (9) is more advanced than token0 (3)
+  const rBlinkPick = applyBlinkStrike(sBlinkPick, readyPower("mage"), 4, "p1");
+  check(
+    "Blink Strike: relocates the MOST advanced on-board token, not just any",
+    rBlinkPick.state.tokens.find((t) => t.id === 1)!.position === 10 && rBlinkPick.state.tokens.find((t) => t.id === 0)!.position === 3,
+  );
+
+  // Bypasses Ward.
+  const sBlinkWard = state("p1", { 0: 5, 4: 9 });
+  const pwBlinkWard: PowerState = { ...readyPower("mage"), classes: { p1: "mage", p2: "mage" }, charges: { p1: 0, p2: CHARGE_CAP } };
+  check("Blink Strike: sanity — the target really is warded", isWarded(sBlinkWard, pwBlinkWard, sBlinkWard.tokens.find((t) => t.id === 4)!));
+  const rBlinkWard = applyBlinkStrike(sBlinkWard, pwBlinkWard, 4, "p1");
+  check("Blink Strike: captures a warded target", rBlinkWard.state.tokens.find((t) => t.id === 4)!.position === -1);
+
+  // Respects transient safety — a safe token is excluded from the target
+  // pool entirely (inherited from getRainOfArrowsTargets).
+  const sBlinkSafe = state("p1", { 0: 5, 4: 9 });
+  const pwBlinkSafe: PowerState = { ...readyPower("mage"), safeTokens: new Set([4]) };
+  check(
+    "Blink Strike: a transiently-safe token is excluded from targets",
+    !getBlinkStrikeTargets(sBlinkSafe, pwBlinkSafe, "p1").includes(4),
+  );
+
+  // No on-board token to relocate -> no legal targets at all.
+  const sBlinkNone = state("p1", { 4: 9 }); // p1 has zero on-board tokens
+  check(
+    "Blink Strike: no targets when the mover has no on-board token",
+    getBlinkStrikeTargets(sBlinkNone, readyPower("mage"), "p1").length === 0,
+  );
+
+  // --- Warpath (Warrior) ----------------------------------------------------
+
+  // Basic + sweep: the mover's on-board token teleports onto the target,
+  // capturing it AND sweeping an unprotected enemy caught strictly between
+  // start and destination — grants exactly 1 charge regardless.
+  const sWarSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between); target enemy5 at 9
+  const rWarSweep = applyWarpath(sWarSweep, readyPower("warrior"), 5, "p1");
+  check("Warpath: relocates the mover's token onto the target's tile", rWarSweep.state.tokens.find((t) => t.id === 0)!.position === 9);
+  check("Warpath: captures the primary target", rWarSweep.state.tokens.find((t) => t.id === 5)!.position === -1);
+  check("Warpath: sweeps an unprotected enemy caught in between", rWarSweep.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check(
+    "Warpath: reports the swept token in sweptTokenIds",
+    rWarSweep.sweptTokenIds.length === 1 && rWarSweep.sweptTokenIds[0] === 4,
+    JSON.stringify(rWarSweep.sweptTokenIds),
+  );
+  check("Warpath: grants exactly 1 charge regardless of sweep size", rWarSweep.power.charges.p1 === 1, `got ${rWarSweep.power.charges.p1}`);
+  check("Warpath: clears ultimateReady on use", rWarSweep.power.ultimateReady.p1 === false);
+  check("Warpath: always ends the turn", rWarSweep.state.currentPlayer === "p2" && rWarSweep.state.extraTurn === false);
+
+  // Uncapped sweep: more enemies caught in between than CHARGE_SWEEP_CAP
+  // would allow for an ordinary Charge — Warpath takes all of them.
+  const sWarUncapped = state("p1", { 0: 4, 4: 5, 5: 6, 6: 8, 7: 10 }); // enemies at 5,6,8 between mover(4) and target(10)
+  const rWarUncapped = applyWarpath(sWarUncapped, readyPower("warrior"), 7, "p1");
+  check(
+    `Warpath: sweep is uncapped (CHARGE_SWEEP_CAP is ${CHARGE_SWEEP_CAP}, this sweeps more)`,
+    rWarUncapped.sweptTokenIds.length === 3,
+    JSON.stringify(rWarUncapped.sweptTokenIds),
+  );
+
+  // Does not sweep a transiently-safe token.
+  const pwWarSafe: PowerState = { ...readyPower("warrior"), safeTokens: new Set([4]) };
+  const rWarSafe = applyWarpath(sWarSweep, pwWarSafe, 5, "p1");
+  check("Warpath: does not sweep a transiently-safe token", rWarSafe.state.tokens.find((t) => t.id === 4)!.position === 6);
+  check("Warpath: sweptTokenIds excludes the safe token", !rWarSafe.sweptTokenIds.includes(4));
+
+  // Bypasses shield-tile protection AND Ward for a SWEPT token (not just the
+  // primary target), and grants Shieldbreaker-style transient safety to the
+  // landing token because a Ward broke somewhere along the way. Teleporting
+  // BACKWARD (target behind the mover) puts the swept token closer to the
+  // mover's start — i.e. at a HIGHER raw position than the target — which is
+  // exactly what it takes for it to be p2's most-advanced on-board token
+  // (and thus Warded) while the target itself isn't.
+  const sWarWard = state("p1", { 0: 10, 4: 7, 5: 4 }); // mover token0 at 10; enemy4 ON shield tile 7 (between, p2's most-advanced -> warded); target enemy5 at 4
+  const pwWarWard: PowerState = { ...readyPower("warrior"), classes: { p1: "warrior", p2: "mage" }, charges: { p1: 0, p2: CHARGE_CAP } };
+  check("Warpath: sanity — the swept token really is warded", isWarded(sWarWard, pwWarWard, sWarWard.tokens.find((t) => t.id === 4)!));
+  check(
+    "Warpath: sanity — the primary target is NOT warded (it's not p2's most-advanced token)",
+    !isWarded(sWarWard, pwWarWard, sWarWard.tokens.find((t) => t.id === 5)!),
+  );
+  const rWarWard = applyWarpath(sWarWard, pwWarWard, 5, "p1");
+  check("Warpath: sweeps a warded token sitting on a shield tile", rWarWard.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check(
+    "Warpath: grants transient safety to the landing token when a Ward breaks along the way",
+    rWarWard.power.safeTokens.has(0),
+  );
+
+  // No Ward broken anywhere -> no safety grant.
+  check("Warpath: no transient safety granted when no Ward was broken", !rWarSweep.power.safeTokens.has(0));
+
+  // Direction-agnostic: teleporting BACKWARD (target behind the mover) still
+  // sweeps whatever's caught strictly between, same as forward.
+  const sWarBackward = state("p1", { 0: 9, 4: 6, 5: 4 }); // mover token0 at 9; enemy4 at 6 (between); target enemy5 at 4
+  const rWarBackward = applyWarpath(sWarBackward, readyPower("warrior"), 5, "p1");
+  check(
+    "Warpath: works backward (target behind the mover), sweeping what's between",
+    rWarBackward.state.tokens.find((t) => t.id === 4)!.position === -1,
+  );
+
+  // Picks the LEAST advanced on-board token when the mover has more than one.
+  const sWarPick = state("p1", { 0: 4, 1: 9, 4: 6 }); // token0 (4) is less advanced than token1 (9)
+  const rWarPick = applyWarpath(sWarPick, readyPower("warrior"), 4, "p1");
+  check(
+    "Warpath: relocates the LEAST advanced on-board token, not just any",
+    rWarPick.state.tokens.find((t) => t.id === 0)!.position === 6 && rWarPick.state.tokens.find((t) => t.id === 1)!.position === 9,
+  );
+
+  // Target eligibility mirrors Blink Strike's (same underlying rule).
+  const sWarTargets = state("p1", { 0: 4, 4: 9 });
+  check(
+    "Warpath: target eligibility matches Blink Strike's / Rain of Arrows' rule (reused)",
+    JSON.stringify(getWarpathTargets(sWarTargets, readyPower("warrior"), "p1")) ===
+      JSON.stringify(getBlinkStrikeTargets(sWarTargets, readyPower("mage"), "p1")),
+  );
+
+  // No on-board token to relocate -> no legal targets at all.
+  const sWarNone = state("p1", { 4: 9 }); // p1 has zero on-board tokens
+  check(
+    "Warpath: no targets when the mover has no on-board token",
+    getWarpathTargets(sWarNone, readyPower("warrior"), "p1").length === 0,
+  );
 }
 
 // ---------------------------------------------------------------------------

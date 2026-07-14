@@ -41,13 +41,17 @@ import type { ServerMessage, ClientMessage } from "../protocol";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (variant === "classic" guards every branch that touches it).
 import {
+  applyBlinkStrike,
   applyCharge as mkApplyCharge,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
+  applyWarpath,
   breakShieldStreak,
+  getBlinkStrikeTargets,
   getLegalPowerMoves,
   getPushTargets,
+  getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
   type PlayerClass,
@@ -130,6 +134,9 @@ interface RoomDoc {
    *  when it fired into an empty eligible pool (streak still consumed).
    *  Same lifecycle as lastPush. */
   lastRainOfArrows: { targetTokenId: number | null } | null;
+  /** Mage's Blink Strike or Warrior's Warpath — non-null exactly on the
+   *  broadcast where one of those resolved. Same lifecycle as lastPush. */
+  lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
 }
 
 const roomKey = (code: string) => `room:${code}`;
@@ -152,7 +159,7 @@ function freshMatchFields(
   | "state" | "currentFlip" | "turns" | "captures"
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargeEvent"
-  | "zeroFlipChargeBefore" | "lastRainOfArrows"
+  | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate"
 > {
   // currentPlayer is decided by the opening flip-off, not randomized here.
   const state = initialState();
@@ -175,6 +182,7 @@ function freshMatchFields(
     lastChargeEvent: null,
     zeroFlipChargeBefore: null,
     lastRainOfArrows: null,
+    lastUltimate: null,
   };
 }
 
@@ -318,6 +326,15 @@ export function GET(request: Request) {
               doc.mk.classes[doc.state.currentPlayer] === "archer"
                 ? getPushTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
                 : [],
+            ultimateReady: { ...doc.mk.ultimateReady },
+            blinkStrikeTargets:
+              doc.mk.classes[doc.state.currentPlayer] === "mage" && doc.mk.ultimateReady[doc.state.currentPlayer]
+                ? getBlinkStrikeTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
+                : [],
+            warpathTargets:
+              doc.mk.classes[doc.state.currentPlayer] === "warrior" && doc.mk.ultimateReady[doc.state.currentPlayer]
+                ? getWarpathTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
+                : [],
           }
         : undefined;
 
@@ -333,6 +350,7 @@ export function GET(request: Request) {
         lastPush: doc.lastPush,
         lastChargeEvent: doc.lastChargeEvent,
         lastRainOfArrows: doc.lastRainOfArrows,
+        lastUltimate: doc.lastUltimate,
         wasSkipped: doc.wasSkipped,
         skippedPlayer: doc.skippedPlayer,
         skipReason: doc.skipReason,
@@ -459,6 +477,7 @@ export function GET(request: Request) {
             lastPush: null,
             lastChargeEvent: null,
             lastRainOfArrows: null,
+            lastUltimate: null,
             wasSkipped: false,
             skippedPlayer: null,
             skipReason: null,
@@ -636,6 +655,7 @@ export function GET(request: Request) {
         lastPush: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
         lastRainOfArrows: r.rainOfArrows,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -674,6 +694,7 @@ export function GET(request: Request) {
         lastPush: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
         lastRainOfArrows: r.rainOfArrows,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -707,12 +728,83 @@ export function GET(request: Request) {
         lastPush: { targetTokenId },
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
         lastRainOfArrows: null,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
       };
       if (await commit(next)) {
         console.log(`[${doc.code}] [PUSH] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+
+    const applyMasterKillerBlinkStrike = async (
+      doc: RoomDoc,
+      seat: PlayerId,
+      targetTokenId: number,
+    ): Promise<void> => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyBlinkStrike(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next: RoomDoc = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 + r.sweptTokenIds.length },
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastPush: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: { kind: "blinkStrike", targetTokenId, sweptTokenIds: r.sweptTokenIds },
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null,
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [BLINK STRIKE] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+
+    const applyMasterKillerWarpath = async (
+      doc: RoomDoc,
+      seat: PlayerId,
+      targetTokenId: number,
+    ): Promise<void> => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyWarpath(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next: RoomDoc = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 + r.sweptTokenIds.length },
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastPush: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: { kind: "warpath", targetTokenId, sweptTokenIds: r.sweptTokenIds },
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null,
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [WARPATH] ${seat} -> tok${targetTokenId} swept=${r.sweptTokenIds.length}`);
         await maybeDrive(next);
       } else {
         const reloaded = await loadDoc(doc.code);
@@ -742,6 +834,7 @@ export function GET(request: Request) {
         lastMove: null,
         lastPush: null,
         lastRainOfArrows: null,
+        lastUltimate: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
       };
       if (await commit(next)) {
@@ -770,6 +863,12 @@ export function GET(request: Request) {
           break;
         case "reflip":
           await applyMasterKillerReflip(doc, seat);
+          break;
+        case "blinkStrike":
+          await applyMasterKillerBlinkStrike(doc, seat, action.targetTokenId);
+          break;
+        case "warpath":
+          await applyMasterKillerWarpath(doc, seat, action.targetTokenId);
           break;
       }
     };
@@ -827,6 +926,26 @@ export function GET(request: Request) {
           return send({ type: "error", message: "Invalid push target" });
         }
         await applyMasterKillerPush(doc, seat, action.targetTokenId);
+        return;
+      }
+
+      if (action.kind === "blinkStrike") {
+        if (cls !== "mage") return send({ type: "error", message: "Only a Mage can Blink Strike" });
+        if (!doc.mk.ultimateReady[seat]) return send({ type: "error", message: "Ultimate not ready" });
+        if (!getBlinkStrikeTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Blink Strike target" });
+        }
+        await applyMasterKillerBlinkStrike(doc, seat, action.targetTokenId);
+        return;
+      }
+
+      if (action.kind === "warpath") {
+        if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Warpath" });
+        if (!doc.mk.ultimateReady[seat]) return send({ type: "error", message: "Ultimate not ready" });
+        if (!getWarpathTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Warpath target" });
+        }
+        await applyMasterKillerWarpath(doc, seat, action.targetTokenId);
         return;
       }
 

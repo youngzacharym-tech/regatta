@@ -15,10 +15,12 @@
 
 import { initialState, flipCoins, applyNoMove, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBlinkStrike,
   applyCharge,
   applyPowerMove,
   applyPush,
   applyReflip,
+  applyWarpath,
   getLegalPowerMoves,
   grantZeroFlipCharge,
   initialPowerState,
@@ -37,7 +39,7 @@ interface GameResult {
   turns: number; // player control-cycles (a reflip does NOT add to this)
   flips: number; // total coin flips, including reflips
   maxSweepCaptures: number; // largest single-move capture count observed
-  usage: { snipe: number; push: number; reflip: number; charge: number; rainOfArrows: number };
+  usage: { snipe: number; push: number; reflip: number; charge: number; rainOfArrows: number; blinkStrike: number; warpath: number };
 }
 
 /** Drive one player's turn to completion, including a possible Re-flip
@@ -105,6 +107,14 @@ function takeTurn(
       const r = applyPush(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { push: 1 } };
     }
+    case "blinkStrike": {
+      const r = applyBlinkStrike(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 1 + r.sweptTokenIds.length, usage: { blinkStrike: 1 } };
+    }
+    case "warpath": {
+      const r = applyWarpath(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 1 + r.sweptTokenIds.length, usage: { warpath: 1 } };
+    }
   }
 }
 
@@ -114,7 +124,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
   let turns = 0;
   let flips = 0;
   let maxSweepCaptures = 0;
-  const usage = { snipe: 0, push: 0, reflip: 0, charge: 0, rainOfArrows: 0 };
+  const usage = { snipe: 0, push: 0, reflip: 0, charge: 0, rainOfArrows: 0, blinkStrike: 0, warpath: 0 };
   const rand = Math.random;
 
   while (state.winner === null && turns < MAX_TURNS_PER_GAME) {
@@ -130,6 +140,8 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.push) usage.push++;
     if (r.usage.charge) usage.charge++;
     if (r.usage.rainOfArrows) usage.rainOfArrows++;
+    if (r.usage.blinkStrike) usage.blinkStrike++;
+    if (r.usage.warpath) usage.warpath++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -184,12 +196,14 @@ for (const [a, b] of matchups) {
   const avgReflip = mean(results.map((r) => r.usage.reflip));
   const avgCharge = mean(results.map((r) => r.usage.charge));
   const avgRainOfArrows = mean(results.map((r) => r.usage.rainOfArrows));
+  const avgBlinkStrike = mean(results.map((r) => r.usage.blinkStrike));
+  const avgWarpath = mean(results.map((r) => r.usage.warpath));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
     `  turns=${avgTurns.toFixed(1).padStart(6)}  maxTurns=${maxTurns}  flips=${avgFlips.toFixed(1).padStart(6)}  maxSweep=${maxSweep}` +
       `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
-      `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}`,
+      `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

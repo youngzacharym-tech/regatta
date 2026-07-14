@@ -849,6 +849,9 @@ let currentPower: {
   charges: Record<PlayerId, number>;
   safeTokens: number[];
   pushTargets: number[];
+  ultimateReady: Record<PlayerId, boolean>;
+  blinkStrikeTargets: number[];
+  warpathTargets: number[];
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -860,6 +863,14 @@ let pushArmed = false;
 /** Push's targetable enemy tokens while pushArmed — lit the same way as
  *  capturableIds, via the shared hover-glow helper below. */
 const pushTargetIds = new Set<number>();
+/** True while a Mage has tapped "Blink Strike" and is waiting to tap a
+ *  target — same lifecycle as pushArmed. */
+let blinkStrikeArmed = false;
+const blinkStrikeTargetIds = new Set<number>();
+/** True while a Warrior has tapped "Warpath" and is waiting to tap a
+ *  target — same lifecycle as pushArmed. */
+let warpathArmed = false;
+const warpathTargetIds = new Set<number>();
 
 // --- Opening flip-off ---
 /** True while the match start waits for THIS player to tap their pile.
@@ -966,10 +977,50 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
 function renderPowerActions(isMyTurn: boolean) {
   pushArmed = false;
   pushTargetIds.clear();
+  blinkStrikeArmed = false;
+  blinkStrikeTargetIds.clear();
+  warpathArmed = false;
+  warpathTargetIds.clear();
   if (!isMyTurn || myVariant !== "masterKiller" || !currentPower) return;
   const mySide: PlayerId = myRole ?? "p1";
   const cls = currentPower.classes[mySide];
   const charges = currentPower.charges[mySide];
+
+  // Ultimates spend a banked ultimateReady flag, not a charge — so they're
+  // offered independent of the charges<1 gate below.
+  if (cls === "mage" && currentPower.ultimateReady[mySide] && currentPower.blinkStrikeTargets.length > 0) {
+    const btn = document.createElement("button");
+    const setLabel = () => {
+      btn.textContent = blinkStrikeArmed ? "Blink Strike: tap a target…" : "Blink Strike ✦";
+      btn.style.background = blinkStrikeArmed ? "#a06010" : "#c04fd0";
+    };
+    setLabel();
+    btn.addEventListener("click", () => {
+      blinkStrikeArmed = !blinkStrikeArmed;
+      blinkStrikeTargetIds.clear();
+      if (blinkStrikeArmed) for (const id of currentPower!.blinkStrikeTargets) blinkStrikeTargetIds.add(id);
+      else hideHoverGlow();
+      setLabel();
+    });
+    movesEl.appendChild(btn);
+  }
+  if (cls === "warrior" && currentPower.ultimateReady[mySide] && currentPower.warpathTargets.length > 0) {
+    const btn = document.createElement("button");
+    const setLabel = () => {
+      btn.textContent = warpathArmed ? "Warpath: tap a target…" : "Warpath ✦";
+      btn.style.background = warpathArmed ? "#a06010" : "#c04fd0";
+    };
+    setLabel();
+    btn.addEventListener("click", () => {
+      warpathArmed = !warpathArmed;
+      warpathTargetIds.clear();
+      if (warpathArmed) for (const id of currentPower!.warpathTargets) warpathTargetIds.add(id);
+      else hideHoverGlow();
+      setLabel();
+    });
+    movesEl.appendChild(btn);
+  }
+
   if (charges < 1) return;
 
   if (cls === "mage") {
@@ -1079,6 +1130,27 @@ canvas.addEventListener("pointerdown", (e) => {
     }
     return;
   }
+  // Master Killer: Blink Strike / Warpath armed and waiting for a target tap.
+  if (blinkStrikeArmed) {
+    const target = findTargetUnderPointer(blinkStrikeTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      sendToServer({ type: "usePower", action: { kind: "blinkStrike", targetTokenId: target } });
+      blinkStrikeArmed = false;
+      blinkStrikeTargetIds.clear();
+      hideHoverGlow();
+    }
+    return;
+  }
+  if (warpathArmed) {
+    const target = findTargetUnderPointer(warpathTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      sendToServer({ type: "usePower", action: { kind: "warpath", targetTokenId: target } });
+      warpathArmed = false;
+      warpathTargetIds.clear();
+      hideHoverGlow();
+    }
+    return;
+  }
   // A waiting swig: tap the mug, drink to the stone you brought home.
   if (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY)) {
     const mySide: PlayerId = myRole ?? "p1";
@@ -1150,11 +1222,16 @@ canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
   const pushable = pushArmed ? findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY) : null;
+  const blinkStrikeable = blinkStrikeArmed ? findTargetUnderPointer(blinkStrikeTargetIds, e.clientX, e.clientY) : null;
+  const warpathable = warpathArmed ? findTargetUnderPointer(warpathTargetIds, e.clientX, e.clientY) : null;
   const rollable =
     ((rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY)) ||
     (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY));
-  canvas.style.cursor = hit !== null || capturable !== null || pushable !== null || rollable ? "pointer" : "default";
-  const glowTarget = pushable !== null ? pushable : capturable;
+  canvas.style.cursor =
+    hit !== null || capturable !== null || pushable !== null || blinkStrikeable !== null || warpathable !== null || rollable
+      ? "pointer"
+      : "default";
+  const glowTarget = pushable ?? blinkStrikeable ?? warpathable ?? capturable;
   if (glowTarget !== null) {
     const m = markers[glowTarget];
     hoverGlow.position.set(m.target.x, m.target.y - 0.062, m.target.z);
@@ -1350,6 +1427,7 @@ function announceFromState(msg: {
   lastPush?: { targetTokenId: number } | null;
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
+  lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
   skipReason: "flip-zero" | "no-legal-move" | null;
@@ -1378,6 +1456,21 @@ function announceFromState(msg: {
     const sentHome = !targetToken || targetToken.position === -1;
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
     showAnnouncement(`${subject} pushed ${target} token ${where}${chargeFor(msg.lastMovePlayer)}`, "capture");
+    return;
+  }
+
+  if (msg.lastUltimate && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "opponent's" : "your";
+    const label = msg.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
+    const sweptCount = msg.lastUltimate.sweptTokenIds.length;
+    const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
+    showAnnouncement(
+      `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}!${chargeFor(msg.lastMovePlayer)}`,
+      "ultimate",
+    );
     return;
   }
 
@@ -1519,6 +1612,10 @@ function connect() {
         currentPowerMoves = null;
         pushArmed = false;
         pushTargetIds.clear();
+        blinkStrikeArmed = false;
+        blinkStrikeTargetIds.clear();
+        warpathArmed = false;
+        warpathTargetIds.clear();
         classpickEl.classList.remove("show");
         inCpuGame = msg.vsCpu;
         awaitingRejoin = false;
@@ -1595,6 +1692,10 @@ function connect() {
         updateTokenTints(msg.state);
         pushArmed = false;
         pushTargetIds.clear();
+        blinkStrikeArmed = false;
+        blinkStrikeTargetIds.clear();
+        warpathArmed = false;
+        warpathTargetIds.clear();
         {
           const mine = msg.state.currentPlayer === (myRole ?? "p1");
           // PowerMove is a structural superset of Move, so it drops straight
@@ -1749,6 +1850,10 @@ function resetToMenu(message: string) {
   currentPowerMoves = null;
   pushArmed = false;
   pushTargetIds.clear();
+  blinkStrikeArmed = false;
+  blinkStrikeTargetIds.clear();
+  warpathArmed = false;
+  warpathTargetIds.clear();
   myVariant = "classic";
   for (const marker of markers) {
     marker.mesh.visible = false;
@@ -1892,6 +1997,11 @@ const GUIDE_SPREADS: [string, string][] = [
        <li>Ward always follows whichever of your stones is furthest along —
        send that one all the way home and it passes to whichever stone
        takes the lead.</li>
+       <li><b>Blink Strike</b> (active, spends your ultimate): land on a
+       shield tile three times in a row, turn never once passing to the
+       opponent, and you may teleport your furthest-along stone straight
+       onto any enemy in shared water — capturing it even through a shield
+       or a Ward.</li>
      </ul>`,
     `<h2>The Warrior</h2>
      <ul>
@@ -1904,6 +2014,12 @@ const GUIDE_SPREADS: [string, string][] = [
        cut through a Ward wherever they meet one, mid-sweep included.</li>
        <li>The Warrior is the one class no Ward can stop cold — everyone
        else needs a Push or a lucky Re-flip instead.</li>
+       <li><b>Warpath</b> (active, spends your ultimate): land on a shield
+       tile three times running, then teleport your least-advanced stone
+       onto any enemy in shared water — capturing it plus every unprotected
+       enemy stone caught between where it started and where it lands, no
+       cap, Warded or not. Break a Ward along the way and the landing stone
+       stands safe from capture until it next moves.</li>
      </ul>`,
   ],
 ];
