@@ -527,6 +527,25 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
+// 11. Push always ends the turn (regression guard — see applyPush's history
+//     note: granting an extra turn here was tried and reverted after it
+//     blew archer-vs-mage/archer-vs-warrior out to ~95/5 and ~92/8).
+// ---------------------------------------------------------------------------
+{
+  const pw = power({ p1: "archer" }, { p1: 1 });
+
+  const sPartial = state("p1", { 4: 6 });
+  const rPartial = applyPush(sPartial, pw, 4, "p1");
+  check("Push: ends the turn after a partial shove", rPartial.state.currentPlayer === "p2");
+  check("Push: extraTurn flag is false after a partial shove", rPartial.state.extraTurn === false);
+
+  const sHome = state("p1", { 4: 6, 5: 6 - PUSH_DISTANCE });
+  const rHome = applyPush(sHome, pw, 4, "p1");
+  check("Push: ends the turn even when sending the target home", rHome.state.currentPlayer === "p2");
+  check("Push: extraTurn flag is false even when sending the target home", rHome.state.extraTurn === false);
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

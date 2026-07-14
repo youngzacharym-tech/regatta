@@ -500,20 +500,16 @@ export function applyCharge(
  *  target, but only if the Archer can afford PUSH_WARD_COST — baking
  *  affordability into the target list itself (rather than a separate
  *  legality branch at the call site) so the UI's target highlights and the
- *  server's legality check can never drift apart. Spends the turn (no token
- *  of the pusher's moves).
+ *  server's legality check can never drift apart. Ends the turn — no token
+ *  of the pusher's moves (see applyPush's history note for why granting an
+ *  extra turn here was tried and reverted).
  *
  *  Refunds its charge (see applyPush) specifically when it sends the target
  *  all the way home to reserve — that outcome is functionally a capture
  *  (the token is off the board, back to square one), so it earns the same
  *  refund any other capturing action gets under the shared charge economy.
  *  A partial shove that leaves the target on the board is NOT a capture and
- *  never refunds. (Was "never refunds, ever" — but every OTHER class's
- *  active either IS a move that benefits from the universal capture-refund
- *  rule (Warrior's Charge) or doesn't need one because it isn't
- *  underperforming (Mage's Re-flip); Archer's Push was the one genuine
- *  structural gap, confirmed by archer-vs-warrior sitting at 42.5/57.5 with
- *  no capture-equivalent economy of its own at all.) */
+ *  never refunds. */
 export function getPushTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
@@ -563,6 +559,15 @@ export function applyPush(
     safeTokens,
   };
   if (sendsHome) spentPower = addCharge(spentPower, mover);
+  // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
+  // shield-tile landing — currentPlayer stays the mover) was meant to stop
+  // Push from costing the Archer's own board progress, matching how
+  // Warrior's Charge advances-while-capturing and Mage's Re-flip doesn't
+  // end the turn at all. It compounds instead of just offsetting: a fully
+  // charged Archer could chain 2 free pushes (CHARGE_CAP) THEN still make a
+  // real move, 3 actions against the opponent's 1, every single round.
+  // Result: archer-vs-mage 95.3/4.7, archer-vs-warrior 91.8/8.2 — nowhere
+  // close to a fix, a total blowout. Reverted to ending the turn normally.
   const nextState: GameState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
