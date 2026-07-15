@@ -188,25 +188,6 @@
         0%   { filter: brightness(2.4); }
         100% { filter: brightness(1); }
       }
-      /* Active-power rune — perched on the frame's top-right shoulder,
-         clear of the utility rail below it. */
-      .power-rune {
-        position: absolute; right: -10px; top: -10px;
-        width: 68px; height: 68px; border-radius: 50%;
-        background: radial-gradient(circle at 35% 30%, #5a3d1c, #2a1809);
-        border: 2px solid #7a5c2e; color: #ffd370;
-        font-size: 31px; line-height: 1; cursor: pointer; z-index: 3;
-      }
-      .power-rune:disabled { filter: brightness(0.62) saturate(0.55); cursor: default; }
-      .power-rune.ready { border-color: #ffd370; animation: runeReady 1.8s ease-in-out infinite; }
-      @keyframes runeReady {
-        0%, 100% { box-shadow: 0 0 6px 1px rgba(255, 211, 112, 0.4); }
-        50%      { box-shadow: 0 0 17px 6px rgba(255, 211, 112, 0.8); }
-      }
-      .power-rune.armed {
-        background: radial-gradient(circle at 35% 30%, #a06010, #5a3608);
-        border-color: #ffd370; color: #fff;
-      }
       .plate-name {
         margin-top: 17px; text-align: center;
         font-size: 15px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase;
@@ -244,7 +225,6 @@
       @media (max-width: 740px), (max-height: 480px) {
         .plate-ring { width: 128px; height: 128px; }
         #plate-them .plate-ring { width: 96px; height: 96px; }
-        .power-rune { width: 52px; height: 52px; right: -8px; top: -8px; font-size: 23px; }
         .gem { width: 17px; height: 17px; }
         #rail button { width: 42px; height: 42px; }
         #volume { right: 52px; }
@@ -331,6 +311,7 @@
       #announce.shield { color: #ffd370; }
       #announce.escape { color: #80ffb0; }
       #announce.skip { color: #a0a0c0; }
+      #announce.ultimate { color: #d9a5ff; text-shadow: 0 0 12px rgba(217, 165, 255, 0.65); }
 
       /* --- Mode menu (vs CPU / create / join room) ---
          Sits ABOVE the audio-unlock overlay: picking a mode is itself the
@@ -517,7 +498,6 @@
         <div class="plate-ring">
           <img class="plate-portrait" id="portrait-me" alt="Your class" draggable="false" />
           <div class="plate-gems" id="gems-me"></div>
-          <button class="power-rune" id="power-rune" title="Spend a charge" disabled></button>
         </div>
         <div class="plate-name" id="plate-name-me"></div>
       </div>
@@ -575,17 +555,17 @@
           <button class="class" data-class="archer">
             <img src="/avatars/archer.webp" alt="Archer" draggable="false" />
             <b>Archer</b>
-            <span class="class-desc">Snipe the tile ahead, free. Push (1⚡): knock an enemy back.</span>
+            <span class="class-desc">Snipe the tile ahead, free. Push (1⚡) / Charged Shot (2⚡): knock enemies back. Ult: Rain of Arrows.</span>
           </button>
           <button class="class" data-class="mage">
             <img src="/avatars/mage.webp" alt="Mage" draggable="false" />
             <b>Mage</b>
-            <span class="class-desc">Warded at full charge. Re-flip (1⚡): flip your coins again.</span>
+            <span class="class-desc">Warded at full charge. Re-flip (1⚡): flip again. Ult: Blink Strike.</span>
           </button>
           <button class="class" data-class="warrior">
             <img src="/avatars/warrior.webp" alt="Warrior" draggable="false" />
             <b>Warrior</b>
-            <span class="class-desc">Shieldbreaker pierces wards. Charge (1⚡): sweep captures.</span>
+            <span class="class-desc">Ward Breaker pierces wards. Charge or Bulwark (1⚡). Ult: Warpath.</span>
           </button>
         </div>
       </div>

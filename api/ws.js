@@ -182,14 +182,21 @@ var PUSH_DISTANCE = 1;
 var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
 var PUSH_WARD_COST = 1;
-var PUSH_WARD_DISTANCE = 3;
+var PUSH_WARD_DISTANCE = 0;
+var CHARGED_SHOT_DISTANCE = 4;
+var CHARGED_SHOT_WARD_DISTANCE = 3;
+var ULTIMATE_STREAK = 3;
+var BULWARK_TURNS = 2;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
     // placeholder until picked
     charges: { p1: 0, p2: 0 },
     safeTokens: /* @__PURE__ */ new Set(),
-    reflipUsedThisTurn: false
+    reflipUsedThisTurn: false,
+    shieldStreak: { p1: 0, p2: 0 },
+    ultimateReady: { p1: false, p2: false },
+    bulwarked: {}
   };
 }
 function resetTurnFlags(power) {
@@ -204,6 +211,20 @@ function isMostAdvanced(state, token) {
   const best = Math.max(...mine.map((t) => t.position));
   return token.position === best;
 }
+function findMostAdvancedToken(state, mover) {
+  const mine = state.tokens.filter(
+    (t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER
+  );
+  if (mine.length === 0) return null;
+  return mine.reduce((best, t) => t.position > best.position ? t : best);
+}
+function findLeastAdvancedToken(state, mover) {
+  const mine = state.tokens.filter(
+    (t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER
+  );
+  if (mine.length === 0) return null;
+  return mine.reduce((best, t) => t.position < best.position ? t : best);
+}
 function isWarded(state, power, token) {
   if (power.classes[token.owner] !== "mage") return false;
   if (power.charges[token.owner] < CHARGE_CAP) return false;
@@ -217,8 +238,11 @@ function onShieldTile(token) {
 function hasTransientSafety(power, token) {
   return power.safeTokens.has(token.id);
 }
+function isBulwarked(power, token) {
+  return power.bulwarked[token.id] !== void 0;
+}
 function isProtected(state, power, token) {
-  return onShieldTile(token) || hasTransientSafety(power, token) || isWarded(state, power, token);
+  return onShieldTile(token) || hasTransientSafety(power, token) || isWarded(state, power, token) || isBulwarked(power, token);
 }
 function pushCost(state, power, target) {
   return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
@@ -274,7 +298,7 @@ function getLegalPowerMoves(state, power, flip) {
     let captures = [];
     let breaksWard = false;
     if (enemy) {
-      if (onShieldTile(enemy) || hasTransientSafety(power, enemy)) continue;
+      if (onShieldTile(enemy) || hasTransientSafety(power, enemy) || isBulwarked(power, enemy)) continue;
       if (isWarded(state, power, enemy)) {
         if (cls !== "warrior") continue;
         breaksWard = true;
@@ -305,7 +329,7 @@ function getLegalPowerMoves(state, power, flip) {
           break;
         }
         const foe = occ.find((t) => t.owner !== player);
-        if (foe && chargeSweepCaptures.length < CHARGE_SWEEP_CAP && !onShieldTile(foe) && !hasTransientSafety(power, foe)) {
+        if (foe && chargeSweepCaptures.length < CHARGE_SWEEP_CAP && !onShieldTile(foe) && !hasTransientSafety(power, foe) && !isBulwarked(power, foe)) {
           chargeSweepCaptures.push(foe.id);
         }
       }
@@ -326,24 +350,57 @@ function getLegalPowerMoves(state, power, flip) {
   }
   return moves;
 }
-function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, grantsSafety) {
+function getRainOfArrowsTargets(state, power, mover) {
+  const foe = otherPlayerId(mover);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !hasTransientSafety(power, t)).map((t) => t.id);
+}
+function breakShieldStreak(power, player) {
+  if (power.shieldStreak[player] === 0) return power;
+  return { ...power, shieldStreak: { ...power.shieldStreak, [player]: 0 } };
+}
+function resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand) {
+  if (!landsOnShield) return { power: breakShieldStreak(power, mover), rainOfArrows: null };
+  const next = power.shieldStreak[mover] + 1;
+  if (next < ULTIMATE_STREAK) {
+    return { power: { ...power, shieldStreak: { ...power.shieldStreak, [mover]: next } }, rainOfArrows: null };
+  }
+  const reset = { ...power, shieldStreak: { ...power.shieldStreak, [mover]: 0 } };
+  const cls = power.classes[mover];
+  if (cls !== "archer") {
+    return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
+  }
+  const pool = getRainOfArrowsTargets(state, reset, mover).filter((id) => !allCaptures.includes(id));
+  if (pool.length === 0) return { power: reset, rainOfArrows: { targetTokenId: null } };
+  const picked = pool[Math.floor(rand() * pool.length)];
+  return { power: reset, rainOfArrows: { targetTokenId: picked } };
+}
+function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, grantsSafety, rand = Math.random) {
+  const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
+  power = streakResult.power;
+  const rainOfArrows = streakResult.rainOfArrows;
+  const finalCaptures = rainOfArrows?.targetTokenId != null ? [...allCaptures, rainOfArrows.targetTokenId] : allCaptures;
   const tokens = state.tokens.map((t) => {
     if (t.id === tokenId) return { ...t, position: to };
-    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    if (finalCaptures.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
   let safeTokens = power.safeTokens;
-  if (safeTokens.has(tokenId) || allCaptures.some((id) => safeTokens.has(id))) {
+  if (safeTokens.has(tokenId) || finalCaptures.some((id) => safeTokens.has(id))) {
     safeTokens = new Set(safeTokens);
     safeTokens.delete(tokenId);
-    for (const id of allCaptures) safeTokens.delete(id);
+    for (const id of finalCaptures) safeTokens.delete(id);
   }
   if (grantsSafety) {
     safeTokens = new Set(safeTokens);
     safeTokens.add(tokenId);
   }
-  let nextPower = { ...power, safeTokens };
-  if (allCaptures.length > 0 || landsOnShield) {
+  let bulwarked = power.bulwarked;
+  if (finalCaptures.some((id) => bulwarked[id] !== void 0)) {
+    bulwarked = { ...bulwarked };
+    for (const id of finalCaptures) delete bulwarked[id];
+  }
+  let nextPower = { ...power, safeTokens, bulwarked };
+  if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
   const extraTurn = landsOnShield;
@@ -354,9 +411,9 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     winner: causesWin ? mover : null,
     extraTurn
   };
-  return { state: nextState, power: resetTurnFlags(nextPower) };
+  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows };
 }
-function applyPowerMove(state, power, move, mover) {
+function applyPowerMove(state, power, move, mover, rand = Math.random) {
   const allCaptures = [...move.captures, ...move.bonusCaptures];
   return resolveTurn(
     state,
@@ -367,10 +424,11 @@ function applyPowerMove(state, power, move, mover) {
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard
+    move.breaksWard,
+    rand
   );
 }
-function applyCharge(state, power, move, mover) {
+function applyCharge(state, power, move, mover, rand = Math.random) {
   const allCaptures = [...move.captures, ...move.bonusCaptures, ...move.chargeSweepCaptures];
   const spent = {
     ...power,
@@ -385,22 +443,33 @@ function applyCharge(state, power, move, mover) {
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard
+    move.breaksWard,
+    rand
   );
+}
+function computeKnockbackLanding(state, target, distance) {
+  const rawTo = target.position - distance;
+  const contestedLanding = rawTo >= 0 && rawTo < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[rawTo].isContested;
+  const collides = state.tokens.some(
+    (t) => t.id !== target.id && t.position === rawTo && (t.owner === target.owner || contestedLanding)
+  );
+  return collides || rawTo < 0 ? -1 : rawTo;
+}
+function computePushLanding(state, power, target) {
+  return computeKnockbackLanding(state, target, pushDistance(state, power, target));
+}
+function computeChargedShotLanding(state, power, target) {
+  const distance = isWarded(state, power, target) ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE;
+  return computeKnockbackLanding(state, target, distance);
 }
 function getPushTargets(state, power, mover) {
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).map((t) => t.id);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1).map((t) => t.id);
 }
 function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
   const cost = pushCost(state, power, target);
-  const rawTo = target.position - pushDistance(state, power, target);
-  const contestedLanding = rawTo >= 0 && rawTo < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[rawTo].isContested;
-  const collides = state.tokens.some(
-    (t) => t.id !== targetTokenId && t.position === rawTo && (t.owner === target.owner || contestedLanding)
-  );
-  const landing = collides || rawTo < 0 ? -1 : rawTo;
+  const landing = computePushLanding(state, power, target);
   const sendsHome = landing === -1;
   const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let safeTokens = power.safeTokens;
@@ -414,6 +483,38 @@ function applyPush(state, power, targetTokenId, mover) {
     safeTokens
   };
   if (sendsHome) spentPower = addCharge(spentPower, mover);
+  spentPower = breakShieldStreak(spentPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(spentPower) };
+}
+function getChargedShotTargets(state, power, mover) {
+  if (power.charges[mover] !== CHARGE_CAP) return [];
+  const foe = otherPlayerId(mover);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1).map((t) => t.id);
+}
+function applyChargedShot(state, power, targetTokenId, mover) {
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  const landing = computeChargedShotLanding(state, power, target);
+  const sendsHome = landing === -1;
+  const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(targetTokenId)) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(targetTokenId);
+  }
+  let spentPower = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
+    safeTokens
+  };
+  if (sendsHome) spentPower = addCharge(spentPower, mover);
+  spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -429,6 +530,185 @@ function applyReflip(power, mover) {
     charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
     reflipUsedThisTurn: true
   };
+}
+function excludeBulwarked(state, power, ids) {
+  return ids.filter((id) => {
+    const t = state.tokens.find((tok) => tok.id === id);
+    return !isBulwarked(power, t);
+  });
+}
+function getBlinkStrikeTargets(state, power, mover) {
+  if (!findMostAdvancedToken(state, mover)) return [];
+  return excludeBulwarked(state, power, getRainOfArrowsTargets(state, power, mover));
+}
+function getWarpathTargets(state, power, mover) {
+  if (!findLeastAdvancedToken(state, mover)) return [];
+  return excludeBulwarked(state, power, getRainOfArrowsTargets(state, power, mover));
+}
+function applyBlinkStrike(state, power, targetTokenId, mover) {
+  const mine = findMostAdvancedToken(state, mover);
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: target.position };
+    if (t.id === targetTokenId) return { ...t, position: -1 };
+    return t;
+  });
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(mine.id) || safeTokens.has(targetTokenId)) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(mine.id);
+    safeTokens.delete(targetTokenId);
+  }
+  let nextPower = {
+    ...power,
+    safeTokens,
+    ultimateReady: { ...power.ultimateReady, [mover]: false }
+  };
+  nextPower = addCharge(nextPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: [] };
+}
+function applyWarpath(state, power, targetTokenId, mover) {
+  const mine = findLeastAdvancedToken(state, mover);
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  const from = mine.position;
+  const to = target.position;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const sweepCaptures = [];
+  let brokeWard = isWarded(state, power, target);
+  for (let i = lo + 1; i < hi; i++) {
+    if (!BOARD_LAYOUT[i].isContested) continue;
+    const foe = state.tokens.find(
+      (t) => t.position === i && t.owner !== mover && t.id !== mine.id && t.id !== targetTokenId
+    );
+    if (foe && !hasTransientSafety(power, foe) && !isBulwarked(power, foe)) {
+      sweepCaptures.push(foe.id);
+      if (isWarded(state, power, foe)) brokeWard = true;
+    }
+  }
+  const allCaptures = [targetTokenId, ...sweepCaptures];
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: to };
+    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    return t;
+  });
+  let safeTokens = power.safeTokens;
+  if (safeTokens.has(mine.id) || allCaptures.some((id) => safeTokens.has(id))) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.delete(mine.id);
+    for (const id of allCaptures) safeTokens.delete(id);
+  }
+  if (brokeWard) {
+    safeTokens = new Set(safeTokens);
+    safeTokens.add(mine.id);
+  }
+  let nextPower = {
+    ...power,
+    safeTokens,
+    ultimateReady: { ...power.ultimateReady, [mover]: false }
+  };
+  nextPower = addCharge(nextPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: sweepCaptures };
+}
+function getBulwarkTargets(state, power, mover) {
+  return state.tokens.filter((t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => !isBulwarked(power, t)).map((t) => t.id);
+}
+function applyBulwark(state, power, targetTokenId, mover) {
+  const spent = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    bulwarked: { ...power.bulwarked, [targetTokenId]: BULWARK_TURNS }
+  };
+  const broken = breakShieldStreak(spent, mover);
+  const nextState = {
+    tokens: state.tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(broken) };
+}
+function tickBulwarkExpiry(state, power, mover) {
+  const mine = Object.keys(power.bulwarked).map(Number).filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
+  if (mine.length === 0) return power;
+  const bulwarked = { ...power.bulwarked };
+  for (const id of mine) {
+    const remaining = bulwarked[id] - 1;
+    if (remaining <= 0) delete bulwarked[id];
+    else bulwarked[id] = remaining;
+  }
+  return { ...power, bulwarked };
+}
+function getBulwarkBlockedIds(state, power, flip) {
+  if (Object.keys(power.bulwarked).length === 0) return [];
+  const mover = state.currentPlayer;
+  const unbulwarked = { ...power, bulwarked: {} };
+  const blocked = /* @__PURE__ */ new Set();
+  const realMoves = getLegalPowerMoves(state, power, flip);
+  const openMoves = getLegalPowerMoves(state, unbulwarked, flip);
+  for (const om of openMoves) {
+    const canCharge = power.charges[mover] >= 1 && om.chargeAvailable;
+    const openCaptures = [...om.captures, ...om.bonusCaptures, ...canCharge ? om.chargeSweepCaptures : []];
+    if (openCaptures.length === 0) continue;
+    const rm = realMoves.find((m) => m.tokenId === om.tokenId && m.to === om.to);
+    const realCaptures = rm ? [...rm.captures, ...rm.bonusCaptures, ...canCharge ? rm.chargeSweepCaptures : []] : [];
+    for (const id of openCaptures) {
+      if (power.bulwarked[id] !== void 0 && !realCaptures.includes(id)) blocked.add(id);
+    }
+  }
+  if (power.classes[mover] === "mage" && power.ultimateReady[mover]) {
+    for (const id of getBlinkStrikeTargets(state, unbulwarked, mover)) {
+      if (power.bulwarked[id] !== void 0) blocked.add(id);
+    }
+  }
+  if (power.classes[mover] === "warrior" && power.ultimateReady[mover]) {
+    for (const id of getWarpathTargets(state, unbulwarked, mover)) {
+      if (power.bulwarked[id] !== void 0) blocked.add(id);
+    }
+  }
+  if (power.classes[mover] === "archer" && power.charges[mover] >= 1) {
+    const realPush = getPushTargets(state, power, mover);
+    for (const id of getPushTargets(state, unbulwarked, mover)) {
+      if (power.bulwarked[id] !== void 0 && !realPush.includes(id)) blocked.add(id);
+    }
+  }
+  if (power.classes[mover] === "archer" && power.charges[mover] === CHARGE_CAP) {
+    const realChargedShot = getChargedShotTargets(state, power, mover);
+    for (const id of getChargedShotTargets(state, unbulwarked, mover)) {
+      if (power.bulwarked[id] !== void 0 && !realChargedShot.includes(id)) blocked.add(id);
+    }
+  }
+  return [...blocked];
+}
+function consumeBulwarkBlocks(power, blockedIds) {
+  if (blockedIds.length === 0) return power;
+  const bulwarked = { ...power.bulwarked };
+  for (const id of blockedIds) delete bulwarked[id];
+  return { ...power, bulwarked };
+}
+function tickBulwarkForNewTurn(state, power, flip) {
+  const ticked = tickBulwarkExpiry(state, power, state.currentPlayer);
+  const blocked = getBulwarkBlockedIds(state, ticked, flip);
+  return { power: blocked.length > 0 ? consumeBulwarkBlocks(ticked, blocked) : ticked, blockedIds: blocked };
+}
+function tickBulwarkForReflip(state, power, flip) {
+  const blocked = getBulwarkBlockedIds(state, power, flip);
+  return { power: blocked.length > 0 ? consumeBulwarkBlocks(power, blocked) : power, blockedIds: blocked };
 }
 
 // master-killer-bot.ts
@@ -461,13 +741,43 @@ function scoreMove(state, m, extraCaptures, rand) {
 function scorePush(state, power, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
   const warded = isWarded(state, power, target);
-  const rawTo = target.position - (warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE);
+  const distance = warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
+  const rawTo = target.position - distance;
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
   );
   const sendsHome = collides || rawTo < 0;
-  let score = (sendsHome ? 350 : 180) + target.position * 8;
-  if (warded) score += sendsHome ? 250 : 60;
+  let score;
+  if (sendsHome) {
+    score = 350 + target.position * 8;
+    if (warded) score += 250;
+  } else {
+    score = 180 * distance + target.position * 8;
+  }
+  score += rand() * 20;
+  return score;
+}
+function scoreChargedShot(state, power, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  const warded = isWarded(state, power, target);
+  const rawTo = target.position - (warded ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE);
+  const collides = state.tokens.some(
+    (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
+  );
+  const sendsHome = collides || rawTo < 0;
+  let score = (sendsHome ? 420 : 20) + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+function scoreUltimateStrike(state, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  let score = 500 + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+function scoreBulwark(state, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  let score = -40 + target.position * 3;
   score += rand() * 20;
   return score;
 }
@@ -504,11 +814,47 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
       }
     }
   }
+  if (cls === "archer" && charges === CHARGE_CAP) {
+    for (const targetId of getChargedShotTargets(state, power, mover)) {
+      const score = scoreChargedShot(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "chargedShot", targetTokenId: targetId };
+      }
+    }
+  }
   if (cls === "mage" && charges >= 1 && !power.reflipUsedThisTurn) {
     const score = scoreReflip(moves.length, flip, rand);
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "reflip" };
+    }
+  }
+  if (cls === "mage" && power.ultimateReady[mover]) {
+    for (const targetId of getBlinkStrikeTargets(state, power, mover)) {
+      const score = scoreUltimateStrike(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "blinkStrike", targetTokenId: targetId };
+      }
+    }
+  }
+  if (cls === "warrior" && power.ultimateReady[mover]) {
+    for (const targetId of getWarpathTargets(state, power, mover)) {
+      const score = scoreUltimateStrike(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "warpath", targetTokenId: targetId };
+      }
+    }
+  }
+  if (cls === "warrior" && charges >= 1) {
+    for (const targetId of getBulwarkTargets(state, power, mover)) {
+      const score = scoreBulwark(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "bulwark", tokenId: targetId };
+      }
     }
   }
   return best;
@@ -556,8 +902,13 @@ function freshMatchFields(variant) {
     classesPicked: { p1: false, p2: false },
     currentPowerMoves: null,
     lastPush: null,
+    lastChargedShot: null,
     lastChargeEvent: null,
-    zeroFlipChargeBefore: null
+    zeroFlipChargeBefore: null,
+    lastRainOfArrows: null,
+    lastUltimate: null,
+    lastBulwark: null,
+    lastBulwarkBlock: null
   };
 }
 function GET(request) {
@@ -659,7 +1010,17 @@ function GET(request) {
         classes: { ...doc.mk.classes },
         charges: { ...doc.mk.charges },
         safeTokens: [...doc.mk.safeTokens],
-        pushTargets: doc.mk.classes[doc.state.currentPlayer] === "archer" ? getPushTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : []
+        pushTargets: doc.mk.classes[doc.state.currentPlayer] === "archer" ? getPushTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : [],
+        // No charges===CHARGE_CAP check needed here — getChargedShotTargets
+        // self-gates on that now (see its doc comment), so the class
+        // check is the only thing this ternary needs, same shape as
+        // pushTargets.
+        chargedShotTargets: doc.mk.classes[doc.state.currentPlayer] === "archer" ? getChargedShotTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : [],
+        ultimateReady: { ...doc.mk.ultimateReady },
+        blinkStrikeTargets: doc.mk.classes[doc.state.currentPlayer] === "mage" && doc.mk.ultimateReady[doc.state.currentPlayer] ? getBlinkStrikeTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : [],
+        warpathTargets: doc.mk.classes[doc.state.currentPlayer] === "warrior" && doc.mk.ultimateReady[doc.state.currentPlayer] ? getWarpathTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : [],
+        bulwarkTargets: doc.mk.classes[doc.state.currentPlayer] === "warrior" && doc.mk.charges[doc.state.currentPlayer] >= 1 ? getBulwarkTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer) : [],
+        bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number)
       } : void 0;
       send({
         type: "state",
@@ -671,7 +1032,12 @@ function GET(request) {
         lastMove: doc.lastMove,
         lastMovePlayer: doc.lastMovePlayer,
         lastPush: doc.lastPush,
+        lastChargedShot: doc.lastChargedShot,
+        lastBulwark: doc.lastBulwark,
+        lastBulwarkBlock: doc.lastBulwarkBlock,
         lastChargeEvent: doc.lastChargeEvent,
+        lastRainOfArrows: doc.lastRainOfArrows,
+        lastUltimate: doc.lastUltimate,
         wasSkipped: doc.wasSkipped,
         skippedPlayer: doc.skippedPlayer,
         skipReason: doc.skipReason
@@ -750,14 +1116,18 @@ function GET(request) {
           let mk = cur.mk;
           let currentPowerMoves = null;
           let zeroFlipChargeBefore = null;
+          let lastBulwarkBlock = null;
           if (cur.variant === "masterKiller" && mk) {
             let power = fromWirePower(mk);
             if (flip === 0) {
               zeroFlipChargeBefore = power.charges[cur.state.currentPlayer];
               power = grantZeroFlipCharge(power, cur.state.currentPlayer);
             }
-            mk = toWirePower(power);
             currentPowerMoves = getLegalPowerMoves(cur.state, power, flip);
+            const bulwarkResult = tickBulwarkForNewTurn(cur.state, power, flip);
+            power = bulwarkResult.power;
+            if (bulwarkResult.blockedIds.length > 0) lastBulwarkBlock = { tokenIds: bulwarkResult.blockedIds };
+            mk = toWirePower(power);
           }
           const next = {
             ...cur,
@@ -769,7 +1139,12 @@ function GET(request) {
             lastMove: null,
             lastMovePlayer: null,
             lastPush: null,
+            lastChargedShot: null,
+            lastBulwark: null,
+            lastBulwarkBlock,
             lastChargeEvent: null,
+            lastRainOfArrows: null,
+            lastUltimate: null,
             wasSkipped: false,
             skippedPlayer: null,
             skipReason: null,
@@ -817,15 +1192,23 @@ function GET(request) {
             const delta = cur.mk.charges[skipped] - cur.zeroFlipChargeBefore;
             lastChargeEvent = delta !== 0 ? { player: skipped, delta } : null;
           }
+          const mk = cur.mk ? toWirePower(breakShieldStreak(fromWirePower(cur.mk), skipped)) : cur.mk;
           const next = {
             ...cur,
             state: applyNoMove(cur.state),
+            mk,
             currentFlip: null,
             currentPowerMoves: null,
             wasSkipped: true,
             skippedPlayer: skipped,
             skipReason,
             lastChargeEvent,
+            // The flip commit's own broadcast already showed a Bulwark-block
+            // announcement (if any) — don't repeat it on the skip broadcast
+            // too (referee.ts's equivalent already clears these via
+            // clearAnnouncement() before its auto-skip timer fires).
+            lastBulwark: null,
+            lastBulwarkBlock: null,
             zeroFlipChargeBefore: null
           };
           if (await commit(next)) await maybeDrive(next);
@@ -898,10 +1281,11 @@ function GET(request) {
     };
     const applyMasterKillerMove = async (doc, seat, move) => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + rainHit;
       const next = {
         ...doc,
         state: r.state,
@@ -911,15 +1295,20 @@ function GET(request) {
         captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
         lastMove: move,
         lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
         lastPush: null,
+        lastChargedShot: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null
       };
       if (await commit(next)) {
         console.log(
-          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin}`
+          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin} rainOfArrows=${rainHit === 1}`
         );
         await maybeDrive(next);
       } else {
@@ -929,10 +1318,11 @@ function GET(request) {
     };
     const applyMasterKillerCharge = async (doc, seat, move) => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
       const next = {
         ...doc,
         state: r.state,
@@ -942,8 +1332,13 @@ function GET(request) {
         captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
         lastMove: move,
         lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
         lastPush: null,
+        lastChargedShot: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null
@@ -969,8 +1364,13 @@ function GET(request) {
         currentPowerMoves: null,
         lastMove: null,
         lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
         lastPush: { targetTokenId },
+        lastChargedShot: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null
@@ -983,12 +1383,145 @@ function GET(request) {
         if (reloaded) await maybeDrive(reloaded);
       }
     };
+    const applyMasterKillerChargedShot = async (doc, seat, targetTokenId) => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyChargedShot(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
+        lastPush: null,
+        lastChargedShot: { targetTokenId },
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: null,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [CHARGED SHOT] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyMasterKillerBlinkStrike = async (doc, seat, targetTokenId) => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyBlinkStrike(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 + r.sweptTokenIds.length },
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
+        lastPush: null,
+        lastChargedShot: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: { kind: "blinkStrike", targetTokenId, sweptTokenIds: r.sweptTokenIds },
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [BLINK STRIKE] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyMasterKillerWarpath = async (doc, seat, targetTokenId) => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyWarpath(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 + r.sweptTokenIds.length },
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
+        lastPush: null,
+        lastChargedShot: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: { kind: "warpath", targetTokenId, sweptTokenIds: r.sweptTokenIds },
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [WARPATH] ${seat} -> tok${targetTokenId} swept=${r.sweptTokenIds.length}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+    const applyMasterKillerBulwark = async (doc, seat, tokenId) => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyBulwark(doc.state, fromWirePower(doc.mk), tokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastPush: null,
+        lastChargedShot: null,
+        lastBulwark: { tokenId },
+        lastBulwarkBlock: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: null,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [BULWARK] ${seat} -> tok${tokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
     const applyMasterKillerReflip = async (doc, seat) => {
       if (!doc.mk) return;
       const chargesBefore = doc.mk.charges[seat];
       let power = applyReflip(fromWirePower(doc.mk), seat);
       const flip = flipCoins();
       if (flip === 0) power = grantZeroFlipCharge(power, seat);
+      const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+      power = bulwarkResult.power;
+      const lastBulwarkBlock = bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null;
       const chargeDelta = power.charges[seat] - chargesBefore;
       const next = {
         ...doc,
@@ -997,6 +1530,11 @@ function GET(request) {
         currentPowerMoves: getLegalPowerMoves(doc.state, power, flip),
         lastMove: null,
         lastPush: null,
+        lastChargedShot: null,
+        lastBulwark: null,
+        lastBulwarkBlock,
+        lastRainOfArrows: null,
+        lastUltimate: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null
       };
       if (await commit(next)) {
@@ -1018,8 +1556,20 @@ function GET(request) {
         case "push":
           await applyMasterKillerPush(doc, seat, action.targetTokenId);
           break;
+        case "chargedShot":
+          await applyMasterKillerChargedShot(doc, seat, action.targetTokenId);
+          break;
         case "reflip":
           await applyMasterKillerReflip(doc, seat);
+          break;
+        case "blinkStrike":
+          await applyMasterKillerBlinkStrike(doc, seat, action.targetTokenId);
+          break;
+        case "warpath":
+          await applyMasterKillerWarpath(doc, seat, action.targetTokenId);
+          break;
+        case "bulwark":
+          await applyMasterKillerBulwark(doc, seat, action.tokenId);
           break;
       }
     };
@@ -1064,6 +1614,44 @@ function GET(request) {
           return send({ type: "error", message: "Invalid push target" });
         }
         await applyMasterKillerPush(doc, seat, action.targetTokenId);
+        return;
+      }
+      if (action.kind === "chargedShot") {
+        if (cls !== "archer") return send({ type: "error", message: "Only an Archer can Charged Shot" });
+        if (doc.mk.charges[seat] !== CHARGE_CAP) {
+          return send({ type: "error", message: "Charged Shot needs a full charge bank" });
+        }
+        if (!getChargedShotTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Charged Shot target" });
+        }
+        await applyMasterKillerChargedShot(doc, seat, action.targetTokenId);
+        return;
+      }
+      if (action.kind === "blinkStrike") {
+        if (cls !== "mage") return send({ type: "error", message: "Only a Mage can Blink Strike" });
+        if (!doc.mk.ultimateReady[seat]) return send({ type: "error", message: "Ultimate not ready" });
+        if (!getBlinkStrikeTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Blink Strike target" });
+        }
+        await applyMasterKillerBlinkStrike(doc, seat, action.targetTokenId);
+        return;
+      }
+      if (action.kind === "warpath") {
+        if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Warpath" });
+        if (!doc.mk.ultimateReady[seat]) return send({ type: "error", message: "Ultimate not ready" });
+        if (!getWarpathTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Warpath target" });
+        }
+        await applyMasterKillerWarpath(doc, seat, action.targetTokenId);
+        return;
+      }
+      if (action.kind === "bulwark") {
+        if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Bulwark" });
+        if (doc.mk.charges[seat] < 1) return send({ type: "error", message: "No charge available" });
+        if (!getBulwarkTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.tokenId)) {
+          return send({ type: "error", message: "Invalid Bulwark target" });
+        }
+        await applyMasterKillerBulwark(doc, seat, action.tokenId);
         return;
       }
       if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Charge" });

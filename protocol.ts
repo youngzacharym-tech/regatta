@@ -90,6 +90,28 @@ export type ServerMessage =
         /** Valid Push targets for the CURRENT player, if they're an Archer
          *  with a charge and it's their turn — empty otherwise. */
         pushTargets: number[];
+        /** Valid Charged Shot targets for the CURRENT player, if they're an
+         *  Archer at the full charge cap (this ability spends both) and
+         *  it's their turn — empty otherwise. */
+        chargedShotTargets: number[];
+        /** True once a Mage/Warrior has completed the shield-streak combo
+         *  and can spend their ultimate — public table-state, same
+         *  visibility as charges (an opponent seeing "ultimate ready" is no
+         *  different from them seeing a charge count). */
+        ultimateReady: Record<PlayerId, boolean>;
+        /** Valid Blink Strike targets for the CURRENT player, if they're a
+         *  Mage with ultimateReady and it's their turn — empty otherwise. */
+        blinkStrikeTargets: number[];
+        /** Valid Warpath targets for the CURRENT player, if they're a
+         *  Warrior with ultimateReady and it's their turn — empty otherwise. */
+        warpathTargets: number[];
+        /** Valid Bulwark targets for the CURRENT player, if they're a
+         *  Warrior with a charge and it's their turn — empty otherwise. */
+        bulwarkTargets: number[];
+        /** Every currently-Bulwarked token id, across both players — public
+         *  table-state, same visibility as safeTokens (drives the client's
+         *  tint, same idea as isWarded/hasTransientSafety). */
+        bulwarkedTokenIds: number[];
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
        *  (no token of the pusher's own moves), so it gets its own "how did
@@ -97,6 +119,22 @@ export type ServerMessage =
        *  client looks up the target's resulting position in `state.tokens`
        *  itself to tell a partial shove from a send-home. */
       lastPush?: { targetTokenId: number } | null;
+      /** Master Killer mode only: Archer's Charged Shot doesn't produce a
+       *  Move-shaped object either — same "how did we get here" lifecycle as
+       *  lastPush, its own field since a Charged Shot and a Push are
+       *  mutually exclusive, distinct actions in the same turn. */
+      lastChargedShot?: { targetTokenId: number } | null;
+      /** Master Killer mode only: Warrior's Bulwark was just CAST this
+       *  broadcast — same "how did we get here" lifecycle as lastPush
+       *  (mirrors lastMovePlayer for whose action this was). */
+      lastBulwark?: { tokenId: number } | null;
+      /** Master Killer mode only: Bulwark actually BLOCKED one or more
+       *  captures this broadcast — independent of lastMovePlayer, since this
+       *  fires the instant a fresh flip reveals the block (see
+       *  tickBulwarkForNewTurn/tickBulwarkForReflip in master-killer.ts),
+       *  which can be before the blocked player's opponent has even chosen
+       *  a move. `tokenIds` are the Bulwarked tokens that just got consumed. */
+      lastBulwarkBlock?: { tokenIds: number[] } | null;
       /** Master Killer mode only: the net charge change for one player from
        *  whatever just happened (move/charge/push/re-flip/zero-flip skip).
        *  Computed server-side as an authoritative before/after diff — never
@@ -104,6 +142,19 @@ export type ServerMessage =
        *  charge-economy rules the way a reimplementation could. Omitted/null
        *  when nothing changed. */
       lastChargeEvent?: { player: PlayerId; delta: number } | null;
+      /** Master Killer mode only: Archer's Rain of Arrows ultimate. Non-null
+       *  exactly on the broadcast where a 3rd consecutive shield landing
+       *  resolved. `targetTokenId` is null when it fired into an empty
+       *  eligible pool (streak still consumed — announce "no target," not
+       *  nothing). Server-computed, never re-derived client-side, same
+       *  reasoning as lastChargeEvent. */
+      lastRainOfArrows?: { targetTokenId: number | null } | null;
+      /** Master Killer mode only: Mage's Blink Strike or Warrior's Warpath.
+       *  Non-null exactly on the broadcast where one of those resolved.
+       *  `sweptTokenIds` is Warpath's extra captures along the way (always
+       *  empty for Blink Strike, which never sweeps). Server-computed,
+       *  never re-derived client-side. */
+      lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
     }
   | {
       type: "gameOver";
@@ -150,8 +201,12 @@ export type ClientMessage =
       type: "usePower";
       action:
         | { kind: "push"; targetTokenId: number }
+        | { kind: "chargedShot"; targetTokenId: number }
         | { kind: "reflip" }
-        | { kind: "charge"; moveIndex: number };
+        | { kind: "charge"; moveIndex: number }
+        | { kind: "blinkStrike"; targetTokenId: number }
+        | { kind: "warpath"; targetTokenId: number }
+        | { kind: "bulwark"; tokenId: number };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

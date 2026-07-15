@@ -15,13 +15,19 @@
 
 import { initialState, flipCoins, applyNoMove, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBlinkStrike,
+  applyBulwark,
   applyCharge,
+  applyChargedShot,
   applyPowerMove,
   applyPush,
   applyReflip,
+  applyWarpath,
   getLegalPowerMoves,
   grantZeroFlipCharge,
   initialPowerState,
+  tickBulwarkForNewTurn,
+  tickBulwarkForReflip,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -37,7 +43,19 @@ interface GameResult {
   turns: number; // player control-cycles (a reflip does NOT add to this)
   flips: number; // total coin flips, including reflips
   maxSweepCaptures: number; // largest single-move capture count observed
-  usage: { snipe: number; push: number; reflip: number; charge: number };
+  usage: {
+    snipe: number;
+    push: number;
+    chargedShot: number;
+    chargedShotSendsHome: number;
+    reflip: number;
+    charge: number;
+    rainOfArrows: number;
+    blinkStrike: number;
+    warpath: number;
+    bulwark: number;
+    bulwarkBlock: number;
+  };
 }
 
 /** Drive one player's turn to completion, including a possible Re-flip
@@ -52,6 +70,12 @@ function takeTurn(
   let flips = 1;
   let flip = flipCoins();
   let moves = getLegalPowerMoves(state, power, flip);
+  // Warrior Bulwark: tick the mover's own countdown, and consume any
+  // Bulwark this exact flip's moves reveal as blocked for the opponent —
+  // same hook referee.ts/api/ws.ts use at the start of every fresh turn.
+  const newTurnBulwark = tickBulwarkForNewTurn(state, power, flip);
+  power = newTurnBulwark.power;
+  let bulwarkBlockedThisTurn = newTurnBulwark.blockedIds.length > 0;
   let action = pickBotPowerAction(state, power, moves, flip, rand);
 
   if (action?.kind === "reflip") {
@@ -59,8 +83,13 @@ function takeTurn(
     flips++;
     flip = flipCoins();
     moves = getLegalPowerMoves(state, power, flip);
+    const reflipBulwark = tickBulwarkForReflip(state, power, flip);
+    power = reflipBulwark.power;
+    if (reflipBulwark.blockedIds.length > 0) bulwarkBlockedThisTurn = true;
     action = pickBotPowerAction(state, power, moves, flip, rand);
   }
+
+  const blockUsage: Partial<GameResult["usage"]> = bulwarkBlockedThisTurn ? { bulwarkBlock: 1 } : {};
 
   // A second "reflip" here would mean the bot ignored its own once-per-turn
   // guard — shouldn't happen at runtime (pickBotPowerAction checks
@@ -68,30 +97,78 @@ function takeTurn(
   // it's treated the same as "no action" rather than left unhandled.
   if (action === null || action.kind === "reflip") {
     if (flip === 0) power = grantZeroFlipCharge(power, mover);
-    return { state: applyNoMove(state), power, flips, sweepSize: 0, usage: {} };
+    return { state: applyNoMove(state), power, flips, sweepSize: 0, usage: blockUsage };
   }
 
   switch (action.kind) {
     case "move": {
-      const r = applyPowerMove(state, power, action.move, mover);
-      const sweepSize = action.move.captures.length + action.move.bonusCaptures.length;
+      const r = applyPowerMove(state, power, action.move, mover, rand);
+      const rainHit = r.rainOfArrows?.targetTokenId != null;
+      const sweepSize = action.move.captures.length + action.move.bonusCaptures.length + (rainHit ? 1 : 0);
       return {
         state: r.state,
         power: r.power,
         flips,
         sweepSize,
-        usage: action.move.bonusCaptures.length > 0 ? { snipe: 1 } : {},
+        usage: {
+          ...blockUsage,
+          ...(action.move.bonusCaptures.length > 0 ? { snipe: 1 } : {}),
+          ...(rainHit ? { rainOfArrows: 1 } : {}),
+        },
       };
     }
     case "charge": {
-      const r = applyCharge(state, power, action.move, mover);
+      const r = applyCharge(state, power, action.move, mover, rand);
+      const rainHit = r.rainOfArrows?.targetTokenId != null;
       const sweepSize =
-        action.move.captures.length + action.move.bonusCaptures.length + action.move.chargeSweepCaptures.length;
-      return { state: r.state, power: r.power, flips, sweepSize, usage: { charge: 1 } };
+        action.move.captures.length + action.move.bonusCaptures.length + action.move.chargeSweepCaptures.length +
+        (rainHit ? 1 : 0);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize,
+        usage: { ...blockUsage, ...(rainHit ? { charge: 1, rainOfArrows: 1 } : { charge: 1 }) },
+      };
     }
     case "push": {
       const r = applyPush(state, power, action.targetTokenId, mover);
-      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { push: 1 } };
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...blockUsage, push: 1 } };
+    }
+    case "chargedShot": {
+      const r = applyChargedShot(state, power, action.targetTokenId, mover);
+      const sentHome = r.state.tokens.find((t) => t.id === action.targetTokenId)?.position === -1;
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 0,
+        usage: { ...blockUsage, chargedShot: 1, ...(sentHome ? { chargedShotSendsHome: 1 } : {}) },
+      };
+    }
+    case "blinkStrike": {
+      const r = applyBlinkStrike(state, power, action.targetTokenId, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 1 + r.sweptTokenIds.length,
+        usage: { ...blockUsage, blinkStrike: 1 },
+      };
+    }
+    case "warpath": {
+      const r = applyWarpath(state, power, action.targetTokenId, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 1 + r.sweptTokenIds.length,
+        usage: { ...blockUsage, warpath: 1 },
+      };
+    }
+    case "bulwark": {
+      const r = applyBulwark(state, power, action.tokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...blockUsage, bulwark: 1 } };
     }
   }
 }
@@ -102,7 +179,19 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
   let turns = 0;
   let flips = 0;
   let maxSweepCaptures = 0;
-  const usage = { snipe: 0, push: 0, reflip: 0, charge: 0 };
+  const usage = {
+    snipe: 0,
+    push: 0,
+    chargedShot: 0,
+    chargedShotSendsHome: 0,
+    reflip: 0,
+    charge: 0,
+    rainOfArrows: 0,
+    blinkStrike: 0,
+    warpath: 0,
+    bulwark: 0,
+    bulwarkBlock: 0,
+  };
   const rand = Math.random;
 
   while (state.winner === null && turns < MAX_TURNS_PER_GAME) {
@@ -116,7 +205,14 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     maxSweepCaptures = Math.max(maxSweepCaptures, r.sweepSize);
     if (r.usage.snipe) usage.snipe++;
     if (r.usage.push) usage.push++;
+    if (r.usage.chargedShot) usage.chargedShot++;
+    if (r.usage.chargedShotSendsHome) usage.chargedShotSendsHome++;
     if (r.usage.charge) usage.charge++;
+    if (r.usage.rainOfArrows) usage.rainOfArrows++;
+    if (r.usage.blinkStrike) usage.blinkStrike++;
+    if (r.usage.warpath) usage.warpath++;
+    if (r.usage.bulwark) usage.bulwark++;
+    if (r.usage.bulwarkBlock) usage.bulwarkBlock++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -168,13 +264,23 @@ for (const [a, b] of matchups) {
   const maxSweep = Math.max(...results.map((r) => r.maxSweepCaptures));
   const avgSnipe = mean(results.map((r) => r.usage.snipe));
   const avgPush = mean(results.map((r) => r.usage.push));
+  const avgChargedShot = mean(results.map((r) => r.usage.chargedShot));
+  const avgChargedShotSendsHome = mean(results.map((r) => r.usage.chargedShotSendsHome));
   const avgReflip = mean(results.map((r) => r.usage.reflip));
   const avgCharge = mean(results.map((r) => r.usage.charge));
+  const avgRainOfArrows = mean(results.map((r) => r.usage.rainOfArrows));
+  const avgBlinkStrike = mean(results.map((r) => r.usage.blinkStrike));
+  const avgWarpath = mean(results.map((r) => r.usage.warpath));
+  const avgBulwark = mean(results.map((r) => r.usage.bulwark));
+  const avgBulwarkBlock = mean(results.map((r) => r.usage.bulwarkBlock));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
     `  turns=${avgTurns.toFixed(1).padStart(6)}  maxTurns=${maxTurns}  flips=${avgFlips.toFixed(1).padStart(6)}  maxSweep=${maxSweep}` +
-      `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}`,
+      `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  chargedShot/g=${avgChargedShot.toFixed(3)}` +
+      `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
+      `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
+      `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

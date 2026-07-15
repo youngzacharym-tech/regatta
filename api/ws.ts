@@ -41,14 +41,26 @@ import type { ServerMessage, ClientMessage } from "../protocol";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (variant === "classic" guards every branch that touches it).
 import {
+  applyBlinkStrike,
+  applyBulwark,
   applyCharge as mkApplyCharge,
+  applyChargedShot as mkApplyChargedShot,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
+  applyWarpath,
+  breakShieldStreak,
+  CHARGE_CAP,
+  getBlinkStrikeTargets,
+  getBulwarkTargets,
+  getChargedShotTargets,
   getLegalPowerMoves,
   getPushTargets,
+  getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
+  tickBulwarkForNewTurn,
+  tickBulwarkForReflip,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -115,6 +127,9 @@ interface RoomDoc {
   /** Push doesn't produce a Move-shaped lastMove — its own "how did we get
    *  here" slot, same lifecycle as lastMove/lastMovePlayer. */
   lastPush: { targetTokenId: number } | null;
+  /** Charged Shot doesn't produce a Move-shaped lastMove either — own "how
+   *  did we get here" slot, same lifecycle as lastPush. */
+  lastChargedShot: { targetTokenId: number } | null;
   /** Net charge change for one player from whatever this broadcast is
    *  reporting — a real before/after diff, never re-derived client-side. */
   lastChargeEvent: { player: PlayerId; delta: number } | null;
@@ -124,6 +139,20 @@ interface RoomDoc {
    *  can't just be lastChargeEvent itself. Persisted (not an in-memory
    *  field) since this architecture round-trips RoomDoc through Redis. */
   zeroFlipChargeBefore: number | null;
+  /** Archer's Rain of Arrows ultimate — non-null exactly on the broadcast
+   *  where a 3rd consecutive shield landing resolved. targetTokenId is null
+   *  when it fired into an empty eligible pool (streak still consumed).
+   *  Same lifecycle as lastPush. */
+  lastRainOfArrows: { targetTokenId: number | null } | null;
+  /** Mage's Blink Strike or Warrior's Warpath — non-null exactly on the
+   *  broadcast where one of those resolved. Same lifecycle as lastPush. */
+  lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+  /** Warrior's Bulwark was just CAST — same lifecycle as lastPush. */
+  lastBulwark: { tokenId: number } | null;
+  /** Bulwark actually BLOCKED one or more captures this commit — set by
+   *  tickBulwarkForNewTurn/tickBulwarkForReflip, independent of
+   *  lastMovePlayer (see protocol.ts's lastBulwarkBlock doc). */
+  lastBulwarkBlock: { tokenIds: number[] } | null;
 }
 
 const roomKey = (code: string) => `room:${code}`;
@@ -145,8 +174,8 @@ function freshMatchFields(
   | "phase" | "openingFlips"
   | "state" | "currentFlip" | "turns" | "captures"
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
-  | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargeEvent"
-  | "zeroFlipChargeBefore"
+  | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
+  | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
 > {
   // currentPlayer is decided by the opening flip-off, not randomized here.
   const state = initialState();
@@ -166,8 +195,13 @@ function freshMatchFields(
     classesPicked: { p1: false, p2: false },
     currentPowerMoves: null,
     lastPush: null,
+    lastChargedShot: null,
     lastChargeEvent: null,
     zeroFlipChargeBefore: null,
+    lastRainOfArrows: null,
+    lastUltimate: null,
+    lastBulwark: null,
+    lastBulwarkBlock: null,
   };
 }
 
@@ -311,6 +345,28 @@ export function GET(request: Request) {
               doc.mk.classes[doc.state.currentPlayer] === "archer"
                 ? getPushTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
                 : [],
+            // No charges===CHARGE_CAP check needed here — getChargedShotTargets
+            // self-gates on that now (see its doc comment), so the class
+            // check is the only thing this ternary needs, same shape as
+            // pushTargets.
+            chargedShotTargets:
+              doc.mk.classes[doc.state.currentPlayer] === "archer"
+                ? getChargedShotTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
+                : [],
+            ultimateReady: { ...doc.mk.ultimateReady },
+            blinkStrikeTargets:
+              doc.mk.classes[doc.state.currentPlayer] === "mage" && doc.mk.ultimateReady[doc.state.currentPlayer]
+                ? getBlinkStrikeTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
+                : [],
+            warpathTargets:
+              doc.mk.classes[doc.state.currentPlayer] === "warrior" && doc.mk.ultimateReady[doc.state.currentPlayer]
+                ? getWarpathTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
+                : [],
+            bulwarkTargets:
+              doc.mk.classes[doc.state.currentPlayer] === "warrior" && doc.mk.charges[doc.state.currentPlayer] >= 1
+                ? getBulwarkTargets(doc.state, fromWirePower(doc.mk), doc.state.currentPlayer)
+                : [],
+            bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number),
           }
         : undefined;
 
@@ -324,7 +380,12 @@ export function GET(request: Request) {
         lastMove: doc.lastMove,
         lastMovePlayer: doc.lastMovePlayer,
         lastPush: doc.lastPush,
+        lastChargedShot: doc.lastChargedShot,
+        lastBulwark: doc.lastBulwark,
+        lastBulwarkBlock: doc.lastBulwarkBlock,
         lastChargeEvent: doc.lastChargeEvent,
+        lastRainOfArrows: doc.lastRainOfArrows,
+        lastUltimate: doc.lastUltimate,
         wasSkipped: doc.wasSkipped,
         skippedPlayer: doc.skippedPlayer,
         skipReason: doc.skipReason,
@@ -427,6 +488,7 @@ export function GET(request: Request) {
           let mk = cur.mk;
           let currentPowerMoves: PowerMove[] | null = null;
           let zeroFlipChargeBefore: number | null = null;
+          let lastBulwarkBlock: RoomDoc["lastBulwarkBlock"] = null;
           if (cur.variant === "masterKiller" && mk) {
             let power = fromWirePower(mk);
             if (flip === 0) {
@@ -436,8 +498,15 @@ export function GET(request: Request) {
               zeroFlipChargeBefore = power.charges[cur.state.currentPlayer];
               power = grantZeroFlipCharge(power, cur.state.currentPlayer);
             }
-            mk = toWirePower(power);
             currentPowerMoves = getLegalPowerMoves(cur.state, power, flip);
+            // Warrior Bulwark: tick the mover's own countdown, and consume
+            // any Bulwark this exact flip's moves reveal as blocked for the
+            // opponent (announced on THIS commit, before the mover has even
+            // chosen an action — see tickBulwarkForNewTurn's doc comment).
+            const bulwarkResult = tickBulwarkForNewTurn(cur.state, power, flip);
+            power = bulwarkResult.power;
+            if (bulwarkResult.blockedIds.length > 0) lastBulwarkBlock = { tokenIds: bulwarkResult.blockedIds };
+            mk = toWirePower(power);
           }
           const next: RoomDoc = {
             ...cur,
@@ -449,7 +518,12 @@ export function GET(request: Request) {
             lastMove: null,
             lastMovePlayer: null,
             lastPush: null,
+            lastChargedShot: null,
+            lastBulwark: null,
+            lastBulwarkBlock,
             lastChargeEvent: null,
+            lastRainOfArrows: null,
+            lastUltimate: null,
             wasSkipped: false,
             skippedPlayer: null,
             skipReason: null,
@@ -508,15 +582,26 @@ export function GET(request: Request) {
             const delta = cur.mk.charges[skipped] - cur.zeroFlipChargeBefore;
             lastChargeEvent = delta !== 0 ? { player: skipped, delta } : null;
           }
+          // applyNoMove only touches GameState — the turn is genuinely
+          // ending here without a shield landing, so the shield-streak
+          // combo breaks.
+          const mk = cur.mk ? toWirePower(breakShieldStreak(fromWirePower(cur.mk), skipped)) : cur.mk;
           const next: RoomDoc = {
             ...cur,
             state: applyNoMove(cur.state),
+            mk,
             currentFlip: null,
             currentPowerMoves: null,
             wasSkipped: true,
             skippedPlayer: skipped,
             skipReason,
             lastChargeEvent,
+            // The flip commit's own broadcast already showed a Bulwark-block
+            // announcement (if any) — don't repeat it on the skip broadcast
+            // too (referee.ts's equivalent already clears these via
+            // clearAnnouncement() before its auto-skip timer fires).
+            lastBulwark: null,
+            lastBulwarkBlock: null,
             zeroFlipChargeBefore: null,
           };
           if (await commit(next)) await maybeDrive(next);
@@ -605,10 +690,11 @@ export function GET(request: Request) {
       move: PowerMove,
     ): Promise<void> => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + rainHit;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
@@ -618,15 +704,20 @@ export function GET(request: Request) {
         captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
         lastMove: move,
         lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
         lastPush: null,
+        lastChargedShot: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
       };
       if (await commit(next)) {
         console.log(
-          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin}`,
+          `[${doc.code}] [MOVE] ${seat} tok${move.tokenId} ${move.from}->${move.to} caps=${captureCount} snipe=${move.bonusCaptures.length > 0} win=${move.causesWin} rainOfArrows=${rainHit === 1}`,
         );
         await maybeDrive(next);
       } else {
@@ -641,10 +732,11 @@ export function GET(request: Request) {
       move: PowerMove,
     ): Promise<void> => {
       if (!doc.mk) return;
-      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length;
       const chargesBefore = doc.mk.charges[seat];
-      const r = mkApplyCharge(doc.state, fromWirePower(doc.mk), move, seat);
+      const r = mkApplyCharge(doc.state, fromWirePower(doc.mk), move, seat, Math.random);
       const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
+      const captureCount = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
       const next: RoomDoc = {
         ...doc,
         state: r.state,
@@ -654,8 +746,13 @@ export function GET(request: Request) {
         captures: { ...doc.captures, [seat]: doc.captures[seat] + captureCount },
         lastMove: move,
         lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
         lastPush: null,
+        lastChargedShot: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: r.rainOfArrows,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
@@ -686,14 +783,178 @@ export function GET(request: Request) {
         currentPowerMoves: null,
         lastMove: null,
         lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
         lastPush: { targetTokenId },
+        lastChargedShot: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: null,
         wasSkipped: false,
         skippedPlayer: null,
         skipReason: null,
       };
       if (await commit(next)) {
         console.log(`[${doc.code}] [PUSH] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+
+    /** Archer's Charged Shot: spends both charges for a flat, fixed
+     *  knockback against any legal target (a Warded target is fully immune —
+     *  see getChargedShotTargets/applyChargedShot). Doesn't produce a
+     *  Move-shaped lastMove — its own "how did we get here" slot, same
+     *  lifecycle as lastPush. */
+    const applyMasterKillerChargedShot = async (
+      doc: RoomDoc,
+      seat: PlayerId,
+      targetTokenId: number,
+    ): Promise<void> => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = mkApplyChargedShot(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next: RoomDoc = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
+        lastPush: null,
+        lastChargedShot: { targetTokenId },
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: null,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null,
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [CHARGED SHOT] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+
+    const applyMasterKillerBlinkStrike = async (
+      doc: RoomDoc,
+      seat: PlayerId,
+      targetTokenId: number,
+    ): Promise<void> => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyBlinkStrike(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next: RoomDoc = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 + r.sweptTokenIds.length },
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
+        lastPush: null,
+        lastChargedShot: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: { kind: "blinkStrike", targetTokenId, sweptTokenIds: r.sweptTokenIds },
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null,
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [BLINK STRIKE] ${seat} -> tok${targetTokenId}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+
+    const applyMasterKillerWarpath = async (
+      doc: RoomDoc,
+      seat: PlayerId,
+      targetTokenId: number,
+    ): Promise<void> => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyWarpath(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next: RoomDoc = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 + r.sweptTokenIds.length },
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastBulwark: null,
+        lastBulwarkBlock: null,
+        lastPush: null,
+        lastChargedShot: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: { kind: "warpath", targetTokenId, sweptTokenIds: r.sweptTokenIds },
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null,
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [WARPATH] ${seat} -> tok${targetTokenId} swept=${r.sweptTokenIds.length}`);
+        await maybeDrive(next);
+      } else {
+        const reloaded = await loadDoc(doc.code);
+        if (reloaded) await maybeDrive(reloaded);
+      }
+    };
+
+    /** Warrior's Bulwark: flags one of the mover's own on-board tokens
+     *  Bulwarked (see applyBulwark). Doesn't produce a Move-shaped
+     *  lastMove — its own "how did we get here" slot, same lifecycle as
+     *  lastPush. */
+    const applyMasterKillerBulwark = async (
+      doc: RoomDoc,
+      seat: PlayerId,
+      tokenId: number,
+    ): Promise<void> => {
+      if (!doc.mk) return;
+      const chargesBefore = doc.mk.charges[seat];
+      const r = applyBulwark(doc.state, fromWirePower(doc.mk), tokenId, seat);
+      const chargeDelta = r.power.charges[seat] - chargesBefore;
+      const next: RoomDoc = {
+        ...doc,
+        state: r.state,
+        mk: toWirePower(r.power),
+        currentFlip: null,
+        currentPowerMoves: null,
+        lastMove: null,
+        lastMovePlayer: seat,
+        lastPush: null,
+        lastChargedShot: null,
+        lastBulwark: { tokenId },
+        lastBulwarkBlock: null,
+        lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
+        lastRainOfArrows: null,
+        lastUltimate: null,
+        wasSkipped: false,
+        skippedPlayer: null,
+        skipReason: null,
+      };
+      if (await commit(next)) {
+        console.log(`[${doc.code}] [BULWARK] ${seat} -> tok${tokenId}`);
         await maybeDrive(next);
       } else {
         const reloaded = await loadDoc(doc.code);
@@ -714,6 +975,13 @@ export function GET(request: Request) {
       // synchronous step — report the NET delta across both the spend and
       // the possible grant, since only one lastChargeEvent field exists.
       if (flip === 0) power = grantZeroFlipCharge(power, seat);
+      // Bulwark: this is a fresh flip within the SAME turn (not a new turn —
+      // no expiry tick, see tickBulwarkForReflip), but it can reveal a
+      // fresh block the original flip didn't.
+      const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+      power = bulwarkResult.power;
+      const lastBulwarkBlock: RoomDoc["lastBulwarkBlock"] =
+        bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null;
       const chargeDelta = power.charges[seat] - chargesBefore;
       const next: RoomDoc = {
         ...doc,
@@ -722,6 +990,11 @@ export function GET(request: Request) {
         currentPowerMoves: getLegalPowerMoves(doc.state, power, flip),
         lastMove: null,
         lastPush: null,
+        lastChargedShot: null,
+        lastBulwark: null,
+        lastBulwarkBlock,
+        lastRainOfArrows: null,
+        lastUltimate: null,
         lastChargeEvent: chargeDelta !== 0 ? { player: seat, delta: chargeDelta } : null,
       };
       if (await commit(next)) {
@@ -748,8 +1021,20 @@ export function GET(request: Request) {
         case "push":
           await applyMasterKillerPush(doc, seat, action.targetTokenId);
           break;
+        case "chargedShot":
+          await applyMasterKillerChargedShot(doc, seat, action.targetTokenId);
+          break;
         case "reflip":
           await applyMasterKillerReflip(doc, seat);
+          break;
+        case "blinkStrike":
+          await applyMasterKillerBlinkStrike(doc, seat, action.targetTokenId);
+          break;
+        case "warpath":
+          await applyMasterKillerWarpath(doc, seat, action.targetTokenId);
+          break;
+        case "bulwark":
+          await applyMasterKillerBulwark(doc, seat, action.tokenId);
           break;
       }
     };
@@ -807,6 +1092,48 @@ export function GET(request: Request) {
           return send({ type: "error", message: "Invalid push target" });
         }
         await applyMasterKillerPush(doc, seat, action.targetTokenId);
+        return;
+      }
+
+      if (action.kind === "chargedShot") {
+        if (cls !== "archer") return send({ type: "error", message: "Only an Archer can Charged Shot" });
+        if (doc.mk.charges[seat] !== CHARGE_CAP) {
+          return send({ type: "error", message: "Charged Shot needs a full charge bank" });
+        }
+        if (!getChargedShotTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Charged Shot target" });
+        }
+        await applyMasterKillerChargedShot(doc, seat, action.targetTokenId);
+        return;
+      }
+
+      if (action.kind === "blinkStrike") {
+        if (cls !== "mage") return send({ type: "error", message: "Only a Mage can Blink Strike" });
+        if (!doc.mk.ultimateReady[seat]) return send({ type: "error", message: "Ultimate not ready" });
+        if (!getBlinkStrikeTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Blink Strike target" });
+        }
+        await applyMasterKillerBlinkStrike(doc, seat, action.targetTokenId);
+        return;
+      }
+
+      if (action.kind === "warpath") {
+        if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Warpath" });
+        if (!doc.mk.ultimateReady[seat]) return send({ type: "error", message: "Ultimate not ready" });
+        if (!getWarpathTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.targetTokenId)) {
+          return send({ type: "error", message: "Invalid Warpath target" });
+        }
+        await applyMasterKillerWarpath(doc, seat, action.targetTokenId);
+        return;
+      }
+
+      if (action.kind === "bulwark") {
+        if (cls !== "warrior") return send({ type: "error", message: "Only a Warrior can Bulwark" });
+        if (doc.mk.charges[seat] < 1) return send({ type: "error", message: "No charge available" });
+        if (!getBulwarkTargets(doc.state, fromWirePower(doc.mk), seat).includes(action.tokenId)) {
+          return send({ type: "error", message: "Invalid Bulwark target" });
+        }
+        await applyMasterKillerBulwark(doc, seat, action.tokenId);
         return;
       }
 

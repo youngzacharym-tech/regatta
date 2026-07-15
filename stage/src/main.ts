@@ -23,7 +23,15 @@ import { audio } from "./audio.ts";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (myVariant stays "classic", currentPower stays null, and every
 // branch that reads them is gated accordingly).
-import { CHARGE_CAP, isWarded, type PlayerClass, type PowerMove, type PowerState } from "../../master-killer.ts";
+import {
+  CHARGE_CAP,
+  CHARGED_SHOT_DISTANCE,
+  CHARGED_SHOT_WARD_DISTANCE,
+  isWarded,
+  type PlayerClass,
+  type PowerMove,
+  type PowerState,
+} from "../../master-killer.ts";
 
 const PATH_LENGTH = 15; // must match rulebook.ts PATH_LENGTH_PER_PLAYER
 
@@ -342,16 +350,16 @@ for (let i = 0; i < 8; i++) {
 }
 
 // Sculpted token geometries (from pieces.glb): the red-design sculpt always
-// goes to the viewer's own tokens, the blue-design sculpt to the opponent's.
-// Applied on load AND again when the seat arrives, since either can be first.
+// goes to p1's tokens, the blue-design sculpt to p2's — a fixed physical
+// property of the token, identical on both screens (unlike near/far row
+// placement and the Red/Blue label, which stay viewer-relative).
 let sculptedTokenGeos: { red: THREE.BufferGeometry; blue: THREE.BufferGeometry } | null = null;
 
 function applyTokenGeometries() {
   if (!sculptedTokenGeos) return;
   markers.forEach((marker, i) => {
     const owner: PlayerId = i < 4 ? "p1" : "p2";
-    const mine = owner === (myRole ?? "p1");
-    marker.mesh.geometry = mine ? sculptedTokenGeos!.red : sculptedTokenGeos!.blue;
+    marker.mesh.geometry = owner === "p1" ? sculptedTokenGeos!.red : sculptedTokenGeos!.blue;
   });
 }
 
@@ -795,20 +803,27 @@ function refreshMarkers(state: GameState) {
   handleEscapeChanges(nowEscaped);
 }
 
-/** Master Killer only: tint warded / Shieldbreaker-safe tokens. Reuses the
- *  real isWarded() from master-killer.ts against a minimal PowerState built
- *  from the public `power` field, so the client can never drift from the
- *  server's own definition of "warded". Classic rooms (currentPower === null)
- *  always take the clear-everything branch — a no-op against the materials'
- *  own black-emissive default, so classic visuals are untouched. */
+/** Master Killer only: tint warded / Ward Breaker-safe / Bulwarked tokens.
+ *  Reuses the real isWarded() from master-killer.ts against a minimal
+ *  PowerState built from the public `power` field, so the client can never
+ *  drift from the server's own definition of "warded". Bulwark's own
+ *  protected-ness is simpler — the server already hands over the exact
+ *  token id list (bulwarkedTokenIds), no derivation needed. Classic rooms
+ *  (currentPower === null) always take the clear-everything branch — a
+ *  no-op against the materials' own black-emissive default, so classic
+ *  visuals are untouched. */
 function updateTokenTints(state: GameState) {
   const safe = currentPower ? new Set(currentPower.safeTokens) : null;
+  const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
   const fakePower: PowerState | null = currentPower
     ? {
         classes: currentPower.classes,
         charges: currentPower.charges,
         safeTokens: new Set(),
         reflipUsedThisTurn: false,
+        shieldStreak: { p1: 0, p2: 0 },
+        ultimateReady: { p1: false, p2: false },
+        bulwarked: {},
       }
     : null;
   state.tokens.forEach((token, idx) => {
@@ -816,8 +831,11 @@ function updateTokenTints(state: GameState) {
     if (fakePower && isWarded(state, fakePower, token)) {
       mat.emissive.setHex(0x8040ff); // violet — Mage ward
       mat.emissiveIntensity = 0.55;
+    } else if (bulwarked && bulwarked.has(token.id)) {
+      mat.emissive.setHex(0x2fd0c0); // cool teal — Warrior Bulwark
+      mat.emissiveIntensity = 0.5;
     } else if (safe && safe.has(token.id)) {
-      mat.emissive.setHex(0xffa332); // warm gold — Shieldbreaker-safe
+      mat.emissive.setHex(0xffa332); // warm gold — Ward Breaker-safe
       mat.emissiveIntensity = 0.45;
     } else {
       mat.emissive.setHex(0x000000);
@@ -834,45 +852,12 @@ const hud = document.getElementById("hud") as HTMLDivElement;
 const status = document.getElementById("status") as HTMLDivElement;
 const movesEl = document.getElementById("moves") as HTMLDivElement;
 
-let myRole: PlayerId | null = null;
-let currentMoves: Move[] | null = null;
-/** Every roll of the player's coins waits for a tap on their pile. */
-let rollPending: { flip: number; legalMoves: Move[] | null; state: GameState } | null = null;
-
-// --- Master Killer mode (additive; all null/"classic" in classic rooms) ---
-let myVariant: "classic" | "masterKiller" = "classic";
-/** Public class/charge/ward info — mirrors protocol.ts's `state.power`. */
-let currentPower: {
-  classes: Record<PlayerId, PlayerClass>;
-  charges: Record<PlayerId, number>;
-  safeTokens: number[];
-  pushTargets: number[];
-} | null = null;
-/** The current player's power-boosted move list (only populated on my own
- *  turn — same security rule as legalMoves). Kept alongside currentMoves
- *  (which gets the same array structurally, via tap-to-move) so Warrior's
- *  Charge buttons can read chargeAvailable/from/to per move. */
-let currentPowerMoves: PowerMove[] | null = null;
-/** True while an Archer has tapped "Push" and is waiting to tap a target. */
-let pushArmed = false;
-/** Push's targetable enemy tokens while pushArmed — lit the same way as
- *  capturableIds, via the shared hover-glow helper below. */
-const pushTargetIds = new Set<number>();
-/** True while a Warrior has tapped the rune and is waiting to tap which of
- *  their own stones makes the Charge sweep. Mirrors the pushArmed flow. */
-let sweepArmed = false;
-const sweepTargetIds = new Set<number>();
-/** Token ID -> index into currentPowerMoves for its Charge-sweep move. */
-const sweepMoveIndexByToken = new Map<number, number>();
-/** Classes as known during the class-pick phase — lets the avatar plates
- *  appear the moment a class is chosen, before the first state broadcast
- *  (currentPower) carries the authoritative power info. */
-let pickedClasses: { p1: PlayerClass | null; p2: PlayerClass | null } = { p1: null, p2: null };
-
 // --- Avatar plates (Hearthstone-style class frames) ---
-// Bottom-left: my portrait + charge gems + power rune (+ the utility rail
-// docked beside it). Top-right: the opponent's portrait + gems. Both are
-// hidden outside Master Killer rooms; the rail is always on screen.
+// Bottom-left: my portrait + charge gems + turn glow. Top-right: the
+// opponent's. Hidden outside Master Killer rooms. The plate is pure DISPLAY
+// (who you are, how many charges you hold, whose turn it is); ability
+// triggering lives in the #moves button rail (renderPowerActions), which is
+// the only surface rich enough for two actives + an ultimate per class.
 const plateMe = document.getElementById("plate-me") as HTMLDivElement;
 const plateThem = document.getElementById("plate-them") as HTMLDivElement;
 const portraitMe = document.getElementById("portrait-me") as HTMLImageElement;
@@ -881,7 +866,6 @@ const gemsMe = document.getElementById("gems-me") as HTMLDivElement;
 const gemsThem = document.getElementById("gems-them") as HTMLDivElement;
 const plateNameMe = document.getElementById("plate-name-me") as HTMLDivElement;
 const plateNameThem = document.getElementById("plate-name-them") as HTMLDivElement;
-const powerRune = document.getElementById("power-rune") as HTMLButtonElement;
 
 // One gem socket per bankable charge, built from the real tunable so a
 // CHARGE_CAP change reshapes the frames automatically.
@@ -891,12 +875,10 @@ for (const container of [gemsMe, gemsThem]) {
   }
 }
 
-const RUNE_GLYPH: Record<PlayerClass, string> = { archer: "🏹", mage: "✨", warrior: "⚔" };
-const RUNE_TITLE: Record<PlayerClass, string> = {
-  archer: "Push (1⚡) — knock an enemy stone back",
-  mage: "Re-flip (1⚡) — flip your coins again",
-  warrior: "Charge (1⚡) — sweep a capture on the way",
-};
+/** Classes as known during the class-pick phase — lets each plate appear the
+ *  moment its class is chosen, before the first state broadcast
+ *  (currentPower) carries the authoritative power info. */
+let pickedClasses: { p1: PlayerClass | null; p2: PlayerClass | null } = { p1: null, p2: null };
 
 function setGems(container: HTMLDivElement, lit: number) {
   container.querySelectorAll(".gem").forEach((g, i) => g.classList.toggle("lit", i < lit));
@@ -910,10 +892,10 @@ function flashGems(container: HTMLDivElement, kind: "flare" | "spend") {
   setTimeout(() => container.classList.remove(kind), 900);
 }
 
-/** Sync both avatar plates (portrait, gems, turn glow). Each plate appears
- *  as soon as that side's class is KNOWN — during class pick that comes from
- *  pickedClasses; once the match is underway, currentPower is authoritative.
- *  Classic rooms take the hide branch — plates never appear there. */
+/** Sync both avatar plates (portrait, gems, name, turn glow). Each plate
+ *  appears as soon as that side's class is KNOWN — during class pick that
+ *  comes from pickedClasses; once the match is underway, currentPower is
+ *  authoritative. Classic rooms take the hide branch. */
 function updatePlates(state: GameState | null) {
   const mySide: PlayerId = myRole ?? "p1";
   const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
@@ -927,27 +909,78 @@ function updatePlates(state: GameState | null) {
   const live = state !== null && state.winner === null;
   if (mine) {
     plateMe.dataset.class = mine;
-    const mySrc = `/avatars/${mine}.webp`;
-    if (!portraitMe.src.endsWith(mySrc)) portraitMe.src = mySrc;
+    const src = `/avatars/${mine}.webp`;
+    if (!portraitMe.src.endsWith(src)) portraitMe.src = src;
     plateNameMe.textContent = classLabel(mine);
     setGems(gemsMe, currentPower ? currentPower.charges[mySide] : 0);
-    plateMe.classList.toggle("turn", live && state.currentPlayer === mySide);
+    plateMe.classList.toggle("turn", live && state!.currentPlayer === mySide);
     plateMe.classList.add("show");
   } else {
     plateMe.classList.remove("show", "turn");
   }
   if (theirs) {
     plateThem.dataset.class = theirs;
-    const theirSrc = `/avatars/${theirs}.webp`;
-    if (!portraitThem.src.endsWith(theirSrc)) portraitThem.src = theirSrc;
+    const src = `/avatars/${theirs}.webp`;
+    if (!portraitThem.src.endsWith(src)) portraitThem.src = src;
     plateNameThem.textContent = classLabel(theirs);
     setGems(gemsThem, currentPower ? currentPower.charges[theirSide] : 0);
-    plateThem.classList.toggle("turn", live && state.currentPlayer !== mySide);
+    plateThem.classList.toggle("turn", live && state!.currentPlayer !== mySide);
     plateThem.classList.add("show");
   } else {
     plateThem.classList.remove("show", "turn");
   }
 }
+
+let myRole: PlayerId | null = null;
+let currentMoves: Move[] | null = null;
+/** Every roll of the player's coins waits for a tap on their pile. */
+let rollPending: { flip: number; legalMoves: Move[] | null; state: GameState } | null = null;
+
+// --- Master Killer mode (additive; all null/"classic" in classic rooms) ---
+let myVariant: "classic" | "masterKiller" = "classic";
+/** Public class/charge/ward info — mirrors protocol.ts's `state.power`. */
+let currentPower: {
+  classes: Record<PlayerId, PlayerClass>;
+  charges: Record<PlayerId, number>;
+  safeTokens: number[];
+  pushTargets: number[];
+  chargedShotTargets: number[];
+  ultimateReady: Record<PlayerId, boolean>;
+  blinkStrikeTargets: number[];
+  warpathTargets: number[];
+  bulwarkTargets: number[];
+  bulwarkedTokenIds: number[];
+} | null = null;
+/** The current player's power-boosted move list (only populated on my own
+ *  turn — same security rule as legalMoves). Kept alongside currentMoves
+ *  (which gets the same array structurally, via tap-to-move) so Warrior's
+ *  Charge buttons can read chargeAvailable/from/to per move. */
+let currentPowerMoves: PowerMove[] | null = null;
+/** True while an Archer has tapped "Push" and is waiting to tap a target. */
+let pushArmed = false;
+/** Push's targetable enemy tokens while pushArmed — lit the same way as
+ *  capturableIds, via the shared hover-glow helper below. */
+const pushTargetIds = new Set<number>();
+/** True while an Archer has tapped "Charged Shot" and is waiting to tap a
+ *  target — same lifecycle as pushArmed, offered alongside Push (not
+ *  instead of it) whenever charges === CHARGE_CAP. */
+let chargedShotArmed = false;
+const chargedShotTargetIds = new Set<number>();
+/** True while a Mage has tapped "Blink Strike" and is waiting to tap a
+ *  target — same lifecycle as pushArmed. */
+let blinkStrikeArmed = false;
+const blinkStrikeTargetIds = new Set<number>();
+/** True while a Warrior has tapped "Warpath" and is waiting to tap a
+ *  target — same lifecycle as pushArmed. */
+let warpathArmed = false;
+const warpathTargetIds = new Set<number>();
+/** True while a Warrior has tapped "Bulwark" and is waiting to tap a
+ *  target — unlike every other armed flow above, the tap target here is one
+ *  of the MOVER'S OWN tokens, not an enemy's. Reuses the exact same
+ *  raycast/hover helpers (findTargetUnderPointer works over any token id
+ *  set regardless of owner), so no new targeting plumbing is needed. */
+let bulwarkArmed = false;
+const bulwarkTargetIds = new Set<number>();
 
 // --- Opening flip-off ---
 /** True while the match start waits for THIS player to tap their pile.
@@ -1039,66 +1072,142 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
   movesEl.innerHTML = "";
 }
 
-/** Master Killer only: drive the plate's power rune. Disarms any pending
- *  Push/Charge targeting, then lights the rune when the class's active is
- *  actually usable this turn. Normal moves stay tap-to-move, unchanged. */
+/** Master Killer only: append active-ability buttons to #moves (which
+ *  renderMoves() just cleared). Normal moves stay tap-to-move, unchanged —
+ *  this only adds the extra Push/Re-flip/Charge affordances a class needs. */
 function renderPowerActions(isMyTurn: boolean) {
   pushArmed = false;
   pushTargetIds.clear();
-  sweepArmed = false;
-  sweepTargetIds.clear();
-  sweepMoveIndexByToken.clear();
-  powerRune.classList.remove("ready", "armed");
-  if (myVariant !== "masterKiller" || !currentPower) return;
-
+  chargedShotArmed = false;
+  chargedShotTargetIds.clear();
+  blinkStrikeArmed = false;
+  blinkStrikeTargetIds.clear();
+  warpathArmed = false;
+  warpathTargetIds.clear();
+  bulwarkArmed = false;
+  bulwarkTargetIds.clear();
+  if (!isMyTurn || myVariant !== "masterKiller" || !currentPower) return;
   const mySide: PlayerId = myRole ?? "p1";
   const cls = currentPower.classes[mySide];
-  powerRune.textContent = RUNE_GLYPH[cls];
-  powerRune.title = RUNE_TITLE[cls];
+  const charges = currentPower.charges[mySide];
 
-  let usable = isMyTurn && currentPower.charges[mySide] >= 1;
-  if (cls === "archer") {
-    usable = usable && currentPower.pushTargets.length > 0;
-  } else if (cls === "warrior") {
-    usable = usable && (currentPowerMoves?.some((m) => m.chargeAvailable) ?? false);
+  // Ultimates spend a banked ultimateReady flag, not a charge — so they're
+  // offered independent of the charges<1 gate below.
+  if (cls === "mage" && currentPower.ultimateReady[mySide] && currentPower.blinkStrikeTargets.length > 0) {
+    const btn = document.createElement("button");
+    const setLabel = () => {
+      btn.textContent = blinkStrikeArmed ? "Blink Strike: tap a target…" : "Blink Strike ✦";
+      btn.style.background = blinkStrikeArmed ? "#a06010" : "#c04fd0";
+    };
+    setLabel();
+    btn.addEventListener("click", () => {
+      blinkStrikeArmed = !blinkStrikeArmed;
+      blinkStrikeTargetIds.clear();
+      if (blinkStrikeArmed) for (const id of currentPower!.blinkStrikeTargets) blinkStrikeTargetIds.add(id);
+      else hideHoverGlow();
+      setLabel();
+    });
+    movesEl.appendChild(btn);
   }
-  powerRune.disabled = !usable;
-  powerRune.classList.toggle("ready", usable);
-}
+  if (cls === "warrior" && currentPower.ultimateReady[mySide] && currentPower.warpathTargets.length > 0) {
+    const btn = document.createElement("button");
+    const setLabel = () => {
+      btn.textContent = warpathArmed ? "Warpath: tap a target…" : "Warpath ✦";
+      btn.style.background = warpathArmed ? "#a06010" : "#c04fd0";
+    };
+    setLabel();
+    btn.addEventListener("click", () => {
+      warpathArmed = !warpathArmed;
+      warpathTargetIds.clear();
+      if (warpathArmed) for (const id of currentPower!.warpathTargets) warpathTargetIds.add(id);
+      else hideHoverGlow();
+      setLabel();
+    });
+    movesEl.appendChild(btn);
+  }
 
-powerRune.addEventListener("click", () => {
-  if (powerRune.disabled || !currentPower) return;
-  const mySide: PlayerId = myRole ?? "p1";
-  const cls = currentPower.classes[mySide];
+  if (charges < 1) return;
 
   if (cls === "mage") {
-    // Fires immediately — no target to pick.
-    sendToServer({ type: "usePower", action: { kind: "reflip" } });
-    return;
-  }
-  if (cls === "archer") {
-    pushArmed = !pushArmed;
-    pushTargetIds.clear();
-    if (pushArmed) for (const id of currentPower.pushTargets) pushTargetIds.add(id);
-    else hideHoverGlow();
-    powerRune.classList.toggle("armed", pushArmed);
-    return;
-  }
-  // Warrior: arm the sweep, then the player taps WHICH stone charges.
-  sweepArmed = !sweepArmed;
-  sweepTargetIds.clear();
-  sweepMoveIndexByToken.clear();
-  if (sweepArmed && currentPowerMoves) {
-    for (let i = 0; i < currentPowerMoves.length; i++) {
-      if (!currentPowerMoves[i].chargeAvailable) continue;
-      sweepTargetIds.add(currentPowerMoves[i].tokenId);
-      sweepMoveIndexByToken.set(currentPowerMoves[i].tokenId, i);
+    const btn = document.createElement("button");
+    btn.textContent = `Re-flip (1⚡)`;
+    btn.style.background = "#6a4fb0";
+    btn.addEventListener("click", () => {
+      sendToServer({ type: "usePower", action: { kind: "reflip" } });
+    });
+    movesEl.appendChild(btn);
+  } else if (cls === "archer") {
+    if (currentPower.pushTargets.length > 0) {
+      const btn = document.createElement("button");
+      const setLabel = () => {
+        btn.textContent = pushArmed ? "Push: tap a target…" : `Push (1⚡)`;
+        btn.style.background = pushArmed ? "#a06010" : "#6a4fb0";
+      };
+      setLabel();
+      btn.addEventListener("click", () => {
+        pushArmed = !pushArmed;
+        pushTargetIds.clear();
+        if (pushArmed) for (const id of currentPower!.pushTargets) pushTargetIds.add(id);
+        else hideHoverGlow();
+        setLabel();
+      });
+      movesEl.appendChild(btn);
     }
-  } else {
-    hideHoverGlow();
+    // Charged Shot: spends BOTH banked charges at once, so it's only offered
+    // at the full charge cap — distinct action/button from Push, offered
+    // alongside it (not instead of it) when both are available.
+    if (charges === CHARGE_CAP && currentPower.chargedShotTargets.length > 0) {
+      const btn = document.createElement("button");
+      const setLabel = () => {
+        btn.textContent = chargedShotArmed ? "Charged Shot: tap a target…" : `Charged Shot (${CHARGE_CAP}⚡)`;
+        btn.style.background = chargedShotArmed ? "#a06010" : "#c04fd0";
+      };
+      setLabel();
+      btn.addEventListener("click", () => {
+        chargedShotArmed = !chargedShotArmed;
+        chargedShotTargetIds.clear();
+        if (chargedShotArmed) for (const id of currentPower!.chargedShotTargets) chargedShotTargetIds.add(id);
+        else hideHoverGlow();
+        setLabel();
+      });
+      movesEl.appendChild(btn);
+    }
+  } else if (cls === "warrior") {
+    // Bulwark: unlike every other armed flow, the tap target is one of the
+    // MOVER'S OWN tokens — offered alongside Charge, not instead of it, so
+    // a Warrior with a spare charge can pick either each turn.
+    if (currentPower.bulwarkTargets.length > 0) {
+      const btn = document.createElement("button");
+      const setLabel = () => {
+        btn.textContent = bulwarkArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`;
+        btn.style.background = bulwarkArmed ? "#a06010" : "#6a4fb0";
+      };
+      setLabel();
+      btn.addEventListener("click", () => {
+        bulwarkArmed = !bulwarkArmed;
+        bulwarkTargetIds.clear();
+        if (bulwarkArmed) for (const id of currentPower!.bulwarkTargets) bulwarkTargetIds.add(id);
+        else hideHoverGlow();
+        setLabel();
+      });
+      movesEl.appendChild(btn);
+    }
+    if (currentPowerMoves) {
+      for (let i = 0; i < currentPowerMoves.length; i++) {
+        const m = currentPowerMoves[i];
+        if (!m.chargeAvailable) continue;
+        const btn = document.createElement("button");
+        btn.textContent = `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`;
+        btn.style.background = "#6a4fb0";
+        const moveIndex = i;
+        btn.addEventListener("click", () => {
+          sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
+        });
+        movesEl.appendChild(btn);
+      }
+    }
   }
-  powerRune.classList.toggle("armed", sweepArmed);
-});
+}
 
 movesEl.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("button");
@@ -1165,23 +1274,52 @@ canvas.addEventListener("pointerdown", (e) => {
       pushArmed = false;
       pushTargetIds.clear();
       hideHoverGlow();
-      powerRune.classList.remove("armed");
     }
     return;
   }
-  // Master Killer: Warrior's Charge is armed — tap which stone sweeps.
-  if (sweepArmed) {
-    const target = findTargetUnderPointer(sweepTargetIds, e.clientX, e.clientY);
+  // Master Killer: Charged Shot armed and waiting for a target tap — same
+  // enemy-target-tap flow as Push, just a different action kind + target set.
+  if (chargedShotArmed) {
+    const target = findTargetUnderPointer(chargedShotTargetIds, e.clientX, e.clientY);
     if (target !== null) {
-      const moveIndex = sweepMoveIndexByToken.get(target);
-      if (moveIndex !== undefined) {
-        sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
-      }
-      sweepArmed = false;
-      sweepTargetIds.clear();
-      sweepMoveIndexByToken.clear();
+      sendToServer({ type: "usePower", action: { kind: "chargedShot", targetTokenId: target } });
+      chargedShotArmed = false;
+      chargedShotTargetIds.clear();
       hideHoverGlow();
-      powerRune.classList.remove("armed");
+    }
+    return;
+  }
+  // Master Killer: Blink Strike / Warpath armed and waiting for a target tap.
+  if (blinkStrikeArmed) {
+    const target = findTargetUnderPointer(blinkStrikeTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      sendToServer({ type: "usePower", action: { kind: "blinkStrike", targetTokenId: target } });
+      blinkStrikeArmed = false;
+      blinkStrikeTargetIds.clear();
+      hideHoverGlow();
+    }
+    return;
+  }
+  if (warpathArmed) {
+    const target = findTargetUnderPointer(warpathTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      sendToServer({ type: "usePower", action: { kind: "warpath", targetTokenId: target } });
+      warpathArmed = false;
+      warpathTargetIds.clear();
+      hideHoverGlow();
+    }
+    return;
+  }
+  // Master Killer: Bulwark armed and waiting for a tap on one of the
+  // MOVER'S OWN tokens (bulwarkTargetIds already only lists those) — same
+  // raycast helper as every enemy-targeted flow above, just a different set.
+  if (bulwarkArmed) {
+    const target = findTargetUnderPointer(bulwarkTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId: target } });
+      bulwarkArmed = false;
+      bulwarkTargetIds.clear();
+      hideHoverGlow();
     }
     return;
   }
@@ -1256,15 +1394,25 @@ canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
   const pushable = pushArmed ? findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY) : null;
-  const sweepable = sweepArmed ? findTargetUnderPointer(sweepTargetIds, e.clientX, e.clientY) : null;
+  const chargedShotable = chargedShotArmed ? findTargetUnderPointer(chargedShotTargetIds, e.clientX, e.clientY) : null;
+  const blinkStrikeable = blinkStrikeArmed ? findTargetUnderPointer(blinkStrikeTargetIds, e.clientX, e.clientY) : null;
+  const warpathable = warpathArmed ? findTargetUnderPointer(warpathTargetIds, e.clientX, e.clientY) : null;
+  const bulwarkable = bulwarkArmed ? findTargetUnderPointer(bulwarkTargetIds, e.clientX, e.clientY) : null;
   const rollable =
     ((rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY)) ||
     (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY));
   canvas.style.cursor =
-    hit !== null || capturable !== null || pushable !== null || sweepable !== null || rollable
+    hit !== null ||
+    capturable !== null ||
+    pushable !== null ||
+    chargedShotable !== null ||
+    blinkStrikeable !== null ||
+    warpathable !== null ||
+    bulwarkable !== null ||
+    rollable
       ? "pointer"
       : "default";
-  const glowTarget = pushable !== null ? pushable : sweepable !== null ? sweepable : capturable;
+  const glowTarget = pushable ?? chargedShotable ?? blinkStrikeable ?? warpathable ?? bulwarkable ?? capturable;
   if (glowTarget !== null) {
     const m = markers[glowTarget];
     hoverGlow.position.set(m.target.x, m.target.y - 0.062, m.target.z);
@@ -1470,7 +1618,12 @@ function announceFromState(msg: {
   lastMove: Move | PowerMove | null;
   lastMovePlayer: PlayerId | null;
   lastPush?: { targetTokenId: number } | null;
+  lastChargedShot?: { targetTokenId: number } | null;
+  lastBulwark?: { tokenId: number } | null;
+  lastBulwarkBlock?: { tokenIds: number[] } | null;
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
+  lastRainOfArrows?: { targetTokenId: number | null } | null;
+  lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
   skipReason: "flip-zero" | "no-legal-move" | null;
@@ -1490,6 +1643,28 @@ function announceFromState(msg: {
     return;
   }
 
+  // Bulwark actually blocking a capture is its own signal, independent of
+  // lastMovePlayer (it fires the instant a fresh flip reveals the block —
+  // see master-killer.ts's tickBulwarkForNewTurn — which can be before the
+  // blocked player's opponent has even chosen a move this turn).
+  if (msg.lastBulwarkBlock && msg.lastBulwarkBlock.tokenIds.length > 0) {
+    const first = msg.state.tokens.find((t) => t.id === msg.lastBulwarkBlock!.tokenIds[0]);
+    const isMine = first?.owner === myRole;
+    const subject = isMine ? "Your" : "Their";
+    const plural = msg.lastBulwarkBlock.tokenIds.length > 1 ? "s" : "";
+    showAnnouncement(`${subject} Bulwark${plural} blocked a capture!`, "shield");
+    return;
+  }
+
+  if (msg.lastBulwark && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "your" : "their";
+    showAnnouncement(`${subject} raised Bulwark on ${target} token${chargeFor(msg.lastMovePlayer)}`, "shield");
+    return;
+  }
+
   if (msg.lastPush && msg.lastMovePlayer) {
     const who = playerLabel(msg.lastMovePlayer);
     const isMe = msg.lastMovePlayer === myRole;
@@ -1502,6 +1677,36 @@ function announceFromState(msg: {
     return;
   }
 
+  if (msg.lastChargedShot && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "opponent's" : "your";
+    const targetToken = msg.state.tokens.find((t) => t.id === msg.lastChargedShot!.targetTokenId);
+    const sentHome = !targetToken || targetToken.position === -1;
+    const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
+    showAnnouncement(
+      `${subject} loosed a Charged Shot — ${target} token knocked ${where}${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastUltimate && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "opponent's" : "your";
+    const label = msg.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
+    const sweptCount = msg.lastUltimate.sweptTokenIds.length;
+    const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
+    showAnnouncement(
+      `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}!${chargeFor(msg.lastMovePlayer)}`,
+      "ultimate",
+    );
+    return;
+  }
+
   const m = msg.lastMove;
   if (m && msg.lastMovePlayer) {
     const who = playerLabel(msg.lastMovePlayer);
@@ -1511,6 +1716,14 @@ function announceFromState(msg: {
 
     if (m.causesWin) {
       // Win screen will handle the celebration; don't double-announce.
+      return;
+    }
+    if (msg.lastRainOfArrows) {
+      const targetPhrase =
+        msg.lastRainOfArrows.targetTokenId != null
+          ? `strikes ${isMe ? "an opponent's" : "your"} token`
+          : "finds no target";
+      showAnnouncement(`${subject} chained 3 shields — Rain of Arrows ${targetPhrase}!${suffix}`, "ultimate");
       return;
     }
     if (m.landsOnShield) {
@@ -1632,16 +1845,20 @@ function connect() {
         currentPowerMoves = null;
         pushArmed = false;
         pushTargetIds.clear();
-        sweepArmed = false;
-        sweepTargetIds.clear();
-        sweepMoveIndexByToken.clear();
+        chargedShotArmed = false;
+        chargedShotTargetIds.clear();
+        blinkStrikeArmed = false;
+        blinkStrikeTargetIds.clear();
+        warpathArmed = false;
+        warpathTargetIds.clear();
+        bulwarkArmed = false;
+        bulwarkTargetIds.clear();
         pickedClasses = { p1: null, p2: null };
         updatePlates(null); // plates reappear at class pick / first state
         classpickEl.classList.remove("show");
         inCpuGame = msg.vsCpu;
         awaitingRejoin = false;
         saveSession({ room: msg.room, seat: msg.player, seatToken: msg.seatToken });
-        applyTokenGeometries(); // seat known — re-deal red/blue sculpts
         hideMenu();
         hud.textContent = inCpuGame
           ? "You are Red — vs Computer"
@@ -1720,9 +1937,14 @@ function connect() {
         updateTokenTints(msg.state);
         pushArmed = false;
         pushTargetIds.clear();
-        sweepArmed = false;
-        sweepTargetIds.clear();
-        sweepMoveIndexByToken.clear();
+        chargedShotArmed = false;
+        chargedShotTargetIds.clear();
+        blinkStrikeArmed = false;
+        blinkStrikeTargetIds.clear();
+        warpathArmed = false;
+        warpathTargetIds.clear();
+        bulwarkArmed = false;
+        bulwarkTargetIds.clear();
         // Avatar plates: portraits, gems, turn glow. The gem flash rides the
         // server's authoritative charge diff so it can't drift from the rules.
         updatePlates(msg.state);
@@ -1744,7 +1966,6 @@ function connect() {
             renderHud(msg.state, null);
             hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
             renderMoves(null, false);
-            renderPowerActions(false); // rune wakes when the roll is tapped
           } else {
             renderHud(msg.state, msg.flip);
             renderMoves(movesForTap, mine);
@@ -1885,9 +2106,14 @@ function resetToMenu(message: string) {
   currentPowerMoves = null;
   pushArmed = false;
   pushTargetIds.clear();
-  sweepArmed = false;
-  sweepTargetIds.clear();
-  sweepMoveIndexByToken.clear();
+  chargedShotArmed = false;
+  chargedShotTargetIds.clear();
+  blinkStrikeArmed = false;
+  blinkStrikeTargetIds.clear();
+  warpathArmed = false;
+  warpathTargetIds.clear();
+  bulwarkArmed = false;
+  bulwarkTargetIds.clear();
   pickedClasses = { p1: null, p2: null };
   myVariant = "classic";
   updatePlates(null);
@@ -2008,10 +2234,24 @@ const GUIDE_SPREADS: [string, string][] = [
        water back one pace. Land it on your own stone, or off the front of
        the board, and it is sent all the way home to their hand — and your
        charge comes right back, since that's really a capture.</li>
-       <li>Push can even reach a <span class="gold">Warded</span> Mage
-       stone, shoving it back <em>three</em> paces instead of one. Send it
-       all the way home and the Ward goes with it; a lesser shove still
-       costs it real ground while the Ward holds.</li>
+       <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
+       Push entirely — the charge is spent, but the stone doesn't move.
+       Reach for Charged Shot if you want to touch a Warded stone.</li>
+       <li><b>Charged Shot</b> (active, both charges at once): loose a
+       heavier shot at an enemy stone in shared water, knocking it back a
+       full ${CHARGED_SHOT_DISTANCE} paces — or ${CHARGED_SHOT_WARD_DISTANCE}
+       paces against a <span class="gold">Warded</span> stone, the one shot
+       that can still reach it at all. Send a target all the way home and
+       one charge comes right back; otherwise it's a costly shove. The
+       Archer's answer to a Warrior, who can never be Warded and so always
+       takes the full hit.</li>
+       <li><b>Rain of Arrows</b> (passive, free — the Archer's ultimate):
+       land on a shield tile three times in a row, with your turn never
+       once passing to the opponent in between, and that third landing
+       strikes down a random enemy stone anywhere in shared water — even
+       one standing on a shield, warded by a Mage, or sheltered by a
+       Warrior's Bulwark. Rare by design: only three shield tiles exist on
+       the whole board.</li>
      </ul>`,
   ],
   [
@@ -2019,26 +2259,42 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Ward</b> (passive, free): the moment your bank holds a full
        two charges, your furthest-along stone still on the water cannot be
-       captured — by anyone but a Warrior's Shieldbreaker, and a Push can
-       still knock it home.</li>
+       captured — by anyone but a Warrior's Ward Breaker, and a Charged
+       Shot can still knock it home. A plain Push can't budge it at all.</li>
        <li><b>Re-flip</b> (active, 1 charge): dislike your roll? Spend a
        charge to flip again instead of moving — once per turn, and it does
        not end your turn.</li>
        <li>Ward always follows whichever of your stones is furthest along —
        send that one all the way home and it passes to whichever stone
        takes the lead.</li>
+       <li><b>Blink Strike</b> (active, spends your ultimate): land on a
+       shield tile three times in a row, turn never once passing to the
+       opponent, and you may teleport your furthest-along stone straight
+       onto any enemy in shared water — capturing it even through a shield
+       or a Ward.</li>
      </ul>`,
     `<h2>The Warrior</h2>
      <ul>
-       <li><b>Shieldbreaker</b> (passive, free): walk onto a Warded enemy
+       <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
        stone and the Ward breaks — captured all the same, and your stone
        stands safe from capture until it next moves.</li>
        <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
        enemy stone in shared water between where you started and where you
-       land is captured too, Warded or not. Shieldbreaker means Warriors
+       land is captured too, Warded or not. Ward Breaker means Warriors
        cut through a Ward wherever they meet one, mid-sweep included.</li>
        <li>The Warrior is the one class no Ward can stop cold — everyone
        else needs a Push or a lucky Re-flip instead.</li>
+       <li><b>Warpath</b> (active, spends your ultimate): land on a shield
+       tile three times running, then teleport your least-advanced stone
+       onto any enemy in shared water — capturing it plus every unprotected
+       enemy stone caught between where it started and where it lands, no
+       cap, Warded or not. Break a Ward along the way and the landing stone
+       stands safe from capture until it next moves.</li>
+       <li><b>Bulwark</b> (active, 1 charge): raise a shield over one of
+       YOUR OWN stones — it cannot be captured, swept by Charge, or taken by
+       an enemy ultimate, and a Push can only shove it, never send it home.
+       It fades after a few of your turns unused, or the instant it actually
+       saves the stone, whichever comes first.</li>
      </ul>`,
   ],
 ];
