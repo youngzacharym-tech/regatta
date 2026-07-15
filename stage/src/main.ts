@@ -26,6 +26,7 @@ import { audio } from "./audio.ts";
 import {
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
+  CHARGED_SHOT_WARD_DISTANCE,
   isWarded,
   type PlayerClass,
   type PowerMove,
@@ -2133,18 +2134,17 @@ const GUIDE_SPREADS: [string, string][] = [
        water back one pace. Land it on your own stone, or off the front of
        the board, and it is sent all the way home to their hand — and your
        charge comes right back, since that's really a capture.</li>
-       <li>Push can even reach a <span class="gold">Warded</span> Mage
-       stone, shoving it back <em>three</em> paces instead of one. Send it
-       all the way home and the Ward goes with it; a lesser shove still
-       costs it real ground while the Ward holds.</li>
+       <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
+       Push entirely — the charge is spent, but the stone doesn't move.
+       Reach for Charged Shot if you want to touch a Warded stone.</li>
        <li><b>Charged Shot</b> (active, both charges at once): loose a
        heavier shot at an enemy stone in shared water, knocking it back a
-       full ${CHARGED_SHOT_DISTANCE} paces. A <span class="gold">Warded</span>
-       stone is immune to it entirely — Ward blocks Charged Shot outright, no
-       exception. Send an unwarded target all the way home and one charge
-       comes right back; otherwise it's a costly shove. The Archer's answer
-       to a Warrior, who can never be Warded and so never feels Push's bonus
-       reach.</li>
+       full ${CHARGED_SHOT_DISTANCE} paces — or ${CHARGED_SHOT_WARD_DISTANCE}
+       paces against a <span class="gold">Warded</span> stone, the one shot
+       that can still reach it at all. Send a target all the way home and
+       one charge comes right back; otherwise it's a costly shove. The
+       Archer's answer to a Warrior, who can never be Warded and so always
+       takes the full hit.</li>
        <li><b>Rain of Arrows</b> (passive, free — the Archer's ultimate):
        land on a shield tile three times in a row, with your turn never
        once passing to the opponent in between, and that third landing
@@ -2159,8 +2159,8 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Ward</b> (passive, free): the moment your bank holds a full
        two charges, your furthest-along stone still on the water cannot be
-       captured — by anyone but a Warrior's Ward Breaker, and a Push can
-       still knock it home.</li>
+       captured — by anyone but a Warrior's Ward Breaker, and a Charged
+       Shot can still knock it home. A plain Push can't budge it at all.</li>
        <li><b>Re-flip</b> (active, 1 charge): dislike your roll? Spend a
        charge to flip again instead of moving — once per turn, and it does
        not end your turn.</li>

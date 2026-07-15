@@ -13,6 +13,7 @@ import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState } from "./rulebook
 import {
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
+  CHARGED_SHOT_WARD_DISTANCE,
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
@@ -84,13 +85,30 @@ function scoreMove(state: GameState, m: PowerMove, extraCaptures: number[], rand
 function scorePush(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
   const warded = isWarded(state, power, target);
-  const rawTo = target.position - (warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE);
+  const distance = warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
+  const rawTo = target.position - distance;
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo,
   );
   const sendsHome = collides || rawTo < 0;
-  let score = (sendsHome ? 350 : 180) + target.position * 8;
-  if (warded) score += sendsHome ? 250 : 60;
+  let score: number;
+  if (sendsHome) {
+    score = 350 + target.position * 8;
+    if (warded) score += 250; // sending a Warded token home is still a big win — removes Ward from play entirely
+  } else {
+    // Soft-push baseline scales with the ACTUAL distance moved — 180 per
+    // tile, chosen so this reduces to the exact pre-existing formula for a
+    // normal (unwarded) push: PUSH_DISTANCE=1 -> 180*1=180, byte-for-byte
+    // unchanged from before this fix. This replaces the old flat "+60 if
+    // warded" bonus, which assumed a warded soft-push always repositions
+    // the target meaningfully; now that PUSH_WARD_DISTANCE can legitimately
+    // be 0 (a mechanical no-op against a Warded target — spends the charge,
+    // target doesn't move at all), the bonus must scale down to zero too,
+    // or the bot repeats the exact "flat bonus quietly out-competes a
+    // strictly-better plain move" bug already fixed once each for
+    // scoreBulwark and scoreChargedShot in this file.
+    score = 180 * distance + target.position * 8;
+  }
   score += rand() * 20;
   return score;
 }
@@ -110,9 +128,10 @@ function scorePush(state: GameState, power: PowerState, targetId: number, rand: 
  *  cheaper alternative. Only a real send-home — the one outcome a normal
  *  Push's shorter PUSH_DISTANCE often can't reach — clears the bar to beat
  *  an ordinary move or a Push. */
-function scoreChargedShot(state: GameState, targetId: number, rand: () => number): number {
+function scoreChargedShot(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
-  const rawTo = target.position - CHARGED_SHOT_DISTANCE;
+  const warded = isWarded(state, power, target);
+  const rawTo = target.position - (warded ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE);
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo,
   );
@@ -237,7 +256,7 @@ export function pickBotPowerAction(
 
   if (cls === "archer" && charges === CHARGE_CAP) {
     for (const targetId of getChargedShotTargets(state, power, mover)) {
-      const score = scoreChargedShot(state, targetId, rand);
+      const score = scoreChargedShot(state, power, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "chargedShot", targetTokenId: targetId };

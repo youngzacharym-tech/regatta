@@ -94,7 +94,14 @@ export const CHARGE_SWEEP_CAP = 1;
  *  independent buffs to the same defensive tool (Ward) just double-counts.
  *  Widening WARD_SCOPE further is NOT recommended without also reopening
  *  Charged Shot's own economy (cost/distance) to compensate — out of scope
- *  for this pass.) */
+ *  for this pass.)
+ *  (SUPERSEDED 2026-07-16: the "Charged Shot's own isWarded exclusion"
+ *  mechanism this entry describes as the kept fix no longer exists — Kasen's
+ *  requested strength ordering required Ward to become a legal-but-weaker
+ *  Charged Shot target instead of an illegal one. See
+ *  CHARGED_SHOT_WARD_DISTANCE's doc for the replacement mechanism and its
+ *  own, worse-than-this-baseline archer-vs-mage numbers. This whole entry is
+ *  kept as-is for the historical trace — WARD_SCOPE itself is untouched.) */
 export type WardScope = "all" | "most-advanced";
 export const WARD_SCOPE: WardScope = "most-advanced";
 
@@ -115,89 +122,100 @@ export const WARD_SCOPE: WardScope = "most-advanced";
 export const PUSH_WARD_COST = 1;
 
 /** How far a Push knocks back a WARDED target specifically — a normal push
- *  still uses PUSH_DISTANCE. PUSH_WARD_COST is already at its floor (1, same
- *  as a normal push), so this is the next lever: a bigger knockback doesn't
- *  touch Ward's actual promise (still fully uncapturable — Push never
- *  captures), it just makes the one thing Archer CAN do to a warded token
- *  hit harder. Scoped by construction to matchups against a Mage (isWarded
- *  is never true otherwise), so archer-mirror/archer-vs-warrior can't drift
- *  from this — see the isWarded branch in applyPush.
- *  (Tried 2: archer-vs-mage barely moved, 34.0/66.0 -> 35.8/64.2 — the
- *  contested zone is only 8 tiles, so a 2-tile shove rarely crosses back
- *  into the private lane. Tried 4: overshot to 55.1/44.9 (archer favored).
- *  Landed on 3: 46.6/53.4 on a 5000-game sample — now the TIGHTEST margin
- *  in the whole triangle (mage-vs-warrior, untouched by this change, is
- *  the widest at 19.2 and is the next open balance thread). Confirms the
- *  scoping claim too: archer-vs-warrior and archer-mirror held flat across
- *  every value tried, exactly as expected since isWarded can't be true
- *  without a Mage on the other side.)
- *  (Revisited post-CHARGED_SHOT_DISTANCE=4: that change flipped archer-vs-
- *  mage from mage-favored (48.7/51.3) to archer-favored (53.6-54.2/45.8-46.4
- *  depending on sample), raising the question of whether THIS constant's
- *  bonus had become partly redundant with Charged Shot's own unconditional
- *  knockback and could be dialed back down to compensate, without touching
- *  CHARGED_SHOT_DISTANCE or Mage's kit. Swept 2/1/0 at 2500 games/matchup
- *  (all 6 matchups, against the current CHARGED_SHOT_DISTANCE=4 baseline):
- *  archer-vs-mage moved monotonically AWAY from parity and overshot straight
- *  past it into mage-favored territory — 2: 44.7/55.3, 1: 31.4/68.6,
- *  0: 22.1/77.9 (recall baseline 3 is 54.2/45.8) — the opposite of the
- *  hoped-for effect at every step, and increasingly severe, not a gentle
- *  correction. Re-confirmed the two closest candidates at 6000 games: 3
- *  (baseline) held at 53.6/46.4 (7.2pt margin) while 2 landed at 42.8/57.2
- *  (14.4pt margin) — worse than baseline, not better. The other 5 matchups
- *  stayed flat across every value tried (e.g. archer-vs-warrior 49.8-51.2
- *  throughout), confirming PUSH_WARD_DISTANCE's effect really is scoped to
- *  archer-vs-mage as designed — it just turns out Charged Shot ISN'T a
- *  redundant second lever on top of this one; the two are complementary
- *  (Charged Shot covers Mage's 3 unwarded tokens, this covers the 1 warded
- *  one), and weakening this to compensate for Charged Shot overshoots hard
- *  because it simultaneously makes the warded token harder to touch at all.
- *  Hypothesis rejected. Kept at 3 — still the best of the four values tested
- *  post-Charged-Shot, same as it was pre-Charged-Shot. Narrowing archer-vs-
- *  mage's current ~53-54/46-47 archer-favored margin further would need a
- *  different lever than this one — WARD_SCOPE or Mage's kit directly, both
- *  out of scope for this pass.) */
-export const PUSH_WARD_DISTANCE = 3;
+ *  still uses PUSH_DISTANCE.
+ *
+ *  RESTRUCTURED 2026-07-16 at Kasen's request: he pointed out the 4
+ *  push/charged-shot x warded/unwarded combinations were landing in a
+ *  genre-inconsistent strength order — a plain (non-charged) Push against a
+ *  WARDED target was hitting harder (3 tiles) than the same Push against an
+ *  unwarded one (1 tile), i.e. "putting a shield up" was making the shot
+ *  STRONGER, backwards from every other game's convention (charged = harder,
+ *  shielded = softer). He asked for a strict order instead: push-vs-ward
+ *  (weakest) < push-vs-normal < charged-vs-ward < charged-vs-normal
+ *  (strongest) — see CHARGED_SHOT_WARD_DISTANCE for the new counterpart this
+ *  introduces.
+ *
+ *  This is NOT balance-neutral the way it was first pitched, despite "same
+ *  abilities, just reordered" framing — this exact value used to be Mage's
+ *  main defense against Push (tuned 2/3/4, landed on 3 specifically because
+ *  1-2 left Mage too exposed, see the old history this replaces in git
+ *  blame). Dropping it below PUSH_DISTANCE reopens that exposure. Deliberately
+ *  set to 0 rather than shading PUSH_DISTANCE upward to compensate: raising
+ *  PUSH_DISTANCE risks reopening the archer-mirror ~270-turn grind PUSH_DISTANCE=1
+ *  was originally chosen to prevent (see that constant's own doc), a totally
+ *  different failure mode than anything Ward-related. 0 keeps PUSH_DISTANCE
+ *  and CHARGED_SHOT_DISTANCE (both load-bearing for the archer-vs-warrior
+ *  fix, and PUSH_DISTANCE for archer-mirror's game length) completely
+ *  untouched, and confines the re-tune to the two new Ward-specific values —
+ *  both of which only ever apply against a Mage, so archer-vs-warrior and
+ *  archer-mirror are structurally unaffected no matter what these two land
+ *  on. A push that does 0 tiles is a real, if minimal, action: it still
+ *  spends the charge, still strips transient safety, still breaks the
+ *  mover's shield streak — same non-distance side effects Push always had —
+ *  it just can never itself send a Warded target home. See
+ *  batch-random-master-killer-games.ts output for the actual re-tuned
+ *  archer-vs-mage numbers under this restructuring. */
+export const PUSH_WARD_DISTANCE = 0;
 
 /** Archer's Charged Shot: spends BOTH banked charges at once (requires
- *  charges === CHARGE_CAP) for a flat, fixed knockback distance against ANY
- *  target — Warded or not, don't stack with PUSH_WARD_DISTANCE. A deliberately
- *  SEPARATE mechanic from Ward-piercing: Ward-piercing solves "how do I touch
- *  a Warded target at all," Charged Shot solves "how do I hit harder in
- *  general" — and is the tool meant to help archer-vs-warrior specifically,
- *  since Warriors are never Warded (PUSH_WARD_DISTANCE's bonus never applies
- *  there today). Refunds 1 charge on send-home, same mechanism as normal
- *  Push — net cost is -1 charges even on a hit (spend 2, refund 1), vs
- *  Push's spend-1/refund-1 = net 0.
- *  (Balance-sim swept 3/4/5 against the post-Bulwark baseline —
- *  archer-vs-warrior 44.6/55.4 warrior-favored, archer-vs-mage 48.7/51.3
- *  mage-favored, archer mirror 51.5/48.5 — holding the bot's scoreChargedShot
- *  heuristic fixed across all three (sendsHome-only scoring, see
- *  master-killer-bot.ts; chargedShot/g exactly equals chargedShotHome/g at
- *  every value tried, confirming the bot never fires a low-value partial
- *  shove). Tried 3: archer-vs-warrior only closed to 45.8/54.2 (still 8.4pts
- *  off), but archer-vs-mage landed almost exactly on parity (50.2/49.8).
- *  Tried 5: overshot both — archer-vs-warrior flipped to 52.4/47.6
- *  ARCHER-favored, and archer-vs-mage blew out to 57.0/43.0, a wider margin
- *  than the untouched baseline. Landed on 4: archer-vs-warrior closed to
- *  49.4/50.6 at 2500 games, confirmed 49.9/50.1 at 6000 — as close to exact
- *  parity as this project's balance sim has hit for any matchup — while
- *  archer-vs-mage moved to a modest 52-54/46-48 archer-favored (a real
- *  shift, flagged below, but still tighter than several OTHER matchups'
- *  historical margins in this file before their own tuning). archer mirror
- *  held flat at every value (48-51/49-52, within normal run-to-run noise),
- *  and the 3 matchups without an Archer (mage mirror, mage-vs-warrior,
- *  warrior mirror) stayed within ~1-2pts of baseline at every value, exactly
- *  as expected since Charged Shot is fully gated behind classes[x]==="archer".
- *  FLAGGED: archer-vs-mage moving from 48.7/51.3 to ~53-54/46-48 is a real,
- *  not-fully-offset side effect of strengthening Archer's kit — Charged Shot
- *  is just as effective at sending home a Mage's non-Warded (i.e.
- *  non-most-advanced) tokens as it is against a Warrior, and the balance sim
- *  doesn't currently have an independent lever to help Warrior specifically
- *  without also helping Archer generally. Left as-is rather than hand-tuned
- *  further, since narrowing it would mean re-opening WARD_SCOPE/PUSH_WARD_*
- *  (out of scope for this change) rather than CHARGED_SHOT_DISTANCE itself. */
+ *  charges === CHARGE_CAP) for a flat, fixed knockback distance against an
+ *  UNWARDED target. A deliberately SEPARATE mechanic from Ward-piercing:
+ *  Ward-piercing solves "how do I touch a Warded target at all," Charged
+ *  Shot solves "how do I hit harder in general" — and is the tool meant to
+ *  help archer-vs-warrior specifically, since Warriors are never Warded.
+ *  Refunds 1 charge on send-home, same mechanism as normal Push — net cost
+ *  is -1 charges even on a hit (spend 2, refund 1), vs Push's spend-1/
+ *  refund-1 = net 0.
+ *
+ *  Tuned to 4 specifically to fix archer-vs-warrior (5 failed attempts
+ *  across prior sessions before this value landed it at ~49.9/50.1 — see
+ *  git blame on this file for the full tuning trace). Since Warrior tokens
+ *  are never Warded, this value ALWAYS governs the archer-vs-warrior
+ *  matchup regardless of anything Ward-related — kept fixed at 4 through
+ *  the 2026-07-16 Ward-order restructuring for exactly that reason. Do not
+ *  retune this to fix an archer-vs-mage problem; use
+ *  CHARGED_SHOT_WARD_DISTANCE instead, which is scoped to Mage by
+ *  construction. */
 export const CHARGED_SHOT_DISTANCE = 4;
+
+/** How far a Charged Shot knocks back a WARDED target specifically — a
+ *  Charged Shot against an unwarded target still uses CHARGED_SHOT_DISTANCE.
+ *  New 2026-07-16, alongside PUSH_WARD_DISTANCE's restructuring (see that
+ *  constant's doc for the full context): Charged Shot used to treat a
+ *  Warded target as fully immune (excluded from getChargedShotTargets
+ *  entirely, no affordability escape hatch) — that exclusion was ITSELF
+ *  the prior session's fix for archer-vs-mage overshooting archer-favored.
+ *  Kasen's requested order needs Ward to be a legal-but-weaker target
+ *  instead of an illegal one, which structurally reopens that exact lever.
+ *  Scoped by construction to matchups against a Mage (isWarded is never
+ *  true otherwise), so archer-vs-warrior/archer-mirror can't drift from
+ *  this — see the isWarded branch in computeChargedShotLanding.
+ *
+ *  Must land strictly between PUSH_DISTANCE(1) and CHARGED_SHOT_DISTANCE(4)
+ *  to satisfy the requested order — since neither endpoint can move (both
+ *  load-bearing elsewhere, see their own docs), that leaves exactly two
+ *  candidate integers, both tried at 5000 games/matchup against the
+ *  PUSH_WARD_DISTANCE=0 baseline (after fixing a real scorePush bot bug
+ *  found along the way — see that function's own comment; the flat
+ *  "+60 if warded" bonus was tricking the bot into spending charges on a
+ *  push that PUSH_WARD_DISTANCE=0 makes a total no-op):
+ *  Tried 2: archer-vs-mage 20.5/79.5 — badly mage-favored.
+ *  Tried 3 (the ceiling): archer-vs-mage 38.0/62.0 — still badly
+ *  mage-favored, but the best available within the ordering constraint.
+ *  Neither comes close to the pre-restructuring baseline (53.6/46.4
+ *  archer-favored) — this is a structural cost of the reordering itself,
+ *  not a tuning miss: PUSH_WARD_DISTANCE used to be Archer's cheap,
+ *  frequent, spammable tool against Mage's warded token; forcing it to 0 to
+ *  satisfy "weakest" removes that entirely, and Charged Shot — gated behind
+ *  banking both charges — fires far less often (chargedShot/g ~1-2 per
+ *  player per game vs push/g ~10+ under the old design) so it can't fully
+ *  substitute. KEPT AT 3 (the best of the two options) as a deliberate
+ *  "ship now, re-open later" call — see project session notes for the plan
+ *  to revisit archer-vs-mage as its own thread. archer-vs-warrior (50.3/
+ *  49.7), archer mirror (50.3/49.7), mage mirror (50.5/49.5), and
+ *  mage-vs-warrior (50.6/49.4) all held completely flat through this whole
+ *  change, exactly as the scoping argument predicted. */
+export const CHARGED_SHOT_WARD_DISTANCE = 3;
 
 /** Ultimates: how many CONSECUTIVE shield-tile landings, within one unbroken
  *  turn-chain, it takes to earn a class's ultimate. Shared by all three
@@ -848,14 +866,18 @@ function computePushLanding(state: GameState, power: PowerState, target: TokenSt
   return computeKnockbackLanding(state, target, pushDistance(state, power, target));
 }
 
-/** Archer's Charged Shot: same idea as computePushLanding, but ALWAYS at the
- *  flat CHARGED_SHOT_DISTANCE, regardless of the target's Ward status — this
- *  is Charged Shot's own collision math, deliberately not reusing
- *  pushDistance()/PUSH_WARD_DISTANCE (see CHARGED_SHOT_DISTANCE's doc for
- *  why the two are separate mechanics that don't stack). Used by both
- *  getChargedShotTargets's Bulwark-aware filter and applyChargedShot. */
-function computeChargedShotLanding(state: GameState, target: TokenState): number {
-  return computeKnockbackLanding(state, target, CHARGED_SHOT_DISTANCE);
+/** Archer's Charged Shot: same idea as computePushLanding — CHARGED_SHOT_DISTANCE
+ *  against an unwarded target, CHARGED_SHOT_WARD_DISTANCE against a Warded
+ *  one (added 2026-07-16; previously flat regardless of Ward, back when a
+ *  Warded target was fully excluded from getChargedShotTargets instead — see
+ *  CHARGED_SHOT_WARD_DISTANCE's doc for why that changed). This is Charged
+ *  Shot's own collision math, deliberately not reusing pushDistance()'s
+ *  PUSH_DISTANCE/PUSH_WARD_DISTANCE values (the two abilities' Ward-tiers are
+ *  independently tunable, per Kasen's requested strict ordering). Used by
+ *  both getChargedShotTargets's Bulwark-aware filter and applyChargedShot. */
+function computeChargedShotLanding(state: GameState, power: PowerState, target: TokenState): number {
+  const distance = isWarded(state, power, target) ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE;
+  return computeKnockbackLanding(state, target, distance);
 }
 
 /** Archer's Push: valid targets are enemy tokens on a contested tile that
@@ -939,31 +961,30 @@ export function applyPush(
 
 /** Archer's Charged Shot: same target pool shape as Push (contested-zone
  *  enemy, shield-tile/transient-safety/Bulwark-vs-would-this-specific-shot-
- *  send-home protections all mirrored exactly), but with two deliberate
- *  differences from getPushTargets:
+ *  send-home protections all mirrored exactly), but with one deliberate
+ *  difference from getPushTargets:
  *
- *  1. No PUSH_WARD_COST affordability escape hatch — unlike Push, a Warded
- *     target is not reachable at ANY charge cost; it's simply excluded from
- *     the pool, full stop, same as a shield tile. (EXPERIMENTAL — see
- *     CHARGED_SHOT_DISTANCE's doc for the ORIGINAL design, which had ZERO
- *     isWarded filtering at all. Testing whether giving Ward real teeth
- *     against Charged Shot specifically — not just normal Push — fixes
- *     archer-vs-mage without the WARD_SCOPE="all" overshoot. See WARD_SCOPE's
- *     doc for the outcome.)
- *  2. Gated on `power.charges[mover] === CHARGE_CAP` right here in the pure
- *     target-getter, unlike getPushTargets/getBulwarkTargets (whose baseline
- *     "at least 1 charge" gate is dispatch-layer/UI-only). Charged Shot's
- *     affordability isn't per-target the way PUSH_WARD_COST is (some targets
- *     cost more than others) — it's a single uniform "has the mover banked
- *     the full cap at all" check, identical for every target, so baking it
- *     in here means the server dispatch, the bot, and the client's target
- *     highlights can never drift on it independently — an empty pool below
- *     the cap is the whole answer, everywhere this is called.
+ *  Gated on `power.charges[mover] === CHARGE_CAP` right here in the pure
+ *  target-getter, unlike getPushTargets/getBulwarkTargets (whose baseline
+ *  "at least 1 charge" gate is dispatch-layer/UI-only). Charged Shot's
+ *  affordability isn't per-target the way PUSH_WARD_COST is (some targets
+ *  cost more than others) — it's a single uniform "has the mover banked
+ *  the full cap at all" check, identical for every target, so baking it
+ *  in here means the server dispatch, the bot, and the client's target
+ *  highlights can never drift on it independently — an empty pool below
+ *  the cap is the whole answer, everywhere this is called.
+ *
+ *  A Warded token IS a legal target (changed 2026-07-16 — see
+ *  CHARGED_SHOT_WARD_DISTANCE's doc): previously excluded outright with no
+ *  affordability escape hatch, same as a shield tile. Now Ward only
+ *  determines WHICH distance applies (CHARGED_SHOT_WARD_DISTANCE vs
+ *  CHARGED_SHOT_DISTANCE, both handled inside computeChargedShotLanding),
+ *  not whether the shot is legal at all.
  *
  *  The Bulwark filter uses computeChargedShotLanding — THIS ability's own
  *  distance/collision math — not computePushLanding's, so a Bulwarked token
- *  is excluded here only if CHARGED_SHOT_DISTANCE specifically would send it
- *  home, independent of whether a normal Push would. */
+ *  is excluded here only if Charged Shot's OWN distance (Ward-aware) would
+ *  send it home, independent of whether a normal Push would. */
 export function getChargedShotTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] !== CHARGE_CAP) return [];
   const foe = otherPlayerId(mover);
@@ -971,8 +992,7 @@ export function getChargedShotTargets(state: GameState, power: PowerState, mover
     .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
     .filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t))
-    .filter((t) => !isWarded(state, power, t))
-    .filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, t) !== -1)
+    .filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1)
     .map((t) => t.id);
 }
 
@@ -992,7 +1012,7 @@ export function applyChargedShot(
   mover: PlayerId,
 ): { state: GameState; power: PowerState } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
-  const landing = computeChargedShotLanding(state, target);
+  const landing = computeChargedShotLanding(state, power, target);
   const sendsHome = landing === -1; // functionally a capture — refund below
 
   const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));

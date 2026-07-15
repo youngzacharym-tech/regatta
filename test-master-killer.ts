@@ -14,6 +14,7 @@ import {
   CHARGE_CAP,
   CHARGE_SWEEP_CAP,
   CHARGED_SHOT_DISTANCE,
+  CHARGED_SHOT_WARD_DISTANCE,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
@@ -1300,14 +1301,17 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Charged Shot: extraTurn flag is false after a partial shove", rPartial.state.extraTurn === false);
   }
 
-  // --- A Warded target is fully immune to Charged Shot — full stop, same as
-  //     a shield tile. (Changed from the original design, which deliberately
-  //     let Charged Shot bypass Ward entirely — see CHARGED_SHOT_DISTANCE's
-  //     and WARD_SCOPE's docs for why: that original design was found to be
-  //     the root cause of archer-vs-mage flipping archer-favored, since Ward
-  //     had zero teeth against Archer's hardest-hitting tool. Unlike Push,
-  //     there's no affordability escape hatch — no charge amount buys past
-  //     a Ward on a Charged Shot.) -----------------------------------------
+  // --- A Warded target is a LEGAL Charged Shot target, at
+  //     CHARGED_SHOT_WARD_DISTANCE instead of CHARGED_SHOT_DISTANCE. (Changed
+  //     2026-07-16 per Kasen's requested strength ordering — push-vs-ward <
+  //     push-vs-normal < charged-vs-ward < charged-vs-normal, see
+  //     PUSH_WARD_DISTANCE's doc for the full context. Previously a Warded
+  //     target was fully excluded from getChargedShotTargets, no
+  //     affordability escape hatch — that was ITSELF the prior session's fix
+  //     for archer-vs-mage overshooting archer-favored, so this reopens that
+  //     lever; CHARGED_SHOT_WARD_DISTANCE is the new dedicated re-tune knob
+  //     for it, scoped to Mage matchups by construction since isWarded is
+  //     never true otherwise.) ------------------------------------------
   {
     // p2 mage's only on-board token (id4) is trivially most-advanced -> warded.
     const posWard = 8;
@@ -1319,17 +1323,53 @@ function check(name: string, cond: boolean, detail?: string) {
     );
 
     check(
-      "Charged Shot: a Warded target is NOT a legal target — full immunity, no affordability escape hatch",
-      !getChargedShotTargets(sWard, pwWard, "p1").includes(4),
+      "Charged Shot: a Warded target IS a legal target (Ward changes distance, not legality)",
+      getChargedShotTargets(sWard, pwWard, "p1").includes(4),
     );
 
-    // Meanwhile, an UNwarded enemy (mage's charges below cap) is still a
-    // perfectly legal target — confirms the exclusion is isWarded-specific,
-    // not a blanket "no mage targets at all" regression.
+    const rWard = applyChargedShot(sWard, pwWard, 4, "p1");
+    const movedWard = rWard.state.tokens.find((t) => t.id === 4)!;
+    check(
+      "Charged Shot vs Ward: knocks back exactly CHARGED_SHOT_WARD_DISTANCE, not CHARGED_SHOT_DISTANCE",
+      movedWard.position === posWard - CHARGED_SHOT_WARD_DISTANCE,
+      `landed at ${movedWard.position}, expected ${posWard - CHARGED_SHOT_WARD_DISTANCE}`,
+    );
+
+    // Meanwhile, an UNwarded enemy (mage's charges below cap) still uses the
+    // unwarded, stronger distance — confirms the branch is isWarded-specific.
     const pwUnwarded = power({ p1: "archer", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP - 1 });
     check(
-      "Charged Shot: an unwarded enemy (charges below cap) is still a legal target",
+      "Charged Shot: an unwarded enemy (charges below cap) is a legal target",
       getChargedShotTargets(sWard, pwUnwarded, "p1").includes(4),
+    );
+    const rUnwarded = applyChargedShot(sWard, pwUnwarded, 4, "p1");
+    const movedUnwarded = rUnwarded.state.tokens.find((t) => t.id === 4)!;
+    check(
+      "Charged Shot vs an unwarded target: knocks back CHARGED_SHOT_DISTANCE, the stronger tier",
+      movedUnwarded.position === posWard - CHARGED_SHOT_DISTANCE,
+      `landed at ${movedUnwarded.position}, expected ${posWard - CHARGED_SHOT_DISTANCE}`,
+    );
+  }
+
+  // --- Kasen's requested strength ordering holds as a standing invariant:
+  //     push-vs-ward < push-vs-normal < charged-vs-ward < charged-vs-normal.
+  //     A cheap regression guard against ever silently drifting out of order
+  //     again while retuning any one of the four values. ------------------
+  {
+    check(
+      "Strength order: push-vs-ward < push-vs-normal",
+      PUSH_WARD_DISTANCE < PUSH_DISTANCE,
+      `PUSH_WARD_DISTANCE=${PUSH_WARD_DISTANCE}, PUSH_DISTANCE=${PUSH_DISTANCE}`,
+    );
+    check(
+      "Strength order: push-vs-normal < charged-vs-ward",
+      PUSH_DISTANCE < CHARGED_SHOT_WARD_DISTANCE,
+      `PUSH_DISTANCE=${PUSH_DISTANCE}, CHARGED_SHOT_WARD_DISTANCE=${CHARGED_SHOT_WARD_DISTANCE}`,
+    );
+    check(
+      "Strength order: charged-vs-ward < charged-vs-normal",
+      CHARGED_SHOT_WARD_DISTANCE < CHARGED_SHOT_DISTANCE,
+      `CHARGED_SHOT_WARD_DISTANCE=${CHARGED_SHOT_WARD_DISTANCE}, CHARGED_SHOT_DISTANCE=${CHARGED_SHOT_DISTANCE}`,
     );
   }
 
