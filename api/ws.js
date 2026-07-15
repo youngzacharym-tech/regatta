@@ -182,8 +182,9 @@ var PUSH_DISTANCE = 1;
 var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
 var PUSH_WARD_COST = 1;
-var PUSH_WARD_DISTANCE = 3;
+var PUSH_WARD_DISTANCE = 0;
 var CHARGED_SHOT_DISTANCE = 4;
+var CHARGED_SHOT_WARD_DISTANCE = 3;
 var ULTIMATE_STREAK = 3;
 var BULWARK_TURNS = 2;
 function initialPowerState() {
@@ -457,8 +458,9 @@ function computeKnockbackLanding(state, target, distance) {
 function computePushLanding(state, power, target) {
   return computeKnockbackLanding(state, target, pushDistance(state, power, target));
 }
-function computeChargedShotLanding(state, target) {
-  return computeKnockbackLanding(state, target, CHARGED_SHOT_DISTANCE);
+function computeChargedShotLanding(state, power, target) {
+  const distance = isWarded(state, power, target) ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE;
+  return computeKnockbackLanding(state, target, distance);
 }
 function getPushTargets(state, power, mover) {
   const foe = otherPlayerId(mover);
@@ -494,11 +496,11 @@ function applyPush(state, power, targetTokenId, mover) {
 function getChargedShotTargets(state, power, mover) {
   if (power.charges[mover] !== CHARGE_CAP) return [];
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isWarded(state, power, t)).filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, t) !== -1).map((t) => t.id);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1).map((t) => t.id);
 }
 function applyChargedShot(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
-  const landing = computeChargedShotLanding(state, target);
+  const landing = computeChargedShotLanding(state, power, target);
   const sendsHome = landing === -1;
   const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let safeTokens = power.safeTokens;
@@ -739,19 +741,26 @@ function scoreMove(state, m, extraCaptures, rand) {
 function scorePush(state, power, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
   const warded = isWarded(state, power, target);
-  const rawTo = target.position - (warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE);
+  const distance = warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
+  const rawTo = target.position - distance;
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
   );
   const sendsHome = collides || rawTo < 0;
-  let score = (sendsHome ? 350 : 180) + target.position * 8;
-  if (warded) score += sendsHome ? 250 : 60;
+  let score;
+  if (sendsHome) {
+    score = 350 + target.position * 8;
+    if (warded) score += 250;
+  } else {
+    score = 180 * distance + target.position * 8;
+  }
   score += rand() * 20;
   return score;
 }
-function scoreChargedShot(state, targetId, rand) {
+function scoreChargedShot(state, power, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
-  const rawTo = target.position - CHARGED_SHOT_DISTANCE;
+  const warded = isWarded(state, power, target);
+  const rawTo = target.position - (warded ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE);
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo
   );
@@ -807,7 +816,7 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
   }
   if (cls === "archer" && charges === CHARGE_CAP) {
     for (const targetId of getChargedShotTargets(state, power, mover)) {
-      const score = scoreChargedShot(state, targetId, rand);
+      const score = scoreChargedShot(state, power, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "chargedShot", targetTokenId: targetId };
