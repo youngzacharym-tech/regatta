@@ -8,7 +8,7 @@
 // turn, independently asks master-killer.ts what it would generate for the
 // exact same state+flip — using a frozen zero-charge Warrior-vs-Warrior
 // PowerState, which neutralizes every power (no charges means no wards to
-// break or trigger Shieldbreaker against; Warrior is the one class whose
+// break or trigger Ward Breaker against; Warrior is the one class whose
 // passive has zero effect without an active ward to interact with — Archer's
 // Snipe, by contrast, is free/charge-independent, so it's deliberately
 // excluded from this comparison and gets its own dedicated scenario tests
@@ -47,6 +47,10 @@ const NEUTRAL_POWER: PowerState = {
   // see test-master-killer.ts for the ultimate's dedicated scenario coverage.
   shieldStreak: { p1: 0, p2: 0 },
   ultimateReady: { p1: false, p2: false },
+  // Bulwark is Warrior-only and starts empty here too — getLegalPowerMoves
+  // never populates it (only applyBulwark does), so an empty map is the
+  // only value this fixture could ever need.
+  bulwarked: {},
 };
 
 function sharedFieldsMatch(a: Move, b: PowerMove): boolean {

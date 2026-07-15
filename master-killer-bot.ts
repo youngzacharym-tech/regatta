@@ -3,15 +3,19 @@
 //
 // Mirrors bot.ts's approach (ranked heuristic, small jitter) but scores
 // across ALL available actions this turn — a normal/power-boosted move,
-// Archer's Push, Mage's Re-flip, Warrior's Charge, or (once banked) Mage's
-// Blink Strike / Warrior's Warpath ultimate — and takes whichever scores
-// highest. Separate file from bot.ts so classic mode's bot (and anything
-// reading it, including Kasen's audit) stays untouched.
+// Archer's Push, Mage's Re-flip, Warrior's Charge or Bulwark, or (once
+// banked) Mage's Blink Strike / Warrior's Warpath ultimate — and takes
+// whichever scores highest. Separate file from bot.ts so classic mode's bot
+// (and anything reading it, including Kasen's audit) stays untouched.
 // ============================================================================
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState } from "./rulebook.ts";
 import {
+  CHARGE_CAP,
+  CHARGED_SHOT_DISTANCE,
   getBlinkStrikeTargets,
+  getBulwarkTargets,
+  getChargedShotTargets,
   getPushTargets,
   getWarpathTargets,
   isWarded,
@@ -91,6 +95,33 @@ function scorePush(state: GameState, power: PowerState, targetId: number, rand: 
   return score;
 }
 
+/** Score Archer's Charged Shot: spends BOTH banked charges (CHARGE_CAP) in
+ *  one shot, so — same bug class already hit twice this session (see
+ *  scoreBulwark's own history note, and the chargeSweepCaptures.length guard
+ *  above) — it must NOT get a flat "you can afford it" bonus, or the bot
+ *  burns the whole bank on marginal targets instead of ever letting a
+ *  cheaper Push or a real move fire. Mirrors scorePush's own shape exactly
+ *  (sendsHome bonus + target.position scaling, nothing else) rather than
+ *  inventing a new one, since that shape has already survived this exact
+ *  scrutiny — but a non-send-home shove scores far below Push's own 180
+ *  baseline (20 here, vs Push's 180), since spending the WHOLE bank for a
+ *  shove that leaves the target on the board is rarely worth it when a
+ *  1-charge Push (net 0 on a send-home) is usually sitting right there as a
+ *  cheaper alternative. Only a real send-home — the one outcome a normal
+ *  Push's shorter PUSH_DISTANCE often can't reach — clears the bar to beat
+ *  an ordinary move or a Push. */
+function scoreChargedShot(state: GameState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  const rawTo = target.position - CHARGED_SHOT_DISTANCE;
+  const collides = state.tokens.some(
+    (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo,
+  );
+  const sendsHome = collides || rawTo < 0;
+  let score = (sendsHome ? 420 : 20) + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+
 /** Score Mage's Blink Strike / Warrior's Warpath: both are a guaranteed hit
  *  that bypasses shield-tile protection and Ward outright — scored like a
  *  strong capture (same shape as scoreMove's capture bonus), plus a flat
@@ -101,6 +132,38 @@ function scorePush(state: GameState, power: PowerState, targetId: number, rand: 
 function scoreUltimateStrike(state: GameState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
   let score = 500 + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+
+/** Score Warrior's Bulwark: defensive insurance on the mover's most-advanced
+ *  un-Bulwarked on-board token, scaled by how far along it already is
+ *  (mirrors scorePush's own target.position scaling) so the bot naturally
+ *  favors protecting whichever token has the most invested.
+ *
+ *  Deliberately biased NEGATIVE at the low end (score starts at -35, not 0)
+ *  rather than just "modest but positive" — this is the fix for a real bug
+ *  found while tuning this exact function, worth recording since it's a new
+ *  instance of the file's established "flat bonus quietly out-competes a
+ *  strictly-better plain move" failure mode (see the chargeSweepCaptures.length
+ *  check above for the original case). Bulwark is essentially ALWAYS
+ *  evaluable for a Warrior with a spare charge (unlike Push, which needs a
+ *  specific enemy on a contested tile, or Reflip, which needs a bad flip) —
+ *  so ANY comfortably-positive flat score, even a small one, made the bot
+ *  cast it almost every eligible turn instead of advancing or Charging.
+ *  Balance-sim fallout was severe: archer-vs-warrior swung from the ~43.6/
+ *  56.4 warrior-favored baseline all the way to ~80/20 ARCHER-favored,
+ *  because a Warrior burning its charge income on defense instead of
+ *  Charge's actual capture-and-advance loop stops converting board control
+ *  into wins. The negative floor means Bulwark only wins against an
+ *  already-bad alternative (a quiet move into contested territory near an
+ *  enemy takes scoreMove's -80 "threatened" penalty, for example) or a
+ *  well-advanced token (position 12+ pulls the score back toward/above
+ *  zero) — occasional insurance on a valuable token when nothing better is
+ *  on offer, not a default action. */
+function scoreBulwark(state: GameState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  let score = -40 + target.position * 3;
   score += rand() * 20;
   return score;
 }
@@ -172,6 +235,16 @@ export function pickBotPowerAction(
     }
   }
 
+  if (cls === "archer" && charges === CHARGE_CAP) {
+    for (const targetId of getChargedShotTargets(state, power, mover)) {
+      const score = scoreChargedShot(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "chargedShot", targetTokenId: targetId };
+      }
+    }
+  }
+
   if (cls === "mage" && charges >= 1 && !power.reflipUsedThisTurn) {
     const score = scoreReflip(moves.length, flip, rand);
     if (score > bestScore) {
@@ -196,6 +269,16 @@ export function pickBotPowerAction(
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "warpath", targetTokenId: targetId };
+      }
+    }
+  }
+
+  if (cls === "warrior" && charges >= 1) {
+    for (const targetId of getBulwarkTargets(state, power, mover)) {
+      const score = scoreBulwark(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "bulwark", tokenId: targetId };
       }
     }
   }

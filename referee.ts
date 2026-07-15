@@ -41,18 +41,25 @@ import { pickBotMove } from "./bot.ts";
 // rooms (variant === "classic" guards every branch that touches it).
 import {
   applyBlinkStrike,
+  applyBulwark,
   applyCharge as mkApplyCharge,
+  applyChargedShot as mkApplyChargedShot,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
   applyWarpath,
   breakShieldStreak,
+  CHARGE_CAP,
   getBlinkStrikeTargets,
+  getBulwarkTargets,
+  getChargedShotTargets,
   getLegalPowerMoves,
   getPushTargets,
   getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
+  tickBulwarkForNewTurn,
+  tickBulwarkForReflip,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -131,6 +138,9 @@ class Match {
    *  we get here" slot, same lifecycle as lastMove (set by
    *  applyMasterKillerPush, cleared by clearAnnouncement). */
   lastPush: { targetTokenId: number } | null = null;
+  /** Archer's Charged Shot doesn't produce a Move-shaped lastMove either —
+   *  own "how did we get here" slot, same lifecycle as lastPush. */
+  lastChargedShot: { targetTokenId: number } | null = null;
   /** Net charge change for one player from whatever the broadcast is
    *  reporting — always a real before/after diff of this.mk.charges, never
    *  a re-derivation of "why", so it can't drift from the actual rules. */
@@ -148,6 +158,12 @@ class Match {
   /** Mage's Blink Strike or Warrior's Warpath — non-null exactly on the
    *  broadcast where one of those resolved. Same lifecycle as lastPush. */
   lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null = null;
+  /** Warrior's Bulwark was just CAST — same lifecycle as lastPush. */
+  lastBulwark: { tokenId: number } | null = null;
+  /** Bulwark actually BLOCKED one or more captures this broadcast — set by
+   *  tickBulwarkForNewTurn/tickBulwarkForReflip, independent of
+   *  lastMovePlayer (see protocol.ts's lastBulwarkBlock doc). */
+  lastBulwarkBlock: { tokenIds: number[] } | null = null;
 
   constructor(code: string, vsCpu: boolean, variant: "classic" | "masterKiller" = "classic") {
     this.code = code;
@@ -212,6 +228,13 @@ class Match {
             this.mk.classes[this.state.currentPlayer] === "archer"
               ? getPushTargets(this.state, this.mk, this.state.currentPlayer)
               : [],
+          // No charges===CHARGE_CAP check needed here — getChargedShotTargets
+          // self-gates on that now (see its doc comment), so the class check
+          // is the only thing this ternary needs, same shape as pushTargets.
+          chargedShotTargets:
+            this.mk.classes[this.state.currentPlayer] === "archer"
+              ? getChargedShotTargets(this.state, this.mk, this.state.currentPlayer)
+              : [],
           ultimateReady: { ...this.mk.ultimateReady },
           blinkStrikeTargets:
             this.mk.classes[this.state.currentPlayer] === "mage" && this.mk.ultimateReady[this.state.currentPlayer]
@@ -221,6 +244,11 @@ class Match {
             this.mk.classes[this.state.currentPlayer] === "warrior" && this.mk.ultimateReady[this.state.currentPlayer]
               ? getWarpathTargets(this.state, this.mk, this.state.currentPlayer)
               : [],
+          bulwarkTargets:
+            this.mk.classes[this.state.currentPlayer] === "warrior" && this.mk.charges[this.state.currentPlayer] >= 1
+              ? getBulwarkTargets(this.state, this.mk, this.state.currentPlayer)
+              : [],
+          bulwarkedTokenIds: Object.keys(this.mk.bulwarked).map(Number),
         }
       : undefined;
 
@@ -238,6 +266,9 @@ class Match {
         lastMove: this.lastMove,
         lastMovePlayer: this.lastMovePlayer,
         lastPush: this.lastPush,
+        lastChargedShot: this.lastChargedShot,
+        lastBulwark: this.lastBulwark,
+        lastBulwarkBlock: this.lastBulwarkBlock,
         lastChargeEvent: this.lastChargeEvent,
         lastRainOfArrows: this.lastRainOfArrows,
         lastUltimate: this.lastUltimate,
@@ -357,6 +388,9 @@ class Match {
     this.lastMove = null;
     this.lastMovePlayer = null;
     this.lastPush = null;
+    this.lastChargedShot = null;
+    this.lastBulwark = null;
+    this.lastBulwarkBlock = null;
     this.lastChargeEvent = null;
     this.lastRainOfArrows = null;
     this.lastUltimate = null;
@@ -397,6 +431,13 @@ class Match {
       }
       this.currentPowerMoves = getLegalPowerMoves(this.state, this.mk, this.currentFlip);
       this.currentLegalMoves = null;
+      // Warrior Bulwark: tick the mover's own countdown, and consume any
+      // Bulwark this exact flip's moves reveal as blocked for the opponent
+      // (announced on THIS broadcast, before the mover has even chosen an
+      // action — see tickBulwarkForNewTurn's doc comment).
+      const bulwarkResult = tickBulwarkForNewTurn(this.state, this.mk, this.currentFlip);
+      this.mk = bulwarkResult.power;
+      this.lastBulwarkBlock = bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null;
     } else {
       this.currentLegalMoves = getLegalMoves(this.state, this.currentFlip);
       this.currentPowerMoves = null;
@@ -486,7 +527,9 @@ class Match {
     if (!this.mk) return;
     this.lastMove = move; // PowerMove is a structural superset of Move
     this.lastMovePlayer = role;
+    this.lastBulwark = null;
     this.lastPush = null;
+    this.lastChargedShot = null;
     this.lastUltimate = null;
     const chargesBefore = this.mk.charges[role];
     const r = applyPowerMove(this.state, this.mk, move, role, Math.random);
@@ -513,7 +556,9 @@ class Match {
     if (!this.mk) return;
     this.lastMove = move;
     this.lastMovePlayer = role;
+    this.lastBulwark = null;
     this.lastPush = null;
+    this.lastChargedShot = null;
     this.lastUltimate = null;
     const chargesBefore = this.mk.charges[role];
     const r = mkApplyCharge(this.state, this.mk, move, role, Math.random);
@@ -535,7 +580,9 @@ class Match {
     if (!this.mk) return;
     this.lastMove = null;
     this.lastMovePlayer = role;
+    this.lastBulwark = null;
     this.lastPush = { targetTokenId };
+    this.lastChargedShot = null;
     this.lastRainOfArrows = null;
     this.lastUltimate = null;
     const chargesBefore = this.mk.charges[role];
@@ -550,11 +597,39 @@ class Match {
     this.advance();
   }
 
+  /** Archer's Charged Shot: spends both charges for a flat, fixed knockback
+   *  against any legal target (a Warded target is fully immune — see
+   *  getChargedShotTargets/applyChargedShot). Doesn't produce a Move-shaped
+   *  lastMove — its own "how did we get here" slot, same lifecycle as
+   *  lastPush. */
+  private applyMasterKillerChargedShot(role: PlayerId, targetTokenId: number): void {
+    if (!this.mk) return;
+    this.lastMove = null;
+    this.lastMovePlayer = role;
+    this.lastBulwark = null;
+    this.lastPush = null;
+    this.lastChargedShot = { targetTokenId };
+    this.lastRainOfArrows = null;
+    this.lastUltimate = null;
+    const chargesBefore = this.mk.charges[role];
+    const r = mkApplyChargedShot(this.state, this.mk, targetTokenId, role);
+    this.state = r.state;
+    this.mk = r.power;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(`[CHARGED SHOT] ${role} -> tok${targetTokenId}`);
+    this.advance();
+  }
+
   private applyMasterKillerBlinkStrike(role: PlayerId, targetTokenId: number): void {
     if (!this.mk) return;
     this.lastMove = null;
     this.lastMovePlayer = role;
+    this.lastBulwark = null;
     this.lastPush = null;
+    this.lastChargedShot = null;
     this.lastRainOfArrows = null;
     const chargesBefore = this.mk.charges[role];
     const r = applyBlinkStrike(this.state, this.mk, targetTokenId, role);
@@ -574,7 +649,9 @@ class Match {
     if (!this.mk) return;
     this.lastMove = null;
     this.lastMovePlayer = role;
+    this.lastBulwark = null;
     this.lastPush = null;
+    this.lastChargedShot = null;
     this.lastRainOfArrows = null;
     const chargesBefore = this.mk.charges[role];
     const r = applyWarpath(this.state, this.mk, targetTokenId, role);
@@ -587,6 +664,30 @@ class Match {
     this.currentFlip = null;
     this.currentPowerMoves = null;
     console.log(`[WARPATH] ${role} -> tok${targetTokenId} swept=${r.sweptTokenIds.length}`);
+    this.advance();
+  }
+
+  /** Warrior's Bulwark: flags one of the mover's own on-board tokens
+   *  Bulwarked (see applyBulwark). Doesn't produce a Move-shaped lastMove —
+   *  its own "how did we get here" slot, same lifecycle as lastPush. */
+  private applyMasterKillerBulwark(role: PlayerId, tokenId: number): void {
+    if (!this.mk) return;
+    this.lastMove = null;
+    this.lastMovePlayer = role;
+    this.lastPush = null;
+    this.lastChargedShot = null;
+    this.lastBulwark = { tokenId };
+    this.lastRainOfArrows = null;
+    this.lastUltimate = null;
+    const chargesBefore = this.mk.charges[role];
+    const r = applyBulwark(this.state, this.mk, tokenId, role);
+    this.state = r.state;
+    this.mk = r.power;
+    const chargeDelta = this.mk.charges[role] - chargesBefore;
+    this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
+    this.currentFlip = null;
+    this.currentPowerMoves = null;
+    console.log(`[BULWARK] ${role} -> tok${tokenId}`);
     this.advance();
   }
 
@@ -604,9 +705,17 @@ class Match {
     // spend and the possible grant, since only one lastChargeEvent exists
     // per broadcast.
     if (this.currentFlip === 0) this.mk = grantZeroFlipCharge(this.mk, role);
+    // Bulwark: this is a fresh flip within the SAME turn (not a new turn —
+    // no expiry tick, see tickBulwarkForReflip), but it can reveal a fresh
+    // block the original flip didn't.
+    const bulwarkResult = tickBulwarkForReflip(this.state, this.mk, this.currentFlip);
+    this.mk = bulwarkResult.power;
+    this.lastBulwarkBlock = bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null;
+    this.lastBulwark = null;
     const chargeDelta = this.mk.charges[role] - chargesBefore;
     this.lastMove = null;
     this.lastPush = null;
+    this.lastChargedShot = null;
     this.lastRainOfArrows = null;
     this.lastUltimate = null;
     this.lastChargeEvent = chargeDelta !== 0 ? { player: role, delta: chargeDelta } : null;
@@ -627,6 +736,9 @@ class Match {
       case "push":
         this.applyMasterKillerPush(role, action.targetTokenId);
         break;
+      case "chargedShot":
+        this.applyMasterKillerChargedShot(role, action.targetTokenId);
+        break;
       case "reflip":
         this.applyMasterKillerReflip(role);
         break;
@@ -635,6 +747,9 @@ class Match {
         break;
       case "warpath":
         this.applyMasterKillerWarpath(role, action.targetTokenId);
+        break;
+      case "bulwark":
+        this.applyMasterKillerBulwark(role, action.tokenId);
         break;
     }
   }
@@ -723,6 +838,18 @@ class Match {
       return;
     }
 
+    if (action.kind === "chargedShot") {
+      if (cls !== "archer") return this.send(role, { type: "error", message: "Only an Archer can Charged Shot" });
+      if (this.mk.charges[role] !== CHARGE_CAP) {
+        return this.send(role, { type: "error", message: "Charged Shot needs a full charge bank" });
+      }
+      if (!getChargedShotTargets(this.state, this.mk, role).includes(action.targetTokenId)) {
+        return this.send(role, { type: "error", message: "Invalid Charged Shot target" });
+      }
+      this.applyMasterKillerChargedShot(role, action.targetTokenId);
+      return;
+    }
+
     if (action.kind === "blinkStrike") {
       if (cls !== "mage") return this.send(role, { type: "error", message: "Only a Mage can Blink Strike" });
       if (!this.mk.ultimateReady[role]) return this.send(role, { type: "error", message: "Ultimate not ready" });
@@ -740,6 +867,16 @@ class Match {
         return this.send(role, { type: "error", message: "Invalid Warpath target" });
       }
       this.applyMasterKillerWarpath(role, action.targetTokenId);
+      return;
+    }
+
+    if (action.kind === "bulwark") {
+      if (cls !== "warrior") return this.send(role, { type: "error", message: "Only a Warrior can Bulwark" });
+      if (this.mk.charges[role] < 1) return this.send(role, { type: "error", message: "No charge available" });
+      if (!getBulwarkTargets(this.state, this.mk, role).includes(action.tokenId)) {
+        return this.send(role, { type: "error", message: "Invalid Bulwark target" });
+      }
+      this.applyMasterKillerBulwark(role, action.tokenId);
       return;
     }
 
