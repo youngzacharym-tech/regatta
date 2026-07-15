@@ -27,3 +27,6 @@ skills-lock.json
 # Pipeline outputs and local Blender scratch
 tools/out/
 myrmblender/
+
+# Playwright MCP screenshots (session artifacts)
+.playwright-mcp/

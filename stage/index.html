@@ -127,39 +127,129 @@
         80%, 100% { transform: rotate(90deg); }
       }
 
-      /* --- Mute toggle button + volume slider --- */
-      #mute-toggle {
-        position: fixed; bottom: 14px; right: 14px;
-        background: rgba(0, 0, 0, 0.6); color: #eee; border: none;
-        width: 64px; height: 64px; border-radius: 32px;
-        font-size: 30px; cursor: pointer;
+      /* --- Avatar plates (Hearthstone-style class frames) ---
+         Bottom-left: YOUR plate — portrait, charge gems on the frame, the
+         power rune, and the docked utility rail (guide / install / audio).
+         Top-right: the OPPONENT's plate — portrait + gems only.
+         Plates only .show in Master Killer rooms; the rail is always there. */
+      #plate-cluster {
+        position: fixed; left: 14px; bottom: 14px; z-index: 60;
       }
-      #mute-toggle:hover { background: rgba(0, 0, 0, 0.8); }
-      #volume {
-        position: fixed; bottom: 92px; right: 14px;
-        width: 64px; height: 140px;
-        writing-mode: vertical-lr; direction: rtl;
-        accent-color: #ffc98a; cursor: pointer;
+      .plate { display: none; }
+      .plate.show { display: block; }
+      .plate-ring {
+        position: relative;
+        width: 200px; height: 200px; border-radius: 50%;
+        background: radial-gradient(circle at 35% 30%, #4a3018, #241408 70%);
+        border: 3px solid #7a5c2e;
+        box-shadow:
+          0 0 0 2px rgba(0, 0, 0, 0.65),
+          0 6px 18px rgba(0, 0, 0, 0.6),
+          inset 0 0 12px rgba(0, 0, 0, 0.8);
       }
+      .plate-portrait {
+        position: absolute; inset: 3px;
+        width: calc(100% - 6px); height: calc(100% - 6px);
+        border-radius: 50%; object-fit: cover;
+        user-select: none; -webkit-user-drag: none;
+      }
+      .plate.turn .plate-ring { animation: turnPulse 2.2s ease-in-out infinite; }
+      @keyframes turnPulse {
+        0%, 100% { box-shadow: 0 0 10px 2px rgba(255, 211, 112, 0.35), 0 0 0 2px rgba(0,0,0,0.65), 0 6px 18px rgba(0,0,0,0.6); }
+        50%      { box-shadow: 0 0 24px 7px rgba(255, 211, 112, 0.75), 0 0 0 2px rgba(0,0,0,0.65), 0 6px 18px rgba(0,0,0,0.6); }
+      }
+      /* Class gem palettes — matched to each portrait's frame stones. */
+      .plate[data-class="archer"]  { --gem-color: #3ddc65; --gem-glow: rgba(61, 220, 101, 0.7); }
+      .plate[data-class="mage"]    { --gem-color: #b45cff; --gem-glow: rgba(180, 92, 255, 0.7); }
+      .plate[data-class="warrior"] { --gem-color: #3f83ff; --gem-glow: rgba(63, 131, 255, 0.7); }
+      .plate-gems {
+        position: absolute; bottom: -9px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 12px; z-index: 2;
+      }
+      .gem {
+        width: 23px; height: 23px; transform: rotate(45deg);
+        background: #17100a;
+        border: 2px solid #7a5c2e; border-radius: 3px;
+        box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.9);
+        transition: background 0.35s, box-shadow 0.35s;
+      }
+      .gem.lit {
+        background: radial-gradient(circle at 35% 30%, #fff8 0%, var(--gem-color) 45%, var(--gem-color) 100%);
+        box-shadow: 0 0 11px 3px var(--gem-glow), inset 0 0 4px rgba(255, 255, 255, 0.6);
+      }
+      .plate-gems.flare .gem.lit { animation: gemFlare 0.8s ease-out; }
+      @keyframes gemFlare {
+        0%   { box-shadow: 0 0 2px 0 var(--gem-glow); }
+        45%  { box-shadow: 0 0 26px 10px var(--gem-glow); }
+        100% { box-shadow: 0 0 11px 3px var(--gem-glow); }
+      }
+      .plate-gems.spend .gem { animation: gemSpend 0.6s ease-out; }
+      @keyframes gemSpend {
+        0%   { filter: brightness(2.4); }
+        100% { filter: brightness(1); }
+      }
+      /* Active-power rune — perched on the frame's top-right shoulder,
+         clear of the utility rail below it. */
+      .power-rune {
+        position: absolute; right: -10px; top: -10px;
+        width: 68px; height: 68px; border-radius: 50%;
+        background: radial-gradient(circle at 35% 30%, #5a3d1c, #2a1809);
+        border: 2px solid #7a5c2e; color: #ffd370;
+        font-size: 31px; line-height: 1; cursor: pointer; z-index: 3;
+      }
+      .power-rune:disabled { filter: brightness(0.62) saturate(0.55); cursor: default; }
+      .power-rune.ready { border-color: #ffd370; animation: runeReady 1.8s ease-in-out infinite; }
+      @keyframes runeReady {
+        0%, 100% { box-shadow: 0 0 6px 1px rgba(255, 211, 112, 0.4); }
+        50%      { box-shadow: 0 0 17px 6px rgba(255, 211, 112, 0.8); }
+      }
+      .power-rune.armed {
+        background: radial-gradient(circle at 35% 30%, #a06010, #5a3608);
+        border-color: #ffd370; color: #fff;
+      }
+      .plate-name {
+        margin-top: 17px; text-align: center;
+        font-size: 15px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase;
+        color: #e8d8c0; text-shadow: 0 1px 3px #000;
+      }
+      #plate-them { position: fixed; top: 54px; right: 14px; z-index: 60; }
+      #plate-them .plate-ring { width: 150px; height: 150px; }
 
-      /* --- Game guide booklet --- */
-      #guide-toggle {
-        position: fixed; bottom: 14px; right: 88px;
-        background: rgba(0, 0, 0, 0.6); border: none;
-        width: 64px; height: 64px; border-radius: 32px;
-        font-size: 28px; cursor: pointer;
+      /* --- Utility rail (guide / install / audio) — bottom-right corner --- */
+      #rail {
+        position: fixed; right: 14px; bottom: 14px; z-index: 60;
+        display: flex; flex-direction: column; gap: 8px;
       }
-      #guide-toggle:hover { background: rgba(0, 0, 0, 0.8); }
-
-      /* --- Install app corner button (shown only when installable) --- */
-      #install-toggle {
-        position: fixed; bottom: 14px; right: 162px;
-        background: rgba(0, 0, 0, 0.6); color: #ffc98a; border: none;
-        width: 64px; height: 64px; border-radius: 32px;
-        font-size: 26px; cursor: pointer; display: none;
+      #rail button {
+        width: 48px; height: 48px; border-radius: 24px;
+        background: rgba(20, 12, 6, 0.78); color: #e8d8c0;
+        border: 2px solid #7a5c2e;
+        font-size: 20px; line-height: 1; cursor: pointer;
       }
-      #install-toggle:hover { background: rgba(0, 0, 0, 0.85); }
+      #rail button:hover { background: rgba(46, 30, 14, 0.92); }
+      #install-toggle { display: none; color: #ffc98a; }
       #install-toggle.show { display: block; }
+      /* Volume slider pops out to the LEFT of the audio button. */
+      #volume {
+        position: absolute; right: 58px; bottom: 6px;
+        width: 140px; height: 36px;
+        padding: 0 14px; margin: 0;
+        background: rgba(20, 12, 6, 0.88);
+        border: 2px solid #7a5c2e; border-radius: 18px;
+        accent-color: #ffc98a; cursor: pointer;
+        display: none;
+      }
+      #rail.audio-open #volume { display: block; }
+
+      @media (max-width: 740px), (max-height: 480px) {
+        .plate-ring { width: 128px; height: 128px; }
+        #plate-them .plate-ring { width: 96px; height: 96px; }
+        .power-rune { width: 52px; height: 52px; right: -8px; top: -8px; font-size: 23px; }
+        .gem { width: 17px; height: 17px; }
+        #rail button { width: 42px; height: 42px; }
+        #volume { right: 52px; }
+        .plate-name { font-size: 12px; margin-top: 13px; }
+      }
       #guide-overlay {
         position: fixed; inset: 0; z-index: 150;
         background: rgba(8, 6, 4, 0.72);
@@ -350,18 +440,42 @@
       }
       #classpick h1 { font-size: 24px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
       #classpick .tagline { font-size: 12px; color: #8888a0; margin-bottom: 20px; min-height: 16px; }
+      #classpick .classes { display: flex; gap: 18px; justify-content: center; }
       #classpick button.class {
-        display: block; width: 100%;
-        background: #35506e; color: white; border: none;
-        padding: 12px 18px; border-radius: 8px; font-size: 15px;
-        font-weight: 600; cursor: pointer; margin-bottom: 10px;
-        text-align: left;
+        width: 158px;
+        background: transparent; color: #e8e8f0; border: none;
+        padding: 6px 4px 10px; border-radius: 12px;
+        font-size: 16px; font-weight: 600; cursor: pointer;
+        text-align: center;
       }
-      #classpick button.class:hover { background: #416085; }
-      #classpick button.class:disabled { opacity: 0.4; cursor: default; }
-      #classpick button.class.picked { background: #c73; }
+      #classpick button.class img {
+        display: block; width: 116px; height: 116px; margin: 0 auto 10px;
+        border-radius: 50%; border: 3px solid #7a5c2e;
+        box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.55);
+        transition: transform 0.15s ease-out, box-shadow 0.15s ease-out, border-color 0.15s;
+        -webkit-user-drag: none;
+      }
+      #classpick button.class:hover img {
+        transform: scale(1.06);
+        border-color: #c9a35c;
+        box-shadow: 0 0 14px 3px rgba(255, 201, 138, 0.35), 0 6px 16px rgba(0, 0, 0, 0.55);
+      }
+      #classpick button.class:disabled { opacity: 0.45; cursor: default; }
+      #classpick button.class:disabled:hover img { transform: none; }
+      #classpick button.class.picked { opacity: 1; }
+      #classpick button.class.picked img {
+        border-color: #ffd370;
+        box-shadow: 0 0 20px 5px rgba(255, 211, 112, 0.55), 0 6px 16px rgba(0, 0, 0, 0.55);
+      }
       #classpick button.class .class-desc {
-        display: block; font-size: 11px; font-weight: 400; opacity: 0.75; margin-top: 2px;
+        display: block; font-size: 11px; font-weight: 400; opacity: 0.75; margin-top: 4px; line-height: 1.4;
+      }
+      @media (max-height: 480px) {
+        #classpick .card { padding: 16px 22px; }
+        #classpick h1 { font-size: 19px; }
+        #classpick .tagline { margin-bottom: 10px; }
+        #classpick button.class { width: 128px; }
+        #classpick button.class img { width: 76px; height: 76px; margin-bottom: 6px; }
       }
 
       /* --- Menu's Master Killer mode toggle (additive) --- */
@@ -398,10 +512,29 @@
     <div id="hud">Connecting…</div>
     <div id="status">…</div>
     <div id="moves"></div>
-    <button id="mute-toggle" title="Toggle sound">🔊</button>
-    <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
-    <button id="guide-toggle" title="How to play">📖</button>
-    <button id="install-toggle" title="Install Regatta">⬇</button>
+    <div id="plate-cluster">
+      <div id="plate-me" class="plate">
+        <div class="plate-ring">
+          <img class="plate-portrait" id="portrait-me" alt="Your class" draggable="false" />
+          <div class="plate-gems" id="gems-me"></div>
+          <button class="power-rune" id="power-rune" title="Spend a charge" disabled></button>
+        </div>
+        <div class="plate-name" id="plate-name-me"></div>
+      </div>
+    </div>
+    <div id="rail">
+      <button id="guide-toggle" title="How to play">📖</button>
+      <button id="install-toggle" title="Install Regatta">⬇</button>
+      <button id="mute-toggle" title="Sound">🔊</button>
+      <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
+    </div>
+    <div id="plate-them" class="plate">
+      <div class="plate-ring">
+        <img class="plate-portrait" id="portrait-them" alt="Opponent's class" draggable="false" />
+        <div class="plate-gems" id="gems-them"></div>
+      </div>
+      <div class="plate-name" id="plate-name-them"></div>
+    </div>
     <div id="guide-overlay">
       <div id="guide-book">
         <button id="guide-close" title="Close">✕</button>
@@ -438,18 +571,23 @@
       <div class="card">
         <h1>MASTER KILLER</h1>
         <div class="tagline" id="classpick-status">Pick your class</div>
-        <button class="class" data-class="archer">
-          🏹 Archer
-          <span class="class-desc">Passive: snipe the tile ahead, free. Active (1⚡): Push — knock an enemy back.</span>
-        </button>
-        <button class="class" data-class="mage">
-          🔮 Mage
-          <span class="class-desc">Passive: Warded while at full charge. Active (1⚡): Re-flip your coins.</span>
-        </button>
-        <button class="class" data-class="warrior">
-          ⚔ Warrior
-          <span class="class-desc">Passive: Shieldbreaker walks through wards. Active (1⚡): Charge — sweep captures.</span>
-        </button>
+        <div class="classes">
+          <button class="class" data-class="archer">
+            <img src="/avatars/archer.webp" alt="Archer" draggable="false" />
+            <b>Archer</b>
+            <span class="class-desc">Snipe the tile ahead, free. Push (1⚡): knock an enemy back.</span>
+          </button>
+          <button class="class" data-class="mage">
+            <img src="/avatars/mage.webp" alt="Mage" draggable="false" />
+            <b>Mage</b>
+            <span class="class-desc">Warded at full charge. Re-flip (1⚡): flip your coins again.</span>
+          </button>
+          <button class="class" data-class="warrior">
+            <img src="/avatars/warrior.webp" alt="Warrior" draggable="false" />
+            <b>Warrior</b>
+            <span class="class-desc">Shieldbreaker pierces wards. Charge (1⚡): sweep captures.</span>
+          </button>
+        </div>
       </div>
     </div>
     <div id="room-info">

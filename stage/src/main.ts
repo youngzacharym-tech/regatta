@@ -858,6 +858,96 @@ let pushArmed = false;
 /** Push's targetable enemy tokens while pushArmed — lit the same way as
  *  capturableIds, via the shared hover-glow helper below. */
 const pushTargetIds = new Set<number>();
+/** True while a Warrior has tapped the rune and is waiting to tap which of
+ *  their own stones makes the Charge sweep. Mirrors the pushArmed flow. */
+let sweepArmed = false;
+const sweepTargetIds = new Set<number>();
+/** Token ID -> index into currentPowerMoves for its Charge-sweep move. */
+const sweepMoveIndexByToken = new Map<number, number>();
+/** Classes as known during the class-pick phase — lets the avatar plates
+ *  appear the moment a class is chosen, before the first state broadcast
+ *  (currentPower) carries the authoritative power info. */
+let pickedClasses: { p1: PlayerClass | null; p2: PlayerClass | null } = { p1: null, p2: null };
+
+// --- Avatar plates (Hearthstone-style class frames) ---
+// Bottom-left: my portrait + charge gems + power rune (+ the utility rail
+// docked beside it). Top-right: the opponent's portrait + gems. Both are
+// hidden outside Master Killer rooms; the rail is always on screen.
+const plateMe = document.getElementById("plate-me") as HTMLDivElement;
+const plateThem = document.getElementById("plate-them") as HTMLDivElement;
+const portraitMe = document.getElementById("portrait-me") as HTMLImageElement;
+const portraitThem = document.getElementById("portrait-them") as HTMLImageElement;
+const gemsMe = document.getElementById("gems-me") as HTMLDivElement;
+const gemsThem = document.getElementById("gems-them") as HTMLDivElement;
+const plateNameMe = document.getElementById("plate-name-me") as HTMLDivElement;
+const plateNameThem = document.getElementById("plate-name-them") as HTMLDivElement;
+const powerRune = document.getElementById("power-rune") as HTMLButtonElement;
+
+// One gem socket per bankable charge, built from the real tunable so a
+// CHARGE_CAP change reshapes the frames automatically.
+for (const container of [gemsMe, gemsThem]) {
+  for (let i = 0; i < CHARGE_CAP; i++) {
+    container.appendChild(Object.assign(document.createElement("span"), { className: "gem" }));
+  }
+}
+
+const RUNE_GLYPH: Record<PlayerClass, string> = { archer: "🏹", mage: "✨", warrior: "⚔" };
+const RUNE_TITLE: Record<PlayerClass, string> = {
+  archer: "Push (1⚡) — knock an enemy stone back",
+  mage: "Re-flip (1⚡) — flip your coins again",
+  warrior: "Charge (1⚡) — sweep a capture on the way",
+};
+
+function setGems(container: HTMLDivElement, lit: number) {
+  container.querySelectorAll(".gem").forEach((g, i) => g.classList.toggle("lit", i < lit));
+}
+
+/** Flash a plate's gems: "flare" on a charge gained, "spend" on one spent. */
+function flashGems(container: HTMLDivElement, kind: "flare" | "spend") {
+  container.classList.remove("flare", "spend");
+  void container.offsetWidth; // restart the CSS animation
+  container.classList.add(kind);
+  setTimeout(() => container.classList.remove(kind), 900);
+}
+
+/** Sync both avatar plates (portrait, gems, turn glow). Each plate appears
+ *  as soon as that side's class is KNOWN — during class pick that comes from
+ *  pickedClasses; once the match is underway, currentPower is authoritative.
+ *  Classic rooms take the hide branch — plates never appear there. */
+function updatePlates(state: GameState | null) {
+  const mySide: PlayerId = myRole ?? "p1";
+  const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
+  const mine = currentPower ? currentPower.classes[mySide] : pickedClasses[mySide];
+  const theirs = currentPower ? currentPower.classes[theirSide] : pickedClasses[theirSide];
+  if (myVariant !== "masterKiller" || (!mine && !theirs)) {
+    plateMe.classList.remove("show", "turn");
+    plateThem.classList.remove("show", "turn");
+    return;
+  }
+  const live = state !== null && state.winner === null;
+  if (mine) {
+    plateMe.dataset.class = mine;
+    const mySrc = `/avatars/${mine}.webp`;
+    if (!portraitMe.src.endsWith(mySrc)) portraitMe.src = mySrc;
+    plateNameMe.textContent = classLabel(mine);
+    setGems(gemsMe, currentPower ? currentPower.charges[mySide] : 0);
+    plateMe.classList.toggle("turn", live && state.currentPlayer === mySide);
+    plateMe.classList.add("show");
+  } else {
+    plateMe.classList.remove("show", "turn");
+  }
+  if (theirs) {
+    plateThem.dataset.class = theirs;
+    const theirSrc = `/avatars/${theirs}.webp`;
+    if (!portraitThem.src.endsWith(theirSrc)) portraitThem.src = theirSrc;
+    plateNameThem.textContent = classLabel(theirs);
+    setGems(gemsThem, currentPower ? currentPower.charges[theirSide] : 0);
+    plateThem.classList.toggle("turn", live && state.currentPlayer !== mySide);
+    plateThem.classList.add("show");
+  } else {
+    plateThem.classList.remove("show", "turn");
+  }
+}
 
 // --- Opening flip-off ---
 /** True while the match start waits for THIS player to tap their pile.
@@ -916,21 +1006,12 @@ function renderHud(state: GameState, flip: number | null) {
   const turnLabel = yours
     ? `<b style="color:#ffd370">Your turn</b>`
     : `<b>Opponent's turn</b>`;
-  let powerLine = "";
-  if (currentPower) {
-    const mySide: PlayerId = myRole ?? "p1";
-    const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
-    const cls = currentPower.classes[mySide];
-    const theirCls = currentPower.classes[theirSide];
-    const charges = currentPower.charges[mySide];
-    powerLine = `<div>Class: <b>${classLabel(cls)}</b> · Charges: <b>${charges}/${CHARGE_CAP}</b></div>
-      <div>Opponent: <b>${classLabel(theirCls)}</b></div>`;
-  }
+  // Class + charge info lives on the avatar plates now — the HUD keeps only
+  // what the plates don't show: whose turn, and the current flip.
   hud.innerHTML = `
     <div>You: <b>${myColor}</b></div>
     <div>${turnLabel}</div>
     <div>Flip: <b>${flip ?? "—"}</b></div>
-    ${powerLine}
     ${state.winner ? `<div style="color:#ffd700">${state.winner === myRole ? "You win!" : "Opponent wins"}</div>` : ""}
   `;
 }
@@ -958,56 +1039,66 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
   movesEl.innerHTML = "";
 }
 
-/** Master Killer only: append active-ability buttons to #moves (which
- *  renderMoves() just cleared). Normal moves stay tap-to-move, unchanged —
- *  this only adds the extra Push/Re-flip/Charge affordances a class needs. */
+/** Master Killer only: drive the plate's power rune. Disarms any pending
+ *  Push/Charge targeting, then lights the rune when the class's active is
+ *  actually usable this turn. Normal moves stay tap-to-move, unchanged. */
 function renderPowerActions(isMyTurn: boolean) {
   pushArmed = false;
   pushTargetIds.clear();
-  if (!isMyTurn || myVariant !== "masterKiller" || !currentPower) return;
+  sweepArmed = false;
+  sweepTargetIds.clear();
+  sweepMoveIndexByToken.clear();
+  powerRune.classList.remove("ready", "armed");
+  if (myVariant !== "masterKiller" || !currentPower) return;
+
   const mySide: PlayerId = myRole ?? "p1";
   const cls = currentPower.classes[mySide];
-  const charges = currentPower.charges[mySide];
-  if (charges < 1) return;
+  powerRune.textContent = RUNE_GLYPH[cls];
+  powerRune.title = RUNE_TITLE[cls];
+
+  let usable = isMyTurn && currentPower.charges[mySide] >= 1;
+  if (cls === "archer") {
+    usable = usable && currentPower.pushTargets.length > 0;
+  } else if (cls === "warrior") {
+    usable = usable && (currentPowerMoves?.some((m) => m.chargeAvailable) ?? false);
+  }
+  powerRune.disabled = !usable;
+  powerRune.classList.toggle("ready", usable);
+}
+
+powerRune.addEventListener("click", () => {
+  if (powerRune.disabled || !currentPower) return;
+  const mySide: PlayerId = myRole ?? "p1";
+  const cls = currentPower.classes[mySide];
 
   if (cls === "mage") {
-    const btn = document.createElement("button");
-    btn.textContent = `Re-flip (${charges}⚡)`;
-    btn.style.background = "#6a4fb0";
-    btn.addEventListener("click", () => {
-      sendToServer({ type: "usePower", action: { kind: "reflip" } });
-    });
-    movesEl.appendChild(btn);
-  } else if (cls === "archer" && currentPower.pushTargets.length > 0) {
-    const btn = document.createElement("button");
-    const setLabel = () => {
-      btn.textContent = pushArmed ? "Push: tap a target…" : `Push (${charges}⚡)`;
-      btn.style.background = pushArmed ? "#a06010" : "#6a4fb0";
-    };
-    setLabel();
-    btn.addEventListener("click", () => {
-      pushArmed = !pushArmed;
-      pushTargetIds.clear();
-      if (pushArmed) for (const id of currentPower!.pushTargets) pushTargetIds.add(id);
-      else hideHoverGlow();
-      setLabel();
-    });
-    movesEl.appendChild(btn);
-  } else if (cls === "warrior" && currentPowerMoves) {
-    for (let i = 0; i < currentPowerMoves.length; i++) {
-      const m = currentPowerMoves[i];
-      if (!m.chargeAvailable) continue;
-      const btn = document.createElement("button");
-      btn.textContent = `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`;
-      btn.style.background = "#6a4fb0";
-      const moveIndex = i;
-      btn.addEventListener("click", () => {
-        sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
-      });
-      movesEl.appendChild(btn);
-    }
+    // Fires immediately — no target to pick.
+    sendToServer({ type: "usePower", action: { kind: "reflip" } });
+    return;
   }
-}
+  if (cls === "archer") {
+    pushArmed = !pushArmed;
+    pushTargetIds.clear();
+    if (pushArmed) for (const id of currentPower.pushTargets) pushTargetIds.add(id);
+    else hideHoverGlow();
+    powerRune.classList.toggle("armed", pushArmed);
+    return;
+  }
+  // Warrior: arm the sweep, then the player taps WHICH stone charges.
+  sweepArmed = !sweepArmed;
+  sweepTargetIds.clear();
+  sweepMoveIndexByToken.clear();
+  if (sweepArmed && currentPowerMoves) {
+    for (let i = 0; i < currentPowerMoves.length; i++) {
+      if (!currentPowerMoves[i].chargeAvailable) continue;
+      sweepTargetIds.add(currentPowerMoves[i].tokenId);
+      sweepMoveIndexByToken.set(currentPowerMoves[i].tokenId, i);
+    }
+  } else {
+    hideHoverGlow();
+  }
+  powerRune.classList.toggle("armed", sweepArmed);
+});
 
 movesEl.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("button");
@@ -1074,6 +1165,23 @@ canvas.addEventListener("pointerdown", (e) => {
       pushArmed = false;
       pushTargetIds.clear();
       hideHoverGlow();
+      powerRune.classList.remove("armed");
+    }
+    return;
+  }
+  // Master Killer: Warrior's Charge is armed — tap which stone sweeps.
+  if (sweepArmed) {
+    const target = findTargetUnderPointer(sweepTargetIds, e.clientX, e.clientY);
+    if (target !== null) {
+      const moveIndex = sweepMoveIndexByToken.get(target);
+      if (moveIndex !== undefined) {
+        sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
+      }
+      sweepArmed = false;
+      sweepTargetIds.clear();
+      sweepMoveIndexByToken.clear();
+      hideHoverGlow();
+      powerRune.classList.remove("armed");
     }
     return;
   }
@@ -1148,11 +1256,15 @@ canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
   const pushable = pushArmed ? findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY) : null;
+  const sweepable = sweepArmed ? findTargetUnderPointer(sweepTargetIds, e.clientX, e.clientY) : null;
   const rollable =
     ((rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY)) ||
     (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY));
-  canvas.style.cursor = hit !== null || capturable !== null || pushable !== null || rollable ? "pointer" : "default";
-  const glowTarget = pushable !== null ? pushable : capturable;
+  canvas.style.cursor =
+    hit !== null || capturable !== null || pushable !== null || sweepable !== null || rollable
+      ? "pointer"
+      : "default";
+  const glowTarget = pushable !== null ? pushable : sweepable !== null ? sweepable : capturable;
   if (glowTarget !== null) {
     const m = markers[glowTarget];
     hoverGlow.position.set(m.target.x, m.target.y - 0.062, m.target.z);
@@ -1292,11 +1404,23 @@ if (isPhone()) {
   window.addEventListener("pointerdown", () => void enterAppMode(), { once: true });
 }
 
+// The audio button opens the volume popout; the icon tracks the level.
+// Dragging to zero is the mute — one control, no separate mute state.
+const railEl = document.getElementById("rail") as HTMLDivElement;
+function updateAudioIcon() {
+  const v = Number(volumeSlider.value);
+  muteToggle.textContent = v === 0 ? "🔇" : v < 40 ? "🔈" : "🔊";
+}
 muteToggle.addEventListener("click", () => {
-  const nowMuted = !audio.isMuted();
-  audio.setMuted(nowMuted);
-  muteToggle.textContent = nowMuted ? "🔇" : "🔊";
+  railEl.classList.toggle("audio-open");
 });
+volumeSlider.addEventListener("input", () => {
+  audio.setMuted(false); // any slider touch un-mutes; zero IS the mute
+  updateAudioIcon();
+});
+updateAudioIcon();
+// Tapping the board puts the popout away.
+canvas.addEventListener("pointerdown", () => railEl.classList.remove("audio-open"));
 
 // ---------------------------------------------------------------------------
 // Announcement banner
@@ -1508,6 +1632,11 @@ function connect() {
         currentPowerMoves = null;
         pushArmed = false;
         pushTargetIds.clear();
+        sweepArmed = false;
+        sweepTargetIds.clear();
+        sweepMoveIndexByToken.clear();
+        pickedClasses = { p1: null, p2: null };
+        updatePlates(null); // plates reappear at class pick / first state
         classpickEl.classList.remove("show");
         inCpuGame = msg.vsCpu;
         awaitingRejoin = false;
@@ -1519,8 +1648,15 @@ function connect() {
           : "You are Red. Waiting for opponent…";
         break;
       case "classPick":
+        // A class-pick phase means a fresh match — any lingering power info
+        // (rematch after a game over) is stale, so pickedClasses drives the
+        // plates until the first state broadcast takes over.
+        currentPower = null;
+        currentPowerMoves = null;
+        pickedClasses = { ...msg.classes };
         classpickEl.classList.add("show");
         renderClassPick(msg);
+        updatePlates(null);
         break;
       case "waiting":
         hud.textContent = msg.reason;
@@ -1584,6 +1720,16 @@ function connect() {
         updateTokenTints(msg.state);
         pushArmed = false;
         pushTargetIds.clear();
+        sweepArmed = false;
+        sweepTargetIds.clear();
+        sweepMoveIndexByToken.clear();
+        // Avatar plates: portraits, gems, turn glow. The gem flash rides the
+        // server's authoritative charge diff so it can't drift from the rules.
+        updatePlates(msg.state);
+        if (msg.lastChargeEvent) {
+          const container = viewSide(msg.lastChargeEvent.player) === "p1" ? gemsMe : gemsThem;
+          flashGems(container, msg.lastChargeEvent.delta > 0 ? "flare" : "spend");
+        }
         {
           const mine = msg.state.currentPlayer === (myRole ?? "p1");
           // PowerMove is a structural superset of Move, so it drops straight
@@ -1598,6 +1744,7 @@ function connect() {
             renderHud(msg.state, null);
             hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
             renderMoves(null, false);
+            renderPowerActions(false); // rune wakes when the roll is tapped
           } else {
             renderHud(msg.state, msg.flip);
             renderMoves(movesForTap, mine);
@@ -1738,7 +1885,12 @@ function resetToMenu(message: string) {
   currentPowerMoves = null;
   pushArmed = false;
   pushTargetIds.clear();
+  sweepArmed = false;
+  sweepTargetIds.clear();
+  sweepMoveIndexByToken.clear();
+  pickedClasses = { p1: null, p2: null };
   myVariant = "classic";
+  updatePlates(null);
   for (const marker of markers) {
     marker.mesh.visible = false;
     marker.flying = false;
