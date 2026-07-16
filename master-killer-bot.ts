@@ -9,8 +9,9 @@
 // (and anything reading it, including Kasen's audit) stays untouched.
 // ============================================================================
 
-import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState } from "./rulebook.ts";
+import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
@@ -187,6 +188,51 @@ function scoreBulwark(state: GameState, targetId: number, rand: () => number): n
   return score;
 }
 
+/** Is this own token actually in capture danger — on a contested, non-shield
+ *  tile with an enemy inside the 1-4 flip landing window behind it (the same
+ *  window scoreMove's own "threatened" penalty uses)? Bulwark's protection is
+ *  worth ~nothing off the contested row (private-lane tokens can't be
+ *  captured, Pushed, swept, or ultimate-struck at all), so a full-bank spend
+ *  that isn't answering a live threat is pure waste. This gate is
+ *  load-bearing, not a nicety: the first-round candidate scoring skipped it
+ *  and every second-charge Bulwark design tanked the Warrior (~-1 to -2.5pts
+ *  across its matchups at 30000 games) — the bot was burning the bank on
+ *  un-threatened and even un-capturable tokens while charge/g (the Charge
+ *  capture loop, the class's actual win engine) starved. With the gate, the
+ *  same ability design flipped to IMPROVING both Warrior matchups. */
+function bulwarkFacesThreat(state: GameState, target: { position: number; owner: PlayerId }): boolean {
+  if (target.position < 0 || target.position >= PATH_LENGTH_PER_PLAYER) return false;
+  const tile = BOARD_LAYOUT[target.position];
+  if (!tile.isContested || tile.type === "shield") return false;
+  return state.tokens.some(
+    (t) =>
+      t.owner !== target.owner &&
+      t.position >= 0 &&
+      target.position - t.position >= 1 &&
+      target.position - t.position <= 4,
+  );
+}
+
+/** Score Reinforced Bulwark — the 2-charge, full-bank Bulwark that lasts
+ *  and saves twice as long (see BULWARK_REINFORCED_TURNS). Requires a live
+ *  threat (see bulwarkFacesThreat), then the same negative floor as
+ *  scoreBulwark with steeper position scaling (5/tile vs 3) because doubled
+ *  durability is worth most on the token with the most invested — and
+ *  nothing else, so spending the whole bank still has to EARN its slot over
+ *  a plain move/Charge, the same discipline scoreChargedShot applies to
+ *  Archer's own full-bank spend. Scaling swept at 4/5/6 per tile, 30000
+ *  games each: 5 gave the best combined Warrior matchup distance-from-50
+ *  (aw 50.9-51.6/48.4-49.1, mw 54.7-55.0/45.0-45.3, fire rate 0.4-1.1/g);
+ *  4 under-used it (0.28-0.79/g, aw 48.1), 6 was flat-to-worse on aw
+ *  (48.4) for no mw gain beyond noise. */
+function scoreReinforcedBulwark(state: GameState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  if (!bulwarkFacesThreat(state, target)) return -Infinity;
+  let score = -40 + target.position * 5;
+  score += rand() * 20;
+  return score;
+}
+
 /** Score Re-flip: only worth it when the CURRENT flip is bad — zero, or a
  *  flip that produces no legal moves at all (about to be skipped anyway). */
 function scoreReflip(currentMoveCount: number, flip: number, rand: () => number): number {
@@ -264,7 +310,7 @@ export function pickBotPowerAction(
     }
   }
 
-  if (cls === "mage" && charges >= 1 && !power.reflipUsedThisTurn) {
+  if (cls === "mage" && canReflipAgain(power, mover)) {
     const score = scoreReflip(moves.length, flip, rand);
     if (score > bestScore) {
       bestScore = score;
@@ -293,11 +339,23 @@ export function pickBotPowerAction(
   }
 
   if (cls === "warrior" && charges >= 1) {
-    for (const targetId of getBulwarkTargets(state, power, mover)) {
+    const bulwarkTargets = getBulwarkTargets(state, power, mover);
+    for (const targetId of bulwarkTargets) {
       const score = scoreBulwark(state, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "bulwark", tokenId: targetId };
+      }
+    }
+    // Reinforced Bulwark: the full-bank cast, offered alongside the plain
+    // one — same target pool, its own threat-gated scoring.
+    if (charges === CHARGE_CAP) {
+      for (const targetId of bulwarkTargets) {
+        const score = scoreReinforcedBulwark(state, targetId, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "bulwark", tokenId: targetId, reinforced: true };
+        }
       }
     }
   }

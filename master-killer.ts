@@ -35,6 +35,34 @@ function otherPlayerId(p: PlayerId): PlayerId {
 /** Charges bank up to this many; further income while at the cap is a no-op. */
 export const CHARGE_CAP = 2;
 
+/** Mage's Re-flip: how many times per turn it can fire (each one still costs
+ *  1 charge, still doesn't end the turn). Was hard-capped at 1 via a boolean
+ *  (reflipUsedThisTurn); 2 gives the second banked charge a real Mage use —
+ *  a Mage holding both charges can re-flip twice in the same turn, at the
+ *  built-in price that spending below CHARGE_CAP drops Ward (isWarded gates
+ *  on the full bank), so double-re-flipping trades the class's whole passive
+ *  for one turn of dice control. That tension is deliberate — do not
+ *  compensate for it elsewhere. An explicit numeric cap (not just "while you
+ *  have charges") is REQUIRED, not stylistic: a re-flip that rolls a 0
+ *  grants the zero-flip charge right back (see applyMkReflip in
+ *  room-engine.ts), so an uncapped rule would let lucky zeros fund unbounded
+ *  re-flips inside a single turn. Kept aligned with CHARGE_CAP on purpose —
+ *  one re-flip per bankable charge.
+ *  (Balance-sim at 30000 games/matchup, this cap at 1 vs 2 with everything
+ *  else identical: a REAL Mage buff, not noise — mage-vs-warrior 52.0/48.0
+ *  -> 56.2/43.8 (+4.2pts, the big one: Ward Breaker pierces Ward anyway,
+ *  so against a Warrior the spend-below-cap tradeoff costs the Mage
+ *  nothing) and archer-vs-mage 38.8/61.2 -> 36.4/63.6 (+2.4pts, where
+ *  dropping Ward DOES bite, hence the smaller gain). Mirrors symmetric, no
+ *  archer/warrior-only matchup moved. Kept at 2 anyway — Kasen's requested
+ *  design, and the tension is the interesting part — with the compensation
+ *  handled on the WARRIOR side of the same change set: Reinforced Bulwark
+ *  (see BULWARK_REINFORCED_TURNS) pulled mage-vs-warrior back to
+ *  54.5-54.7/45.3-45.5 at 30000-60000 games. Archer-vs-mage remains the
+ *  known open thread it already was pre-change (see
+ *  CHARGED_SHOT_WARD_DISTANCE's ship-now-reopen-later note).) */
+export const REFLIPS_PER_TURN = 2;
+
 /** Archer's Push: how many tiles back along the TARGET's own path.
  *  (Was 2 — simulation showed Archer mirrors grinding to ~270 turns via a
  *  push-enables-snipe-grants-charge-fuels-more-push loop; 1 breaks the loop
@@ -263,6 +291,46 @@ export const ULTIMATE_STREAK = 3;
  *  conservative value is the healthiest one here, not the default 3. */
 export const BULWARK_TURNS = 2;
 
+/** Reinforced Bulwark — the Warrior's use for the SECOND banked charge:
+ *  spends the full bank (CHARGE_CAP) on one Bulwark with everything doubled
+ *  against the plain cast — 2x cost, 2x lifetime (this constant, vs
+ *  BULWARK_TURNS), 2x saves (BULWARK_REINFORCED_SAVES, vs a plain Bulwark's
+ *  implicit 1). This constant is the caster's-own-turns countdown before an
+ *  unconsumed Reinforced Bulwark expires.
+ *
+ *  CHOSEN BY SIMULATION over the other candidate, "twin Bulwark" (one
+ *  action Bulwarks two own tokens at once, 1 charge each), 30000
+ *  games/matchup per configuration against a same-day reference (Mage
+ *  double-Re-flip included, no Warrior second-charge use):
+ *  reference archer-vs-warrior 52.2/47.8, mage-vs-warrior 56.2/43.8.
+ *  - Twin, permissive bot scoring (fired 2.6-4.9/g): tanked the Warrior —
+ *    54.7/45.3 and 57.8/42.2 (-2.5/-1.6pts) — the bot file's known "charges
+ *    spent on defense starve Charge's capture loop" failure mode
+ *    (charge/g fell 3.35->2.95 and 2.84->2.48).
+ *  - Twin, threat-gated honest scoring: fired 0.01-0.07/g — two
+ *    simultaneously-threatened Bulwark-worthy tokens almost never exist, so
+ *    the ability is dead weight; matchups sat exactly at reference. Twin is
+ *    also design-redundant (two Bulwarks across two turns is ALREADY legal —
+ *    getBulwarkTargets never limited the map to one entry; same-turn casting
+ *    was its only value-add) and needs a novel two-tap targeting UI. Deleted.
+ *  - Reinforced, threat-gated scoring (shipped; fires a healthy 0.4-1.1/g):
+ *    improved BOTH Warrior matchups toward parity, confirmed at 60000
+ *    games/matchup: archer-vs-warrior 51.6/48.4 (+0.6), mage-vs-warrior
+ *    54.7/45.3 (+1.5, the biggest recovery available against the Mage
+ *    double-Re-flip buff), warrior mirror 49.7/50.3, and zero movement in
+ *    any non-Warrior matchup (Bulwark is fully warrior-gated).
+ *  Lifetime tried at 3 first (aw 51.9/48.1, mw 55.6/44.4 at 30000); 4
+ *  tested equal-or-better (aw 51.5/48.5, mw 55.6/44.4) and lands the clean
+ *  2xBULWARK_TURNS doubling story, so 4 it is. */
+export const BULWARK_REINFORCED_TURNS = 4;
+
+/** Reinforced Bulwark: how many capture-blocks it absorbs before fading —
+ *  a plain Bulwark is consumed by its first save; a reinforced one
+ *  survives it and fades on the second (see PowerState.bulwarkSaves /
+ *  consumeBulwarkBlocks). See BULWARK_REINFORCED_TURNS for the full
+ *  simulation trace that picked this design. */
+export const BULWARK_REINFORCED_SAVES = 2;
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -276,9 +344,11 @@ export interface PowerState {
   /** Token ids granted Warrior Ward Breaker's transient safety — cleared
    *  the moment that specific token next moves (its own, or captured). */
   safeTokens: Set<number>;
-  /** Guards Mage's Re-flip to once per turn. Reset whenever a fresh flip
+  /** How many Re-flips the Mage has fired THIS turn, 0..REFLIPS_PER_TURN
+   *  (was a once-per-turn boolean, reflipUsedThisTurn, before the second
+   *  banked charge earned a second re-flip). Reset whenever a fresh flip
    *  is dealt (a new turn, or after auto-skip). */
-  reflipUsedThisTurn: boolean;
+  reflipsUsedThisTurn: number;
   /** Consecutive shield-tile landings within one unbroken turn-chain, 0-2
    *  (fires/banks and resets to 0 the instant it would become
    *  ULTIMATE_STREAK). Shared by all three classes. Deliberately NOT reset
@@ -311,6 +381,14 @@ export interface PowerState {
    *  early the instant it actually blocks something for the opponent
    *  (getBulwarkBlockedIds/consumeBulwarkBlocks) — whichever comes first. */
   bulwarked: Record<number, number>;
+  /** Reinforced Bulwark bookkeeping: token id -> capture-blocks remaining
+   *  before the Bulwark fades. An entry exists ONLY for reinforced casts
+   *  (value starts at BULWARK_REINFORCED_SAVES); a plain Bulwark has no
+   *  entry here and is consumed by its first block, exactly as before —
+   *  consumeBulwarkBlocks treats a missing entry as 1. Cleared alongside
+   *  its bulwarked entry everywhere that clears one (expiry, final block,
+   *  Rain of Arrows capture). */
+  bulwarkSaves: Record<number, number>;
 }
 
 /** Superset of rulebook.Move — same fields, plus power-derived ones. */
@@ -345,7 +423,15 @@ export type PowerAction =
   | { kind: "charge"; move: PowerMove }
   | { kind: "blinkStrike"; targetTokenId: number }
   | { kind: "warpath"; targetTokenId: number }
-  | { kind: "bulwark"; tokenId: number };
+  | {
+      kind: "bulwark";
+      tokenId: number;
+      /** Reinforced Bulwark: spend the FULL bank (CHARGE_CAP) on one
+       *  Bulwark with doubled lifetime and saves — see
+       *  BULWARK_REINFORCED_TURNS. Optional and additive: absent/false is
+       *  the plain 1-charge cast, unchanged. */
+      reinforced?: boolean;
+    };
 
 // ============================================================================
 // STATE
@@ -356,16 +442,26 @@ export function initialPowerState(): PowerState {
     classes: { p1: "archer", p2: "archer" }, // placeholder until picked
     charges: { p1: 0, p2: 0 },
     safeTokens: new Set(),
-    reflipUsedThisTurn: false,
+    reflipsUsedThisTurn: 0,
     shieldStreak: { p1: 0, p2: 0 },
     ultimateReady: { p1: false, p2: false },
     bulwarked: {},
+    bulwarkSaves: {},
   };
 }
 
 /** Called once each turn a fresh flip is dealt (new turn or post-skip). */
 export function resetTurnFlags(power: PowerState): PowerState {
-  return { ...power, reflipUsedThisTurn: false };
+  return { ...power, reflipsUsedThisTurn: 0 };
+}
+
+/** THE Re-flip legality gate, shared by the server's validation, the bot,
+ *  and the client's button so the three can never drift: another Re-flip is
+ *  legal while the Mage still holds a charge AND hasn't hit the per-turn
+ *  cap. (Class gating stays at the call sites — this answers "may THIS
+ *  mage re-flip again," not "is this player a mage.") */
+export function canReflipAgain(power: PowerState, mover: PlayerId): boolean {
+  return power.charges[mover] >= 1 && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
 }
 
 /** On-board only (0 <= position < PATH_LENGTH_PER_PLAYER) — escaped tokens
@@ -755,12 +851,17 @@ function resolveTurn(
   // stale bulwarked[id] entry survives the trip to reserve and grants free,
   // un-recast protection the instant that token re-enters the board later.
   let bulwarked = power.bulwarked;
+  let bulwarkSaves = power.bulwarkSaves;
   if (finalCaptures.some((id) => bulwarked[id] !== undefined)) {
     bulwarked = { ...bulwarked };
-    for (const id of finalCaptures) delete bulwarked[id];
+    bulwarkSaves = { ...bulwarkSaves };
+    for (const id of finalCaptures) {
+      delete bulwarked[id];
+      delete bulwarkSaves[id]; // reinforced or not, a reserve trip clears it all
+    }
   }
 
-  let nextPower: PowerState = { ...power, safeTokens, bulwarked };
+  let nextPower: PowerState = { ...power, safeTokens, bulwarked, bulwarkSaves };
   if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
@@ -1040,12 +1141,13 @@ export function applyChargedShot(
 
 /** Mage's Re-flip: spends a charge, does NOT end the turn — the caller
  *  re-rolls with flipCoins() and recomputes legal moves against the same
- *  (unmoved) GameState. Guarded to once per turn by reflipUsedThisTurn. */
+ *  (unmoved) GameState. Guarded to REFLIPS_PER_TURN per turn by
+ *  reflipsUsedThisTurn (see canReflipAgain — the shared legality gate). */
 export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
   return {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
-    reflipUsedThisTurn: true,
+    reflipsUsedThisTurn: power.reflipsUsedThisTurn + 1,
   };
 }
 
@@ -1242,17 +1344,37 @@ export function getBulwarkTargets(state: GameState, power: PowerState, mover: Pl
  *  first. No board movement at all — never lands the mover on a shield, so
  *  (like Push) it always breaks any live shield streak and always ends the
  *  turn, no extra-turn interaction. Doesn't grant a charge back — it
- *  doesn't capture anything itself. */
+ *  doesn't capture anything itself.
+ *
+ *  REINFORCED (the second-charge cast, chosen by simulation — see
+ *  BULWARK_REINFORCED_TURNS): `reinforced` spends the full bank
+ *  (CHARGE_CAP) on one Bulwark that lasts BULWARK_REINFORCED_TURNS of the
+ *  caster's own turns and absorbs BULWARK_REINFORCED_SAVES blocks before
+ *  fading — everything about the plain cast, doubled. Like every other
+ *  pure apply* here, this doesn't self-guard on affordability; the caller
+ *  (validateUsePower / the bot's charges gate) already verified it. */
 export function applyBulwark(
   state: GameState,
   power: PowerState,
   targetTokenId: number,
   mover: PlayerId,
+  reinforced = false,
 ): { state: GameState; power: PowerState } {
+  const bulwarked = { ...power.bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
+  let cost = 1;
+  if (reinforced) {
+    cost = CHARGE_CAP;
+    bulwarked[targetTokenId] = BULWARK_REINFORCED_TURNS;
+    bulwarkSaves[targetTokenId] = BULWARK_REINFORCED_SAVES;
+  } else {
+    bulwarked[targetTokenId] = BULWARK_TURNS;
+  }
   const spent: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
-    bulwarked: { ...power.bulwarked, [targetTokenId]: BULWARK_TURNS },
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
+    bulwarked,
+    bulwarkSaves,
   };
   const broken = breakShieldStreak(spent, mover); // Bulwark never lands the mover on a shield
   const nextState: GameState = {
@@ -1278,12 +1400,17 @@ export function tickBulwarkExpiry(state: GameState, power: PowerState, mover: Pl
     .filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
   if (mine.length === 0) return power;
   const bulwarked = { ...power.bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
   for (const id of mine) {
     const remaining = bulwarked[id] - 1;
-    if (remaining <= 0) delete bulwarked[id];
-    else bulwarked[id] = remaining;
+    if (remaining <= 0) {
+      delete bulwarked[id];
+      delete bulwarkSaves[id]; // an expiring reinforced Bulwark takes its unused save with it
+    } else {
+      bulwarked[id] = remaining;
+    }
   }
-  return { ...power, bulwarked };
+  return { ...power, bulwarked, bulwarkSaves };
 }
 
 /** Ids of the CURRENT mover's opponent's Bulwarked tokens that Bulwark
@@ -1352,13 +1479,25 @@ export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: 
   return [...blocked];
 }
 
-/** Clears Bulwark on every token id that just did its job — see
- *  getBulwarkBlockedIds. No-op (same reference back) if nothing blocked. */
+/** Consumes Bulwark on every token id that just did its job — see
+ *  getBulwarkBlockedIds. A plain Bulwark (no bulwarkSaves entry — treated
+ *  as 1 block) is cleared outright, exactly as before; a REINFORCED one
+ *  spends a save instead and stays up until its last save is gone. No-op
+ *  (same reference back) if nothing blocked. */
 export function consumeBulwarkBlocks(power: PowerState, blockedIds: number[]): PowerState {
   if (blockedIds.length === 0) return power;
   const bulwarked = { ...power.bulwarked };
-  for (const id of blockedIds) delete bulwarked[id];
-  return { ...power, bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
+  for (const id of blockedIds) {
+    const saves = bulwarkSaves[id] ?? 1;
+    if (saves > 1) {
+      bulwarkSaves[id] = saves - 1; // survives this save — the reinforcement's whole point
+    } else {
+      delete bulwarked[id];
+      delete bulwarkSaves[id];
+    }
+  }
+  return { ...power, bulwarked, bulwarkSaves };
 }
 
 /** Bulwark bookkeeping for the START of a brand-new turn (a fresh flip

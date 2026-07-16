@@ -10,6 +10,8 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
 import {
+  BULWARK_REINFORCED_SAVES,
+  BULWARK_REINFORCED_TURNS,
   BULWARK_TURNS,
   CHARGE_CAP,
   CHARGE_SWEEP_CAP,
@@ -18,6 +20,7 @@ import {
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
+  REFLIPS_PER_TURN,
   ULTIMATE_STREAK,
   applyBlinkStrike,
   applyBulwark,
@@ -28,6 +31,7 @@ import {
   applyReflip,
   applyWarpath,
   breakShieldStreak,
+  canReflipAgain,
   consumeBulwarkBlocks,
   getBlinkStrikeTargets,
   getBulwarkBlockedIds,
@@ -39,6 +43,7 @@ import {
   getWarpathTargets,
   initialPowerState,
   isWarded,
+  resetTurnFlags,
   tickBulwarkExpiry,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
@@ -197,14 +202,55 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Re-flip: spends exactly one charge and flags itself used-this-turn
+// 4. Re-flip: spends exactly one charge per use, counts uses, and is capped
+//    at REFLIPS_PER_TURN per turn (see canReflipAgain — the shared gate the
+//    server's validation, the bot, and the client button all consult)
 // ---------------------------------------------------------------------------
 {
   const pw = power({ p1: "mage" }, { p1: CHARGE_CAP });
   const after = applyReflip(pw, "p1");
   check("Re-flip: spends exactly one charge", after.charges.p1 === CHARGE_CAP - 1);
-  check("Re-flip: sets the once-per-turn flag", after.reflipUsedThisTurn === true);
+  check("Re-flip: increments the per-turn use counter", after.reflipsUsedThisTurn === 1);
   check("Re-flip: does not touch the other player's charges", after.charges.p2 === pw.charges.p2);
+
+  // Second re-flip in the same turn: legal while a second charge is banked.
+  check("Re-flip: a SECOND re-flip is offered with a charge still banked", canReflipAgain(after, "p1"));
+  const afterSecond = applyReflip(after, "p1");
+  check("Re-flip: the second re-flip spends the second charge", afterSecond.charges.p1 === CHARGE_CAP - 2);
+  check("Re-flip: the second re-flip counts too", afterSecond.reflipsUsedThisTurn === 2);
+
+  // Ward tension: spending below the full bank drops Ward that instant —
+  // the whole built-in cost of double-re-flipping (isWarded gates on
+  // charges === CHARGE_CAP). Checked here, next to the ability that pays it.
+  const sWard = state("p1", { 0: 5, 4: 8 });
+  const pwMageFull = power({ p2: "mage" }, { p2: CHARGE_CAP });
+  check(
+    "Re-flip: sanity — Mage's most-advanced token is warded at the full bank",
+    isWarded(sWard, pwMageFull, sWard.tokens.find((t) => t.id === 4)!),
+  );
+  const pwMageSpent = applyReflip(pwMageFull, "p2");
+  check(
+    "Re-flip: spending below the full bank drops Ward (the double-re-flip tradeoff)",
+    !isWarded(sWard, pwMageSpent, sWard.tokens.find((t) => t.id === 4)!),
+  );
+
+  // Denied with no charge left: one banked charge, one re-flip, done.
+  const pwOne = power({ p1: "mage" }, { p1: 1 });
+  const afterOne = applyReflip(pwOne, "p1");
+  check("Re-flip: denied a second use when the bank is empty (1 spent, 0 left)", !canReflipAgain(afterOne, "p1"));
+
+  // Denied a third time even with a charge available: the REFLIPS_PER_TURN
+  // cap is a hard per-turn ceiling, not a charge-affordability check — a
+  // re-rolled zero can refund a charge mid-turn (grantZeroFlipCharge in the
+  // reflip path), and without the cap that refund loop would allow
+  // unbounded re-flips in a single turn.
+  const refunded: PowerState = { ...afterSecond, charges: { ...afterSecond.charges, p1: 1 } };
+  check("Re-flip: denied a third use this turn even with a refunded charge banked", !canReflipAgain(refunded, "p1"));
+  check(`Re-flip: sanity — the cap under test is REFLIPS_PER_TURN (${REFLIPS_PER_TURN})`, REFLIPS_PER_TURN === 2);
+
+  // A fresh turn resets the counter (resetTurnFlags is what every
+  // turn-ending resolve calls).
+  check("Re-flip: a fresh turn resets the use counter", resetTurnFlags(afterSecond).reflipsUsedThisTurn === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1167,185 @@ function check(name: string, cond: boolean, detail?: string) {
       "Bulwark: a send-home-Push threat DOES count as blocked once the Archer can afford it",
       getBulwarkBlockedIds(sPushOnly, pwPushWithCharge, 1).includes(4),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 14b. Reinforced Bulwark: the Warrior's full-bank (CHARGE_CAP) cast —
+//      everything about the plain Bulwark doubled: 2x cost, 2x lifetime
+//      (BULWARK_REINFORCED_TURNS), 2x saves (BULWARK_REINFORCED_SAVES).
+//      Same target pool, same protection semantics while up (isBulwarked
+//      doesn't distinguish), same turn-ending cast — only cost, countdown,
+//      and how consumption resolves differ.
+// ---------------------------------------------------------------------------
+{
+  // --- The cast: cost, countdown, saves, turn end ---------------------------
+  {
+    const s = state("p1", { 0: 5 });
+    const pw = power({ p1: "warrior" }, { p1: CHARGE_CAP });
+    const r = applyBulwark(s, pw, 0, "p1", true);
+    check("Reinforced Bulwark: spends the FULL bank (CHARGE_CAP charges)", r.power.charges.p1 === 0, `got ${r.power.charges.p1}`);
+    check(
+      "Reinforced Bulwark: flags the target with BULWARK_REINFORCED_TURNS remaining",
+      r.power.bulwarked[0] === BULWARK_REINFORCED_TURNS,
+      `got ${JSON.stringify(r.power.bulwarked)}`,
+    );
+    check(
+      "Reinforced Bulwark: banks BULWARK_REINFORCED_SAVES capture-blocks",
+      r.power.bulwarkSaves[0] === BULWARK_REINFORCED_SAVES,
+      `got ${JSON.stringify(r.power.bulwarkSaves)}`,
+    );
+    check("Reinforced Bulwark: ends the turn, same as the plain cast", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+    check(
+      "Reinforced Bulwark: sanity — the doubling is real (2x turns, 2x saves vs plain)",
+      BULWARK_REINFORCED_TURNS === 2 * BULWARK_TURNS && BULWARK_REINFORCED_SAVES === 2,
+    );
+
+    // The plain cast stays byte-identical: 1 charge, BULWARK_TURNS, NO
+    // bulwarkSaves entry (a missing entry means "1 block" everywhere).
+    const rPlain = applyBulwark(s, pw, 0, "p1");
+    check("Reinforced Bulwark: a plain cast still spends exactly one charge", rPlain.power.charges.p1 === CHARGE_CAP - 1);
+    check("Reinforced Bulwark: a plain cast still lasts BULWARK_TURNS", rPlain.power.bulwarked[0] === BULWARK_TURNS);
+    check(
+      "Reinforced Bulwark: a plain cast writes NO bulwarkSaves entry",
+      rPlain.power.bulwarkSaves[0] === undefined,
+      JSON.stringify(rPlain.power.bulwarkSaves),
+    );
+
+    // Already-Bulwarked tokens stay excluded from re-targeting, reinforced
+    // or not — no stacking a reinforcement onto a live Bulwark.
+    check(
+      "Reinforced Bulwark: a reinforced token is excluded from re-targeting",
+      !getBulwarkTargets(r.state, r.power, "p1").includes(0),
+    );
+  }
+
+  // --- Consumption: survives its first save, fades on the second ------------
+  {
+    // p2's token 4 is reinforced-Bulwarked; p1's flip would capture it.
+    const s = state("p1", { 0: 4, 4: 6 });
+    const pw: PowerState = {
+      ...power({ p1: "warrior", p2: "warrior" }),
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    const blocked = getBulwarkBlockedIds(s, pw, 2); // token0: 4 -> 6 would capture 4
+    check("Reinforced Bulwark: a blocked capture is reported, same as plain", blocked.includes(4), JSON.stringify(blocked));
+
+    const afterFirst = consumeBulwarkBlocks(pw, blocked);
+    check(
+      "Reinforced Bulwark: SURVIVES its first save — bulwarked entry stays",
+      afterFirst.bulwarked[4] === BULWARK_REINFORCED_TURNS,
+      JSON.stringify(afterFirst.bulwarked),
+    );
+    check(
+      "Reinforced Bulwark: the first save spends one banked block",
+      afterFirst.bulwarkSaves[4] === BULWARK_REINFORCED_SAVES - 1,
+      JSON.stringify(afterFirst.bulwarkSaves),
+    );
+    // A Bulwark-blocked landing is dropped from the move list entirely
+    // (getLegalPowerMoves `continue`s on it) — so "still protecting" means
+    // no move capturing token 4 exists, same assertion shape section 14
+    // uses for the plain cast.
+    check(
+      "Reinforced Bulwark: still protecting after the first save (capture still illegal)",
+      getLegalPowerMoves(s, afterFirst, 2).find((m) => m.captures.includes(4)) === undefined,
+    );
+
+    const afterSecond = consumeBulwarkBlocks(afterFirst, [4]);
+    check("Reinforced Bulwark: fades on its second save — bulwarked entry cleared", afterSecond.bulwarked[4] === undefined);
+    check("Reinforced Bulwark: the spent saves entry is cleared with it", afterSecond.bulwarkSaves[4] === undefined);
+
+    // A PLAIN Bulwark (no saves entry) is still consumed by its first block.
+    const pwPlain: PowerState = { ...power({ p1: "warrior", p2: "warrior" }), bulwarked: { 4: BULWARK_TURNS } };
+    const afterPlain = consumeBulwarkBlocks(pwPlain, [4]);
+    check("Reinforced Bulwark: a plain Bulwark is still consumed by its FIRST block", afterPlain.bulwarked[4] === undefined);
+  }
+
+  // --- Expiry: the countdown clears the unused saves with it ----------------
+  {
+    const s = state("p1", { 0: 5 });
+    const pwOne: PowerState = {
+      ...power({ p1: "warrior" }),
+      bulwarked: { 0: 1 },
+      bulwarkSaves: { 0: BULWARK_REINFORCED_SAVES },
+    };
+    const expired = tickBulwarkExpiry(s, pwOne, "p1");
+    check("Reinforced Bulwark: expiry clears the bulwarked entry", expired.bulwarked[0] === undefined);
+    check("Reinforced Bulwark: expiry clears the unused saves entry too", expired.bulwarkSaves[0] === undefined);
+
+    // A full BULWARK_REINFORCED_TURNS countdown lands exactly at expiry.
+    let running: PowerState = {
+      ...power({ p1: "warrior" }),
+      bulwarked: { 0: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 0: BULWARK_REINFORCED_SAVES },
+    };
+    for (let i = 0; i < BULWARK_REINFORCED_TURNS; i++) running = tickBulwarkExpiry(s, running, "p1");
+    check(
+      `Reinforced Bulwark: expires after exactly BULWARK_REINFORCED_TURNS (${BULWARK_REINFORCED_TURNS}) of the caster's own turns`,
+      running.bulwarked[0] === undefined && running.bulwarkSaves[0] === undefined,
+    );
+  }
+
+  // --- Protection semantics while up: identical to plain (isBulwarked) ------
+  {
+    // Blink Strike still can't target it (Bulwark blocks ultimates, plain or
+    // reinforced), and a soft Push is still allowed while a send-home Push
+    // is still blocked — the same isBulwarked-driven rules as section 14,
+    // exercised here with a REINFORCED record shape (saves entry present).
+    const base = power({ p1: "mage", p2: "warrior" }, { p1: 0 });
+    const s = state("p1", { 0: 8, 4: 6 });
+    const pwUlt: PowerState = {
+      ...base,
+      ultimateReady: { ...base.ultimateReady, p1: true },
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    check(
+      "Reinforced Bulwark: excluded from Blink Strike's target pool, same as plain",
+      !getBlinkStrikeTargets(s, pwUlt, "p1").includes(4),
+    );
+
+    const sSoft = state("p1", { 0: 4, 4: 8 }); // push 8 -> 7: no collision, stays on board
+    const pwSoft: PowerState = {
+      ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    check("Reinforced Bulwark: a soft (non-home) Push target is still legal", getPushTargets(sSoft, pwSoft, "p1").includes(4));
+
+    const sHome = state("p1", { 4: 0 }); // push 0 -> -1: send-home
+    const pwHome: PowerState = {
+      ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    check("Reinforced Bulwark: a send-home Push target is still NOT legal", !getPushTargets(sHome, pwHome, "p1").includes(4));
+  }
+
+  // --- Rain of Arrows still pierces, and a reserve trip clears the saves ----
+  {
+    // Same judgment-call fixture as section 14's Rain of Arrows check, with
+    // a REINFORCED Bulwark on the sole candidate: the ultimate still
+    // punches through, and the captured token's bulwarked AND bulwarkSaves
+    // entries must both clear (no free re-entry protection later).
+    const s = state("p1", { 0: 6, 4: 9 }); // token0 6->7 (shield); sole candidate enemy4 at 9
+    const base = power({ p1: "archer", p2: "warrior" });
+    const pw: PowerState = {
+      ...base,
+      shieldStreak: { ...base.shieldStreak, p1: ULTIMATE_STREAK - 1 },
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    const move = getLegalPowerMoves(s, pw, 1).find((m) => m.tokenId === 0 && m.landsOnShield)!;
+    const r = applyPowerMove(s, pw, move, "p1", () => 0);
+    check(
+      "Reinforced Bulwark: Rain of Arrows still bypasses it (same judgment call as plain)",
+      r.rainOfArrows?.targetTokenId === 4 && r.state.tokens.find((t) => t.id === 4)!.position === -1,
+      JSON.stringify(r.rainOfArrows),
+    );
+    check("Reinforced Bulwark: the captured token's bulwarked entry is cleared", r.power.bulwarked[4] === undefined);
+    check("Reinforced Bulwark: the captured token's saves entry is cleared with it", r.power.bulwarkSaves[4] === undefined);
   }
 }
 

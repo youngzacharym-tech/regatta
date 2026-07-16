@@ -29,6 +29,7 @@ import {
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   isWarded,
+  REFLIPS_PER_TURN,
   type PlayerClass,
   type PowerMove,
   type PowerState,
@@ -863,10 +864,11 @@ function updateTokenTints(state: GameState) {
         classes: currentPower.classes,
         charges: currentPower.charges,
         safeTokens: new Set(),
-        reflipUsedThisTurn: false,
+        reflipsUsedThisTurn: 0,
         shieldStreak: { p1: 0, p2: 0 },
         ultimateReady: { p1: false, p2: false },
         bulwarked: {},
+        bulwarkSaves: {},
       }
     : null;
   state.tokens.forEach((token, idx) => {
@@ -993,6 +995,10 @@ let currentPower: {
   warpathTargets: number[];
   bulwarkTargets: number[];
   bulwarkedTokenIds: number[];
+  /** Optional (older servers omit it): how many Re-flips the current
+   *  player has already fired this turn — gates the Re-flip button
+   *  together with charges (see renderPowerActions). */
+  reflipsUsedThisTurn?: number;
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -1024,6 +1030,10 @@ const warpathTargetIds = new Set<number>();
  *  set regardless of owner), so no new targeting plumbing is needed. */
 let bulwarkArmed = false;
 const bulwarkTargetIds = new Set<number>();
+/** True when the armed Bulwark tap is the REINFORCED (full-bank) cast —
+ *  same targeting flow, the tap just sends `reinforced: true`. Only
+ *  meaningful while bulwarkArmed. */
+let bulwarkArmedReinforced = false;
 
 // --- Opening flip-off ---
 /** True while the match start waits for THIS player to tap their pile.
@@ -1108,9 +1118,9 @@ const moveIndexByToken = new Map<number, number>();
 const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; klass: PlayerClass }> = {
   reflip: {
     name: "Re-flip",
-    cost: "1 charge · keeps your turn",
+    cost: "1 charge each · keeps your turn",
     klass: "mage",
-    desc: "Don't like your roll? Flip all four coins again instead of moving. Once per turn.",
+    desc: `Don't like your roll? Flip all four coins again instead of moving — up to ${REFLIPS_PER_TURN} times a turn, one charge each. Mind your Ward: it only holds at a full bank, so the second re-flip drops it.`,
   },
   push: {
     name: "Push",
@@ -1135,6 +1145,12 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     cost: "1 charge",
     klass: "warrior",
     desc: "Shield one of your own stones: it can't be captured, swept by a Charge, or taken by an ultimate. Fades after a few turns, or the moment it saves the stone.",
+  },
+  bulwarkReinforced: {
+    name: "Reinforced Bulwark",
+    cost: `${CHARGE_CAP} charges`,
+    klass: "warrior",
+    desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down.",
   },
   blinkStrike: {
     name: "Blink Strike",
@@ -1223,6 +1239,7 @@ function renderPowerActions(isMyTurn: boolean) {
   warpathArmed = false;
   warpathTargetIds.clear();
   bulwarkArmed = false;
+  bulwarkArmedReinforced = false;
   bulwarkTargetIds.clear();
   if (!isMyTurn || myVariant !== "masterKiller" || !currentPower) return;
   const mySide: PlayerId = myRole ?? "p1";
@@ -1269,14 +1286,20 @@ function renderPowerActions(isMyTurn: boolean) {
   if (charges < 1) return;
 
   if (cls === "mage") {
-    const btn = document.createElement("button");
-    btn.dataset.ability = "reflip";
-    setAbilityLabel(btn, `Re-flip (1⚡)`);
-    btn.className = "ability";
-    btn.addEventListener("click", () => {
-      sendToServer({ type: "usePower", action: { kind: "reflip" } });
-    });
-    movesEl.appendChild(btn);
+    // Gated on the server-reported per-turn use count too, not just
+    // charges: a Mage can hold a refunded charge (re-rolled zero) while
+    // already at the REFLIPS_PER_TURN cap. Older servers omit the field —
+    // fall back to 0, i.e. the pre-existing charges-only gate.
+    if ((currentPower.reflipsUsedThisTurn ?? 0) < REFLIPS_PER_TURN) {
+      const btn = document.createElement("button");
+      btn.dataset.ability = "reflip";
+      setAbilityLabel(btn, `Re-flip (1⚡)`);
+      btn.className = "ability";
+      btn.addEventListener("click", () => {
+        sendToServer({ type: "usePower", action: { kind: "reflip" } });
+      });
+      movesEl.appendChild(btn);
+    }
   } else if (cls === "archer") {
     if (currentPower.pushTargets.length > 0) {
       const btn = document.createElement("button");
@@ -1318,23 +1341,44 @@ function renderPowerActions(isMyTurn: boolean) {
   } else if (cls === "warrior") {
     // Bulwark: unlike every other armed flow, the tap target is one of the
     // MOVER'S OWN tokens — offered alongside Charge, not instead of it, so
-    // a Warrior with a spare charge can pick either each turn.
+    // a Warrior with a spare charge can pick either each turn. At the full
+    // bank a second button offers the REINFORCED cast (2 charges, doubled
+    // lifetime and saves) — same targets, same tap flow; the two buttons
+    // share one armed state, so arming either disarms the other.
     if (currentPower.bulwarkTargets.length > 0) {
       const btn = document.createElement("button");
       btn.dataset.ability = "bulwark";
-      const setLabel = () => {
-        setAbilityLabel(btn, bulwarkArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`);
-        btn.className = bulwarkArmed ? "ability armed" : "ability";
+      const reinfBtn = charges === CHARGE_CAP ? document.createElement("button") : null;
+      const setLabels = () => {
+        const plainArmed = bulwarkArmed && !bulwarkArmedReinforced;
+        setAbilityLabel(btn, plainArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`);
+        btn.className = plainArmed ? "ability armed" : "ability";
+        if (reinfBtn) {
+          const reinfArmed = bulwarkArmed && bulwarkArmedReinforced;
+          setAbilityLabel(
+            reinfBtn,
+            reinfArmed ? "Reinforced Bulwark: tap your token…" : `Reinforced Bulwark (${CHARGE_CAP}⚡)`,
+          );
+          reinfBtn.className = reinfArmed ? "ability ultimate armed" : "ability ultimate";
+        }
       };
-      setLabel();
-      btn.addEventListener("click", () => {
-        bulwarkArmed = !bulwarkArmed;
+      const toggle = (reinforced: boolean) => {
+        const wasThisArmed = bulwarkArmed && bulwarkArmedReinforced === reinforced;
+        bulwarkArmed = !wasThisArmed;
+        bulwarkArmedReinforced = bulwarkArmed && reinforced;
         bulwarkTargetIds.clear();
         if (bulwarkArmed) for (const id of currentPower!.bulwarkTargets) bulwarkTargetIds.add(id);
         else hideHoverGlow();
-        setLabel();
-      });
+        setLabels();
+      };
+      setLabels();
+      btn.addEventListener("click", () => toggle(false));
       movesEl.appendChild(btn);
+      if (reinfBtn) {
+        reinfBtn.dataset.ability = "bulwarkReinforced";
+        reinfBtn.addEventListener("click", () => toggle(true));
+        movesEl.appendChild(reinfBtn);
+      }
     }
     if (currentPowerMoves) {
       for (let i = 0; i < currentPowerMoves.length; i++) {
@@ -1489,8 +1533,12 @@ canvas.addEventListener("pointerdown", (e) => {
   if (bulwarkArmed) {
     const target = findTargetUnderPointer(bulwarkTargetIds, e.clientX, e.clientY);
     if (target !== null) {
-      sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId: target } });
+      sendToServer({
+        type: "usePower",
+        action: { kind: "bulwark", tokenId: target, ...(bulwarkArmedReinforced ? { reinforced: true } : {}) },
+      });
       bulwarkArmed = false;
+      bulwarkArmedReinforced = false;
       bulwarkTargetIds.clear();
       hideHoverGlow();
     }
@@ -1942,7 +1990,7 @@ function announceFromState(msg: {
   lastMovePlayer: PlayerId | null;
   lastPush?: { targetTokenId: number } | null;
   lastChargedShot?: { targetTokenId: number } | null;
-  lastBulwark?: { tokenId: number } | null;
+  lastBulwark?: { tokenId: number; reinforced?: boolean } | null;
   lastBulwarkBlock?: { tokenIds: number[] } | null;
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
@@ -1996,9 +2044,13 @@ function announceFromState(msg: {
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
     const target = isMe ? "your" : "their";
+    const reinforced = msg.lastBulwark.reinforced === true;
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, "Bulwark!");
-    showAnnouncement(`${subject} raised Bulwark on ${target} token${chargeFor(msg.lastMovePlayer)}`, "shield");
+    if (k) showProc(k, reinforced ? "Reinforced Bulwark!" : "Bulwark!");
+    showAnnouncement(
+      `${subject} raised ${reinforced ? "a REINFORCED Bulwark" : "Bulwark"} on ${target} token${chargeFor(msg.lastMovePlayer)}`,
+      "shield",
+    );
     return;
   }
 
@@ -2469,6 +2521,7 @@ function seatSelf(seat: PlayerId, room: string, vsCpu: boolean, variant: "classi
   warpathArmed = false;
   warpathTargetIds.clear();
   bulwarkArmed = false;
+  bulwarkArmedReinforced = false;
   bulwarkTargetIds.clear();
   pickedClasses = { p1: null, p2: null };
   lastSeq = 0;
@@ -2692,6 +2745,7 @@ function resetToMenu(message: string) {
   warpathArmed = false;
   warpathTargetIds.clear();
   bulwarkArmed = false;
+  bulwarkArmedReinforced = false;
   bulwarkTargetIds.clear();
   pickedClasses = { p1: null, p2: null };
   myVariant = "classic";
@@ -2910,7 +2964,7 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>The Archer</b> strikes from range — free Snipes on the water,
        Pushes and the heavy Charged Shot to knock enemies home.</li>
        <li><b>The Mage</b> bends fate — Wards its lead stone against capture
-       and Re-flips a bad roll.</li>
+       and Re-flips a bad roll, twice a turn with a full bank.</li>
        <li><b>The Warrior</b> walks through wards — breaks them on contact,
        sweeps the lane with Charge, shelters behind Bulwark.</li>
      </ul>
@@ -2960,9 +3014,11 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
     `<div class="runner">The Mage &middot; continued</div>
      <ul>
-       <li><b>Re-flip</b> (active, 1 charge): dislike your roll? Spend a
-       charge to flip again instead of moving — once per turn, and it does
-       not end your turn.</li>
+       <li><b>Re-flip</b> (active, 1 charge each): dislike your roll? Spend
+       a charge to flip again instead of moving — it does not end your turn,
+       and with both charges banked you may re-flip TWICE in the same turn.
+       Mind the price: Ward only holds at a full bank, so the moment you
+       spend below it your lead stone stands unwarded.</li>
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight
@@ -2989,6 +3045,10 @@ const GUIDE_SPREADS: [string, string][] = [
        an enemy ultimate, and a Push can only shove it, never send it home.
        It fades after a few of your turns unused, or the instant it saves
        the stone.</li>
+       <li><b>Reinforced Bulwark</b> (active, spends both charges): the
+       same shield with everything doubled — it lasts twice as many turns,
+       and it shrugs off the first save instead of fading. Only the second
+       save, or time, brings it down.</li>
        <li><b>Warpath</b> (active, spends your ultimate): land on a shield
        tile three times running, then teleport your least-advanced stone
        onto any enemy in shared water — capturing it plus every unprotected

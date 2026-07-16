@@ -54,6 +54,7 @@ import {
   applyReflip as mkApplyReflip,
   applyWarpath,
   breakShieldStreak,
+  canReflipAgain,
   CHARGE_CAP,
   getBlinkStrikeTargets,
   getBulwarkTargets,
@@ -111,17 +112,34 @@ export interface WirePowerState {
   classes: Record<PlayerId, PlayerClass>;
   charges: Record<PlayerId, number>;
   safeTokens: number[];
-  reflipUsedThisTurn: boolean;
+  reflipsUsedThisTurn: number;
   shieldStreak: Record<PlayerId, number>;
   ultimateReady: Record<PlayerId, boolean>;
   bulwarked: Record<number, number>;
+  bulwarkSaves: Record<number, number>;
 }
 
 export function toWirePower(p: PowerState): WirePowerState {
   return { ...p, safeTokens: [...p.safeTokens] };
 }
 export function fromWirePower(w: WirePowerState): PowerState {
-  return { ...w, safeTokens: new Set(w.safeTokens) };
+  return {
+    ...w,
+    safeTokens: new Set(w.safeTokens),
+    // Docs persisted before the once-per-turn boolean (reflipUsedThisTurn)
+    // became a counter read as undefined here — treat the old true as "one
+    // re-flip already used" so a mid-deploy live room can't double-dip.
+    reflipsUsedThisTurn:
+      typeof w.reflipsUsedThisTurn === "number"
+        ? w.reflipsUsedThisTurn
+        : (w as { reflipUsedThisTurn?: boolean }).reflipUsedThisTurn
+          ? 1
+          : 0,
+    // Same live-room back-compat: docs persisted before reinforced Bulwark
+    // existed have no bulwarkSaves — every live Bulwark in them is a plain
+    // 1-block cast, which an empty map means exactly.
+    bulwarkSaves: w.bulwarkSaves ?? {},
+  };
 }
 
 // ============================================================================
@@ -145,6 +163,13 @@ export interface PublicPower {
   warpathTargets: number[];
   bulwarkTargets: number[];
   bulwarkedTokenIds: number[];
+  /** How many Re-flips the CURRENT player has already fired this turn —
+   *  drives the client's Re-flip button gate (charges alone can't: a Mage
+   *  at the REFLIPS_PER_TURN cap may still hold a charge, e.g. after a
+   *  re-rolled zero refunds one). ADDITIVE field: older clients ignore it
+   *  and fall back to their charges>=1 gate, exactly the pre-existing
+   *  behavior. */
+  reflipsUsedThisTurn: number;
 }
 
 /** One replayable frame. `state` events carry the same announcement fields
@@ -175,7 +200,9 @@ export type RoomEvent =
       lastMovePlayer: PlayerId | null;
       lastPush: { targetTokenId: number } | null;
       lastChargedShot: { targetTokenId: number } | null;
-      lastBulwark: { tokenId: number } | null;
+      /** `reinforced` is additive (older events lack it): true when the
+       *  cast was the full-bank Reinforced Bulwark. */
+      lastBulwark: { tokenId: number; reinforced?: boolean } | null;
       lastBulwarkBlock: { tokenIds: number[] } | null;
       lastChargeEvent: { player: PlayerId; delta: number } | null;
       lastRainOfArrows: { targetTokenId: number | null } | null;
@@ -245,7 +272,7 @@ export interface RoomDoc {
   zeroFlipChargeBefore: number | null;
   lastRainOfArrows: { targetTokenId: number | null } | null;
   lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
-  lastBulwark: { tokenId: number } | null;
+  lastBulwark: { tokenId: number; reinforced?: boolean } | null;
   lastBulwarkBlock: { tokenIds: number[] } | null;
 }
 
@@ -266,7 +293,10 @@ export type RoomActionInput =
         | { kind: "charge"; moveIndex: number }
         | { kind: "blinkStrike"; targetTokenId: number }
         | { kind: "warpath"; targetTokenId: number }
-        | { kind: "bulwark"; tokenId: number };
+        /** `reinforced` is ADDITIVE: absent/false is the plain 1-charge
+         *  Bulwark, unchanged; true spends the full bank on the doubled
+         *  cast (see master-killer.ts's BULWARK_REINFORCED_TURNS). */
+        | { kind: "bulwark"; tokenId: number; reinforced?: boolean };
     }
   | { op: "newMatch" }
   | { op: "chat"; text: string };
@@ -343,6 +373,7 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
         ? getBulwarkTargets(doc.state, p, mover)
         : [],
     bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number),
+    reflipsUsedThisTurn: p.reflipsUsedThisTurn,
   };
 }
 
@@ -568,7 +599,7 @@ export function applyAction(
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
-      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now) };
+      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced ?? false) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
@@ -600,7 +631,7 @@ function validateUsePower(
     case "reflip":
       if (cls !== "mage") return "Only a Mage can Re-flip";
       if (doc.mk.charges[seat] < 1) return "No charge available";
-      if (doc.mk.reflipUsedThisTurn) return "Already re-flipped this turn";
+      if (!canReflipAgain(p(), seat)) return "No re-flips left this turn";
       return null;
     case "push":
       if (cls !== "archer") return "Only an Archer can Push";
@@ -624,7 +655,14 @@ function validateUsePower(
       return null;
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
-      if (doc.mk.charges[seat] < 1) return "No charge available";
+      if (a.reinforced) {
+        // Mirrors Charged Shot's own full-bank gate: the reinforced cast is
+        // a uniform "has the mover banked the whole cap" check, identical
+        // for every target.
+        if (doc.mk.charges[seat] !== CHARGE_CAP) return "Reinforced Bulwark needs a full charge bank";
+      } else if (doc.mk.charges[seat] < 1) {
+        return "No charge available";
+      }
       if (!getBulwarkTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Bulwark target";
       return null;
     case "charge":
@@ -701,13 +739,15 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
 }
 
 /** Push / Charged Shot / Blink Strike / Warpath / Bulwark share one commit
- *  shape and differ only in which apply-fn runs and which slot announces. */
+ *  shape and differ only in which apply-fn runs and which slot announces.
+ *  `reinforced` only means anything for kind "bulwark" (the full-bank cast). */
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
   kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark",
   tokenId: number,
   now: number,
+  reinforced = false,
 ): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
   const power = fromWirePower(doc.mk!);
@@ -738,8 +778,8 @@ function applyMkSimple(
       break;
     }
     case "bulwark":
-      r = applyBulwark(doc.state, power, tokenId, seat);
-      slots = { lastBulwark: { tokenId } };
+      r = applyBulwark(doc.state, power, tokenId, seat, reinforced);
+      slots = { lastBulwark: { tokenId, reinforced } };
       break;
   }
   const delta = r.power.charges[seat] - chargesBefore;
@@ -824,8 +864,7 @@ function autoSkipDelay(doc: RoomDoc): number {
     doc.variant === "masterKiller" &&
     doc.mk &&
     doc.mk.classes[mover] === "mage" &&
-    doc.mk.charges[mover] >= 1 &&
-    !doc.mk.reflipUsedThisTurn
+    canReflipAgain(fromWirePower(doc.mk), mover)
   ) {
     return AUTO_SKIP_WITH_RESCUE_MS; // human Mage gets a real Re-flip window
   }
@@ -968,7 +1007,7 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
-      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now);
+      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
   }
 }
 

@@ -41,7 +41,7 @@ const NEUTRAL_POWER: PowerState = {
   classes: { p1: "warrior", p2: "warrior" },
   charges: { p1: 0, p2: 0 },
   safeTokens: new Set(),
-  reflipUsedThisTurn: false,
+  reflipsUsedThisTurn: 0,
   // Rain of Arrows is Archer-only (this fixture is Warrior-vs-Warrior, gated
   // out entirely) and getLegalPowerMoves itself never reads these fields —
   // see test-master-killer.ts for the ultimate's dedicated scenario coverage.
@@ -49,8 +49,10 @@ const NEUTRAL_POWER: PowerState = {
   ultimateReady: { p1: false, p2: false },
   // Bulwark is Warrior-only and starts empty here too — getLegalPowerMoves
   // never populates it (only applyBulwark does), so an empty map is the
-  // only value this fixture could ever need.
+  // only value this fixture could ever need. Same for bulwarkSaves
+  // (reinforced-Bulwark bookkeeping).
   bulwarked: {},
+  bulwarkSaves: {},
 };
 
 function sharedFieldsMatch(a: Move, b: PowerMove): boolean {

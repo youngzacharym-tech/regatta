@@ -26,6 +26,7 @@ import {
   getLegalPowerMoves,
   grantZeroFlipCharge,
   initialPowerState,
+  REFLIPS_PER_TURN,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
   type PlayerClass,
@@ -54,6 +55,7 @@ interface GameResult {
     blinkStrike: number;
     warpath: number;
     bulwark: number;
+    bulwarkReinforced: number; // full-bank Reinforced Bulwark casts (subset of bulwark)
     bulwarkBlock: number;
   };
 }
@@ -69,6 +71,12 @@ function takeTurn(
   const mover = state.currentPlayer;
   let flips = 1;
   let flip = flipCoins();
+  // The zero-flip charge is granted ON THE FLIP COMMIT, before the mover
+  // decides anything — same order as room-engine's commitTurnFlip — so a
+  // 0-charge Mage rolling a zero banks the charge in time to Re-flip out of
+  // it, exactly like the real server. (Used to be granted only in the
+  // skip path below, which under-modeled that rescue.)
+  if (flip === 0) power = grantZeroFlipCharge(power, mover);
   let moves = getLegalPowerMoves(state, power, flip);
   // Warrior Bulwark: tick the mover's own countdown, and consume any
   // Bulwark this exact flip's moves reveal as blocked for the opponent —
@@ -78,10 +86,17 @@ function takeTurn(
   let bulwarkBlockedThisTurn = newTurnBulwark.blockedIds.length > 0;
   let action = pickBotPowerAction(state, power, moves, flip, rand);
 
-  if (action?.kind === "reflip") {
+  // A Re-flip doesn't end the turn, and a Mage holding both charges may fire
+  // up to REFLIPS_PER_TURN of them back-to-back — loop (bounded by the same
+  // cap, plus one for safety against a bot bug) exactly like the server's
+  // own reflip-then-redecide cycle. NOTE: a re-rolled zero grants its charge
+  // back inside the real server path (applyMkReflip); mirrored here so the
+  // sim's charge economy can't drift from the transports'.
+  for (let i = 0; action?.kind === "reflip" && i <= REFLIPS_PER_TURN; i++) {
     power = applyReflip(power, mover);
     flips++;
     flip = flipCoins();
+    if (flip === 0) power = grantZeroFlipCharge(power, mover);
     moves = getLegalPowerMoves(state, power, flip);
     const reflipBulwark = tickBulwarkForReflip(state, power, flip);
     power = reflipBulwark.power;
@@ -91,12 +106,14 @@ function takeTurn(
 
   const blockUsage: Partial<GameResult["usage"]> = bulwarkBlockedThisTurn ? { bulwarkBlock: 1 } : {};
 
-  // A second "reflip" here would mean the bot ignored its own once-per-turn
-  // guard — shouldn't happen at runtime (pickBotPowerAction checks
-  // reflipUsedThisTurn), but the return TYPE can't prove that statically, so
-  // it's treated the same as "no action" rather than left unhandled.
+  // A leftover "reflip" here would mean the bot ignored its own per-turn
+  // guard past the loop's safety bound — shouldn't happen at runtime
+  // (pickBotPowerAction checks canReflipAgain), but the return TYPE can't
+  // prove that statically, so it's treated the same as "no action" rather
+  // than left unhandled.
   if (action === null || action.kind === "reflip") {
-    if (flip === 0) power = grantZeroFlipCharge(power, mover);
+    // No zero-flip grant here — it already happened on the flip commit
+    // above (or inside the re-flip loop), matching the server's ordering.
     return { state: applyNoMove(state), power, flips, sweepSize: 0, usage: blockUsage };
   }
 
@@ -167,8 +184,14 @@ function takeTurn(
       };
     }
     case "bulwark": {
-      const r = applyBulwark(state, power, action.tokenId, mover);
-      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...blockUsage, bulwark: 1 } };
+      const r = applyBulwark(state, power, action.tokenId, mover, action.reinforced ?? false);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 0,
+        usage: { ...blockUsage, bulwark: 1, ...(action.reinforced ? { bulwarkReinforced: 1 } : {}) },
+      };
     }
   }
 }
@@ -190,6 +213,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     blinkStrike: 0,
     warpath: 0,
     bulwark: 0,
+    bulwarkReinforced: 0,
     bulwarkBlock: 0,
   };
   const rand = Math.random;
@@ -201,7 +225,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     state = r.state;
     power = r.power;
     flips += r.flips;
-    if (r.flips > 1) usage.reflip++; // a 2-flip turn means Re-flip was used
+    usage.reflip += r.flips - 1; // every flip past the first is a Re-flip (a turn can now hold up to REFLIPS_PER_TURN)
     maxSweepCaptures = Math.max(maxSweepCaptures, r.sweepSize);
     if (r.usage.snipe) usage.snipe++;
     if (r.usage.push) usage.push++;
@@ -212,6 +236,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.blinkStrike) usage.blinkStrike++;
     if (r.usage.warpath) usage.warpath++;
     if (r.usage.bulwark) usage.bulwark++;
+    if (r.usage.bulwarkReinforced) usage.bulwarkReinforced++;
     if (r.usage.bulwarkBlock) usage.bulwarkBlock++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
@@ -272,6 +297,7 @@ for (const [a, b] of matchups) {
   const avgBlinkStrike = mean(results.map((r) => r.usage.blinkStrike));
   const avgWarpath = mean(results.map((r) => r.usage.warpath));
   const avgBulwark = mean(results.map((r) => r.usage.bulwark));
+  const avgBulwarkReinforced = mean(results.map((r) => r.usage.bulwarkReinforced));
   const avgBulwarkBlock = mean(results.map((r) => r.usage.bulwarkBlock));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
@@ -280,7 +306,7 @@ for (const [a, b] of matchups) {
       `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  chargedShot/g=${avgChargedShot.toFixed(3)}` +
       `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
       `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
-      `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}`,
+      `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

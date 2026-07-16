@@ -177,6 +177,7 @@ function otherPlayerId(p) {
   return p === "p1" ? "p2" : "p1";
 }
 var CHARGE_CAP = 2;
+var REFLIPS_PER_TURN = 2;
 var PUSH_DISTANCE = 1;
 var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
@@ -186,20 +187,26 @@ var CHARGED_SHOT_DISTANCE = 4;
 var CHARGED_SHOT_WARD_DISTANCE = 3;
 var ULTIMATE_STREAK = 3;
 var BULWARK_TURNS = 2;
+var BULWARK_REINFORCED_TURNS = 4;
+var BULWARK_REINFORCED_SAVES = 2;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
     // placeholder until picked
     charges: { p1: 0, p2: 0 },
     safeTokens: /* @__PURE__ */ new Set(),
-    reflipUsedThisTurn: false,
+    reflipsUsedThisTurn: 0,
     shieldStreak: { p1: 0, p2: 0 },
     ultimateReady: { p1: false, p2: false },
-    bulwarked: {}
+    bulwarked: {},
+    bulwarkSaves: {}
   };
 }
 function resetTurnFlags(power) {
-  return { ...power, reflipUsedThisTurn: false };
+  return { ...power, reflipsUsedThisTurn: 0 };
+}
+function canReflipAgain(power, mover) {
+  return power.charges[mover] >= 1 && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
 }
 function isMostAdvanced(state, token) {
   if (token.position < 0 || token.position >= PATH_LENGTH_PER_PLAYER) return false;
@@ -394,11 +401,16 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     safeTokens.add(tokenId);
   }
   let bulwarked = power.bulwarked;
+  let bulwarkSaves = power.bulwarkSaves;
   if (finalCaptures.some((id) => bulwarked[id] !== void 0)) {
     bulwarked = { ...bulwarked };
-    for (const id of finalCaptures) delete bulwarked[id];
+    bulwarkSaves = { ...bulwarkSaves };
+    for (const id of finalCaptures) {
+      delete bulwarked[id];
+      delete bulwarkSaves[id];
+    }
   }
-  let nextPower = { ...power, safeTokens, bulwarked };
+  let nextPower = { ...power, safeTokens, bulwarked, bulwarkSaves };
   if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
@@ -527,7 +539,7 @@ function applyReflip(power, mover) {
   return {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
-    reflipUsedThisTurn: true
+    reflipsUsedThisTurn: power.reflipsUsedThisTurn + 1
   };
 }
 function excludeBulwarked(state, power, ids) {
@@ -626,11 +638,22 @@ function applyWarpath(state, power, targetTokenId, mover) {
 function getBulwarkTargets(state, power, mover) {
   return state.tokens.filter((t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => !isBulwarked(power, t)).map((t) => t.id);
 }
-function applyBulwark(state, power, targetTokenId, mover) {
+function applyBulwark(state, power, targetTokenId, mover, reinforced = false) {
+  const bulwarked = { ...power.bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
+  let cost = 1;
+  if (reinforced) {
+    cost = CHARGE_CAP;
+    bulwarked[targetTokenId] = BULWARK_REINFORCED_TURNS;
+    bulwarkSaves[targetTokenId] = BULWARK_REINFORCED_SAVES;
+  } else {
+    bulwarked[targetTokenId] = BULWARK_TURNS;
+  }
   const spent = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
-    bulwarked: { ...power.bulwarked, [targetTokenId]: BULWARK_TURNS }
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
+    bulwarked,
+    bulwarkSaves
   };
   const broken = breakShieldStreak(spent, mover);
   const nextState = {
@@ -646,12 +669,17 @@ function tickBulwarkExpiry(state, power, mover) {
   const mine = Object.keys(power.bulwarked).map(Number).filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
   if (mine.length === 0) return power;
   const bulwarked = { ...power.bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
   for (const id of mine) {
     const remaining = bulwarked[id] - 1;
-    if (remaining <= 0) delete bulwarked[id];
-    else bulwarked[id] = remaining;
+    if (remaining <= 0) {
+      delete bulwarked[id];
+      delete bulwarkSaves[id];
+    } else {
+      bulwarked[id] = remaining;
+    }
   }
-  return { ...power, bulwarked };
+  return { ...power, bulwarked, bulwarkSaves };
 }
 function getBulwarkBlockedIds(state, power, flip) {
   if (Object.keys(power.bulwarked).length === 0) return [];
@@ -697,8 +725,17 @@ function getBulwarkBlockedIds(state, power, flip) {
 function consumeBulwarkBlocks(power, blockedIds) {
   if (blockedIds.length === 0) return power;
   const bulwarked = { ...power.bulwarked };
-  for (const id of blockedIds) delete bulwarked[id];
-  return { ...power, bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
+  for (const id of blockedIds) {
+    const saves = bulwarkSaves[id] ?? 1;
+    if (saves > 1) {
+      bulwarkSaves[id] = saves - 1;
+    } else {
+      delete bulwarked[id];
+      delete bulwarkSaves[id];
+    }
+  }
+  return { ...power, bulwarked, bulwarkSaves };
 }
 function tickBulwarkForNewTurn(state, power, flip) {
   const ticked = tickBulwarkExpiry(state, power, state.currentPlayer);
@@ -780,6 +817,21 @@ function scoreBulwark(state, targetId, rand) {
   score += rand() * 20;
   return score;
 }
+function bulwarkFacesThreat(state, target) {
+  if (target.position < 0 || target.position >= PATH_LENGTH_PER_PLAYER) return false;
+  const tile = BOARD_LAYOUT[target.position];
+  if (!tile.isContested || tile.type === "shield") return false;
+  return state.tokens.some(
+    (t) => t.owner !== target.owner && t.position >= 0 && target.position - t.position >= 1 && target.position - t.position <= 4
+  );
+}
+function scoreReinforcedBulwark(state, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  if (!bulwarkFacesThreat(state, target)) return -Infinity;
+  let score = -40 + target.position * 5;
+  score += rand() * 20;
+  return score;
+}
 function scoreReflip(currentMoveCount, flip, rand) {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
   return -1;
@@ -822,7 +874,7 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
       }
     }
   }
-  if (cls === "mage" && charges >= 1 && !power.reflipUsedThisTurn) {
+  if (cls === "mage" && canReflipAgain(power, mover)) {
     const score = scoreReflip(moves.length, flip, rand);
     if (score > bestScore) {
       bestScore = score;
@@ -848,11 +900,21 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
     }
   }
   if (cls === "warrior" && charges >= 1) {
-    for (const targetId of getBulwarkTargets(state, power, mover)) {
+    const bulwarkTargets = getBulwarkTargets(state, power, mover);
+    for (const targetId of bulwarkTargets) {
       const score = scoreBulwark(state, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "bulwark", tokenId: targetId };
+      }
+    }
+    if (charges === CHARGE_CAP) {
+      for (const targetId of bulwarkTargets) {
+        const score = scoreReinforcedBulwark(state, targetId, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "bulwark", tokenId: targetId, reinforced: true };
+        }
       }
     }
   }
@@ -876,7 +938,18 @@ function toWirePower(p) {
   return { ...p, safeTokens: [...p.safeTokens] };
 }
 function fromWirePower(w) {
-  return { ...w, safeTokens: new Set(w.safeTokens) };
+  return {
+    ...w,
+    safeTokens: new Set(w.safeTokens),
+    // Docs persisted before the once-per-turn boolean (reflipUsedThisTurn)
+    // became a counter read as undefined here — treat the old true as "one
+    // re-flip already used" so a mid-deploy live room can't double-dip.
+    reflipsUsedThisTurn: typeof w.reflipsUsedThisTurn === "number" ? w.reflipsUsedThisTurn : w.reflipUsedThisTurn ? 1 : 0,
+    // Same live-room back-compat: docs persisted before reinforced Bulwark
+    // existed have no bulwarkSaves — every live Bulwark in them is a plain
+    // 1-block cast, which an empty map means exactly.
+    bulwarkSaves: w.bulwarkSaves ?? {}
+  };
 }
 function sanitizeChat(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim().slice(0, CHAT_TEXT_MAX);
@@ -898,7 +971,8 @@ function publicPower(doc) {
     blinkStrikeTargets: doc.mk.classes[mover] === "mage" && doc.mk.ultimateReady[mover] ? getBlinkStrikeTargets(doc.state, p, mover) : [],
     warpathTargets: doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover] ? getWarpathTargets(doc.state, p, mover) : [],
     bulwarkTargets: doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1 ? getBulwarkTargets(doc.state, p, mover) : [],
-    bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number)
+    bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number),
+    reflipsUsedThisTurn: p.reflipsUsedThisTurn
   };
 }
 function pushEvent(doc, ev) {
@@ -1066,7 +1140,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
-      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now) };
+      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced ?? false) };
       const move = doc.currentPowerMoves[a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
     }
@@ -1088,7 +1162,7 @@ function validateUsePower(doc, seat, a) {
     case "reflip":
       if (cls !== "mage") return "Only a Mage can Re-flip";
       if (doc.mk.charges[seat] < 1) return "No charge available";
-      if (doc.mk.reflipUsedThisTurn) return "Already re-flipped this turn";
+      if (!canReflipAgain(p(), seat)) return "No re-flips left this turn";
       return null;
     case "push":
       if (cls !== "archer") return "Only an Archer can Push";
@@ -1112,7 +1186,11 @@ function validateUsePower(doc, seat, a) {
       return null;
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
-      if (doc.mk.charges[seat] < 1) return "No charge available";
+      if (a.reinforced) {
+        if (doc.mk.charges[seat] !== CHARGE_CAP) return "Reinforced Bulwark needs a full charge bank";
+      } else if (doc.mk.charges[seat] < 1) {
+        return "No charge available";
+      }
       if (!getBulwarkTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Bulwark target";
       return null;
     case "charge":
@@ -1181,7 +1259,7 @@ function applyMkCharge(doc, seat, move, now, rand) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
-function applyMkSimple(doc, seat, kind, tokenId, now) {
+function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
   const chargesBefore = doc.mk.charges[seat];
   const power = fromWirePower(doc.mk);
   let r;
@@ -1211,8 +1289,8 @@ function applyMkSimple(doc, seat, kind, tokenId, now) {
       break;
     }
     case "bulwark":
-      r = applyBulwark(doc.state, power, tokenId, seat);
-      slots = { lastBulwark: { tokenId } };
+      r = applyBulwark(doc.state, power, tokenId, seat, reinforced);
+      slots = { lastBulwark: { tokenId, reinforced } };
       break;
   }
   const delta = r.power.charges[seat] - chargesBefore;
@@ -1275,7 +1353,7 @@ function autoSkipDelay(doc) {
   const mover = doc.state.currentPlayer;
   const isBot = doc.vsCpu && mover === "p2";
   if (isBot) return AUTO_SKIP_DELAY_MS;
-  if (doc.variant === "masterKiller" && doc.mk && doc.mk.classes[mover] === "mage" && doc.mk.charges[mover] >= 1 && !doc.mk.reflipUsedThisTurn) {
+  if (doc.variant === "masterKiller" && doc.mk && doc.mk.classes[mover] === "mage" && canReflipAgain(fromWirePower(doc.mk), mover)) {
     return AUTO_SKIP_WITH_RESCUE_MS;
   }
   return AUTO_SKIP_DELAY_MS;
@@ -1392,7 +1470,7 @@ function applyBotAction(doc, seat, action, now, rand) {
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
-      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now);
+      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
   }
 }
 function commitTurnFlip(doc, now, rand) {

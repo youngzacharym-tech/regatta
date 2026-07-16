@@ -213,8 +213,9 @@ export type ServerMessage =
       lastChargedShot?: { targetTokenId: number } | null;
       /** Master Killer mode only: Warrior's Bulwark was just CAST this
        *  broadcast — same "how did we get here" lifecycle as lastPush
-       *  (mirrors lastMovePlayer for whose action this was). */
-      lastBulwark?: { tokenId: number } | null;
+       *  (mirrors lastMovePlayer for whose action this was). `reinforced`
+       *  is additive: true when it was the full-bank Reinforced cast. */
+      lastBulwark?: { tokenId: number; reinforced?: boolean } | null;
       /** Master Killer mode only: Bulwark actually BLOCKED one or more
        *  captures this broadcast — independent of lastMovePlayer, since this
        *  fires the instant a fresh flip reveals the block (see
@@ -301,7 +302,10 @@ export type ClientMessage =
         | { kind: "charge"; moveIndex: number }
         | { kind: "blinkStrike"; targetTokenId: number }
         | { kind: "warpath"; targetTokenId: number }
-        | { kind: "bulwark"; tokenId: number };
+        /** `reinforced` is additive: true spends the full charge bank on
+         *  the doubled (Reinforced) Bulwark; absent/false is the plain
+         *  1-charge cast, unchanged. */
+        | { kind: "bulwark"; tokenId: number; reinforced?: boolean };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted
