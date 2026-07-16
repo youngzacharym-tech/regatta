@@ -3325,19 +3325,21 @@ let cpuDifficulty: BotDifficulty | null = null;
 // --- Master Killer mode: menu toggle + class-pick overlay ---
 /** Ruleset picked in the menu, sent along with cpu/create joins. Ignored
  *  by the server for mode "join" — you play whatever room you're joining. */
-let menuPick: "classic" | "masterKiller" | "tutorial" = "classic";
-/** What actually goes on the wire — the tutorial IS classic regatta; the
- *  coach layer is client-side only. */
+/** The menu is a two-step flow: WHO first (computer / friend / tutorial),
+ *  then only the setup questions that fit — CPU games ask game + foe,
+ *  friend games ask game + room, the tutorial asks nothing and just sails.
+ *  Mode persists like the volume so returning players land on their game. */
+let menuIntent: "cpu" | "friend" = "cpu";
+let menuPick: "classic" | "masterKiller" =
+  localStorage.getItem("regatta-mode") === "masterKiller" ? "masterKiller" : "classic";
 function selectedVariant(): "classic" | "masterKiller" {
-  return menuPick === "masterKiller" ? "masterKiller" : "classic";
+  return menuPick;
 }
 /** CPU tier picked in the menu, persisted like regatta-volume so the choice
  *  survives reloads. Sent with mode "cpu" joins only. */
 let menuDiff: BotDifficulty = normalizeDifficulty(localStorage.getItem("regatta-cpu-difficulty"));
-/** What actually goes on the wire — the tutorial always plays the gentle
- *  bot (the picker is hidden there; see applyMenuPick). */
 function selectedDifficulty(): BotDifficulty {
-  return menuPick === "tutorial" ? "easy" : menuDiff;
+  return menuDiff;
 }
 const menuCpuBtn = document.getElementById("menu-cpu") as HTMLButtonElement;
 const menuCreateBtn = document.getElementById("menu-create") as HTMLButtonElement;
@@ -3347,32 +3349,58 @@ const menuDiffWrap = document.getElementById("menu-diff") as HTMLDivElement;
 const menuDiffSeg = document.getElementById("menu-diff-seg") as HTMLDivElement;
 const menuTitle = document.getElementById("menu-title") as HTMLHeadingElement;
 const menuTagline = document.getElementById("menu-tagline") as HTMLDivElement;
+const menuStepIntent = document.getElementById("menu-step-intent") as HTMLDivElement;
+const menuStepSetup = document.getElementById("menu-step-setup") as HTMLDivElement;
 function applyMenuPick() {
   const mk = menuPick === "masterKiller";
-  const tut = menuPick === "tutorial";
   for (const b of menuModeSeg.querySelectorAll("button")) {
     b.classList.toggle("on", b.dataset.pick === menuPick);
   }
   // The marquee follows the pick — the menu IS the game you're about to play.
-  menuTitle.textContent = tut ? "REGATTA TUTORIAL" : mk ? "MASTER KILLER" : "REGATTA";
-  menuTitle.classList.toggle("long", tut);
-  menuTagline.textContent = tut
-    ? "learn the ropes · a guided first sail"
-    : mk
-      ? "a darker table · class powers"
-      : "a race across the board";
-  // The tutorial is a guided solo sail — rooms make no sense there, and the
-  // difficulty picker hides too (the tutorial pins the gentle bot).
-  menuCpuBtn.textContent = tut ? "Begin Tutorial" : "Play vs Computer";
-  menuCreateBtn.style.display = tut ? "none" : "";
-  menuBrowseBtn.style.display = tut ? "none" : "";
-  menuDiffWrap.style.display = tut ? "none" : "";
+  menuTitle.textContent = mk ? "MASTER KILLER" : "REGATTA";
+  menuTagline.textContent = mk ? "a darker table · class powers" : "a race across the board";
+}
+/** Only the questions that fit the intent: foe pick + Begin for CPU games,
+ *  room buttons for friends. Everything else never renders. */
+function applyMenuIntent() {
+  const cpu = menuIntent === "cpu";
+  menuDiffWrap.style.display = cpu ? "" : "none";
+  menuCpuBtn.style.display = cpu ? "" : "none";
+  menuCreateBtn.style.display = cpu ? "none" : "";
+  menuBrowseBtn.style.display = cpu ? "none" : "";
+}
+function showMenuStep(step: "intent" | "setup") {
+  menuStepIntent.classList.toggle("show", step === "intent");
+  menuStepSetup.classList.toggle("show", step === "setup");
+  if (step === "setup") {
+    applyMenuPick();
+    applyMenuIntent();
+  }
 }
 menuModeSeg.addEventListener("click", (e) => {
   const b = (e.target as HTMLElement).closest("button[data-pick]") as HTMLButtonElement | null;
   if (!b) return;
   menuPick = b.dataset.pick as typeof menuPick;
+  localStorage.setItem("regatta-mode", menuPick);
   applyMenuPick();
+});
+(document.getElementById("menu-go-cpu") as HTMLButtonElement).addEventListener("click", () => {
+  menuIntent = "cpu";
+  showMenuStep("setup");
+});
+(document.getElementById("menu-go-friend") as HTMLButtonElement).addEventListener("click", () => {
+  menuIntent = "friend";
+  showMenuStep("setup");
+});
+// The tutorial is one tap — classic rules, the gentle bot, zero setup.
+(document.getElementById("menu-go-tutorial") as HTMLButtonElement).addEventListener("click", () => {
+  menuError.textContent = "";
+  tutorialMode = true;
+  coachShown.clear();
+  sendToServer({ type: "join", mode: "cpu", variant: "classic", difficulty: "easy" });
+});
+(document.getElementById("menu-back") as HTMLButtonElement).addEventListener("click", () => {
+  showMenuStep("intent");
 });
 applyMenuPick();
 
@@ -3517,12 +3545,13 @@ function resetToMenu(message: string) {
   coachShown.clear();
   hideCoach();
   hud.textContent = message;
+  showMenuStep("intent"); // fresh visit, fresh question: who are you playing?
   menuEl.classList.add("show");
 }
 
 menuCpuBtn.addEventListener("click", () => {
   menuError.textContent = "";
-  tutorialMode = menuPick === "tutorial";
+  tutorialMode = false; // the tutorial has its own one-tap path on step 1
   coachShown.clear();
   sendToServer({ type: "join", mode: "cpu", variant: selectedVariant(), difficulty: selectedDifficulty() });
 });

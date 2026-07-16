@@ -935,6 +935,45 @@
         padding: 14px 20px; font-size: 15px; letter-spacing: 0.02em;
         margin-bottom: 11px;
       }
+      /* Two-step flow: intent first, setup second. Steps swap with a short
+         rise so the card never jumps sizes jarringly. */
+      #menu .menu-step { display: none; }
+      #menu .menu-step.show { display: block; animation: menuStepIn 0.22s ease-out; }
+      @keyframes menuStepIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      /* Intent buttons: one big row each — glyph in a gem well, bold verb,
+         whisper of context under it. The whole row is the tap target. */
+      #menu .menu-intent {
+        display: flex; align-items: center; gap: 14px;
+        width: 100%; padding: 13px 16px; margin-bottom: 11px;
+        border-radius: 12px; text-align: left;
+      }
+      #menu .menu-intent .mi-icon {
+        flex: none; display: flex; align-items: center; justify-content: center;
+        width: 44px; height: 44px; border-radius: 50%;
+        background: radial-gradient(circle at 35% 30%, #3a2a18, #1c120a 75%);
+        border: 1.5px solid var(--gold-dark);
+        box-shadow: inset 0 0 8px rgba(0, 0, 0, 0.7);
+        font-size: 21px;
+      }
+      #menu .menu-intent .mi-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+      #menu .menu-intent .mi-text b {
+        font-size: 15px; font-weight: 600; color: var(--gold-text);
+        letter-spacing: 0.02em;
+      }
+      #menu .menu-intent .mi-text i {
+        font-style: normal; font-size: 11px; color: #b8a888; letter-spacing: 0.04em;
+      }
+      /* Back link — quiet, top-left of the setup step. */
+      #menu #menu-back {
+        display: block; margin: -6px 0 10px; padding: 4px 2px;
+        background: none; border: none; cursor: pointer;
+        font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+        color: #b8a888; text-align: left;
+      }
+      #menu #menu-back:hover { color: var(--gold-text); }
       /* The game-mode pick is a labeled segmented control — three obvious
          side-by-side choices with the selected one filled, so nobody has to
          guess that the mode is changeable. Selected colors keep each mode's
@@ -1298,23 +1337,43 @@
         <h1 class="gilt-title" id="menu-title">REGATTA</h1>
         <div class="tagline" id="menu-tagline">a race across the board</div>
         <div class="menu-rule"></div>
-        <div class="menu-eyebrow">Choose your game</div>
-        <div id="menu-mode-seg">
-          <button data-pick="classic" class="on" type="button">Classic</button>
-          <button data-pick="masterKiller" type="button">Master Killer</button>
-          <button data-pick="tutorial" type="button">Tutorial</button>
+        <!-- Step 1 — intent: WHO are you playing? Everything else is
+             progressive disclosure; the tutorial needs no setup at all. -->
+        <div class="menu-step show" id="menu-step-intent">
+          <button class="menu-intent gilt-btn" id="menu-go-cpu" type="button">
+            <span class="mi-icon">⚔️</span>
+            <span class="mi-text"><b>Play the Computer</b><i>a quiet table, any hour</i></span>
+          </button>
+          <button class="menu-intent gilt-btn" id="menu-go-friend" type="button">
+            <span class="mi-icon">🍺</span>
+            <span class="mi-text"><b>Play a Friend</b><i>share a room code, or join theirs</i></span>
+          </button>
+          <button class="menu-intent gilt-btn" id="menu-go-tutorial" type="button">
+            <span class="mi-icon">📜</span>
+            <span class="mi-text"><b>Learn the Game</b><i>a guided first sail — starts right away</i></span>
+          </button>
         </div>
-        <div id="menu-diff">
-          <div class="menu-eyebrow">Choose your foe</div>
-          <div id="menu-diff-seg">
-            <button data-diff="easy" type="button">Tipsy</button>
-            <button data-diff="standard" class="on" type="button">Barkeep</button>
-            <button data-diff="hard" type="button">Champion</button>
+        <!-- Step 2 — setup: only the questions that fit the chosen intent.
+             CPU games ask game + foe; friend games ask game + room. -->
+        <div class="menu-step" id="menu-step-setup">
+          <button id="menu-back" type="button">‹ all ways to play</button>
+          <div class="menu-eyebrow">Choose your game</div>
+          <div id="menu-mode-seg">
+            <button data-pick="classic" class="on" type="button">Classic</button>
+            <button data-pick="masterKiller" type="button">Master Killer</button>
           </div>
+          <div id="menu-diff">
+            <div class="menu-eyebrow">Choose your foe</div>
+            <div id="menu-diff-seg">
+              <button data-diff="easy" type="button">Tipsy</button>
+              <button data-diff="standard" class="on" type="button">Barkeep</button>
+              <button data-diff="hard" type="button">Champion</button>
+            </div>
+          </div>
+          <button class="mode gilt-btn primary" id="menu-cpu">Begin Match</button>
+          <button class="mode gilt-btn primary" id="menu-create">Create Room</button>
+          <button class="mode gilt-btn" id="menu-browse">Join Room</button>
         </div>
-        <button class="mode gilt-btn primary" id="menu-cpu">Play vs Computer</button>
-        <button class="mode gilt-btn" id="menu-create">Create Room</button>
-        <button class="mode gilt-btn" id="menu-browse">Join Room</button>
         <div class="menu-error" id="menu-error"></div>
         <button id="menu-install">⬇  Install Master Killer</button>
         <div class="credit">
