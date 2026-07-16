@@ -650,6 +650,8 @@
         text-align: center;
       }
       #menu h1 { font-size: 30px; margin-bottom: 8px; white-space: nowrap; }
+      /* "REGATTA TUTORIAL" runs longer than the other titles — step down. */
+      #menu h1.long { font-size: 24px; }
       #menu .tagline {
         font-size: 11px; color: #b8a888; margin-bottom: 14px;
         letter-spacing: 0.28em; text-transform: uppercase;
@@ -1007,8 +1009,8 @@
     <div id="menu">
       <div class="card gilt-card">
         <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
-        <h1 class="gilt-title">MASTER KILLER</h1>
-        <div class="tagline">a race across the board</div>
+        <h1 class="gilt-title" id="menu-title">REGATTA</h1>
+        <div class="tagline" id="menu-tagline">a race across the board</div>
         <div class="menu-rule"></div>
         <div class="menu-eyebrow">Choose your game</div>
         <div id="menu-mode-seg">

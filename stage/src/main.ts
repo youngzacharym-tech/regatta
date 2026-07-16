@@ -2561,11 +2561,22 @@ const menuCpuBtn = document.getElementById("menu-cpu") as HTMLButtonElement;
 const menuCreateBtn = document.getElementById("menu-create") as HTMLButtonElement;
 const menuBrowseBtn = document.getElementById("menu-browse") as HTMLButtonElement;
 const menuModeSeg = document.getElementById("menu-mode-seg") as HTMLDivElement;
+const menuTitle = document.getElementById("menu-title") as HTMLHeadingElement;
+const menuTagline = document.getElementById("menu-tagline") as HTMLDivElement;
 function applyMenuPick() {
+  const mk = menuPick === "masterKiller";
   const tut = menuPick === "tutorial";
   for (const b of menuModeSeg.querySelectorAll("button")) {
     b.classList.toggle("on", b.dataset.pick === menuPick);
   }
+  // The marquee follows the pick — the menu IS the game you're about to play.
+  menuTitle.textContent = tut ? "REGATTA TUTORIAL" : mk ? "MASTER KILLER" : "REGATTA";
+  menuTitle.classList.toggle("long", tut);
+  menuTagline.textContent = tut
+    ? "learn the ropes · a guided first sail"
+    : mk
+      ? "a darker table · class powers"
+      : "a race across the board";
   // The tutorial is a guided solo sail — rooms make no sense there.
   menuCpuBtn.textContent = tut ? "Begin Tutorial" : "Play vs Computer";
   menuCreateBtn.style.display = tut ? "none" : "";
