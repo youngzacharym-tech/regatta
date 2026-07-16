@@ -226,9 +226,12 @@ async function handleRoomApi(req: IncomingMessage, res: ServerResponse): Promise
   const ticked = tick(stepped.doc, now);
   rooms.set(room, ticked);
   if (stepped.error) console.log(`[${room}] ${seat} ${msg.op} rejected: ${stepped.error}`);
-  // Action replies carry no replay (since = latest): the poll loop delivers
-  // the new events, exactly once, ordered by seq.
-  const view: RoomResponse = { ...viewFor(ticked, seat, ticked.seq, now), error: stepped.error };
+  // Action replies replay past the client's `since` so the actor's own move
+  // renders immediately from this response — the poll loop's copy of the
+  // same events dedupes against the client's seq gate. Old clients that
+  // don't send `since` get the old contract (no replay; poll delivers).
+  const since = typeof msg.since === "number" ? msg.since : ticked.seq;
+  const view: RoomResponse = { ...viewFor(ticked, seat, since, now), error: stepped.error };
   sendJson(res, view);
 }
 

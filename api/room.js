@@ -940,6 +940,7 @@ function stateEventOf(doc) {
     lastChargeEvent: doc.lastChargeEvent,
     lastRainOfArrows: doc.lastRainOfArrows,
     lastUltimate: doc.lastUltimate,
+    lastChargeSweep: doc.lastChargeSweep ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason
@@ -1132,6 +1133,7 @@ var CLEAR_SLOTS = {
   lastChargeEvent: null,
   lastRainOfArrows: null,
   lastUltimate: null,
+  lastChargeSweep: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null
@@ -1174,7 +1176,8 @@ function applyMkCharge(doc, seat, move, now, rand) {
     lastMove: move,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
-    lastRainOfArrows: r.rainOfArrows
+    lastRainOfArrows: r.rainOfArrows,
+    lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures }
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1644,7 +1647,8 @@ async function POST(request) {
       return { doc: tick(stepped.doc, now), error: stepped.error };
     });
     if (!r) return json({ error: "Room not found" }, 404);
-    const view = { ...viewFor(r.doc, seat, r.doc.seq, now), error: r.error };
+    const actionSince = typeof msg.since === "number" ? msg.since : r.doc.seq;
+    const view = { ...viewFor(r.doc, seat, actionSince, now), error: r.error };
     return json(view);
   } catch (err) {
     console.error("room handler error", err);

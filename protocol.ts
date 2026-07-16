@@ -61,7 +61,15 @@ export type RoomRequest =
           /** True = long-poll (server holds until news or its cap). */
           wait?: boolean;
         }
-      | RoomActionInput
+      | (RoomActionInput & {
+          /** Same meaning as poll's `since`. When present, the action reply
+           *  carries the replay window past it, so the actor renders their
+           *  own move from the reply instead of waiting out the poll loop's
+           *  next re-check (the tap-to-response lag). The client's seq gate
+           *  keeps replay exactly-once when the poll answers too. Omitted
+           *  (old clients): reply carries no events, poll delivers them. */
+          since?: number;
+        })
     ));
 
 export interface RoomJoinResponse {

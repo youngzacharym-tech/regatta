@@ -144,6 +144,16 @@ function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight, false);
 }
 window.addEventListener("resize", resize);
+// iOS Safari suppresses resize while a tab is backgrounded, so an app switch
+// (or a rotation while away) can resume with the camera/canvas framed for
+// stale dimensions — mis-framed board until something else fires resize.
+// Re-frame on every return to visible, bfcache restore, and (belt and
+// braces — iOS reports post-rotation dimensions late) orientation change.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resize();
+});
+window.addEventListener("pageshow", resize);
+window.addEventListener("orientationchange", () => setTimeout(resize, 250));
 resize();
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1076,100 @@ const eligibleTokenIds = new Set<number>();
  *  eligibleTokenIds so a tap can look up the move to send. */
 const moveIndexByToken = new Map<number, number>();
 
+// --- Ability cards -----------------------------------------------------
+// Every ability button carries a small "i" gem; hovering the button (desktop)
+// or tapping the gem (touch) opens a card above the buttons that says what
+// the ability actually does — cost, effect, edge cases — like any game's
+// tooltip. Tapping the button proper still fires/arms the ability.
+const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; klass: PlayerClass }> = {
+  reflip: {
+    name: "Re-flip",
+    cost: "1 charge · keeps your turn",
+    klass: "mage",
+    desc: "Don't like your roll? Flip all four coins again instead of moving. Once per turn.",
+  },
+  push: {
+    name: "Push",
+    cost: "1 charge",
+    klass: "archer",
+    desc: "Shove an enemy stone in shared water back one pace. Push it onto your own stone or off the board and it's sent home — and the charge comes right back.",
+  },
+  chargedShot: {
+    name: "Charged Shot",
+    cost: `${CHARGE_CAP} charges`,
+    klass: "archer",
+    desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces — ${CHARGED_SHOT_WARD_DISTANCE} if Warded, the one shot that can reach a Warded stone. Send it home and one charge comes back.`,
+  },
+  charge: {
+    name: "Charge",
+    cost: "1 charge",
+    klass: "warrior",
+    desc: "Turn this move into a sweep: one enemy stone between your start and landing is captured too, Warded or not.",
+  },
+  bulwark: {
+    name: "Bulwark",
+    cost: "1 charge",
+    klass: "warrior",
+    desc: "Shield one of your own stones: it can't be captured, swept by a Charge, or taken by an ultimate. Fades after a few turns, or the moment it saves the stone.",
+  },
+  blinkStrike: {
+    name: "Blink Strike",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "mage",
+    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields and Wards.",
+  },
+  warpath: {
+    name: "Warpath",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "warrior",
+    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every unprotected enemy stone along the way.",
+  },
+};
+
+const abilityTip = document.getElementById("ability-tip") as HTMLDivElement;
+const abilityTipName = abilityTip.querySelector(".tip-name") as HTMLDivElement;
+const abilityTipCost = abilityTip.querySelector(".tip-cost") as HTMLDivElement;
+const abilityTipDesc = abilityTip.querySelector(".tip-desc") as HTMLDivElement;
+let abilityTipFor: string | null = null;
+
+function showAbilityTip(ability: string, anchor: HTMLElement) {
+  const info = ABILITY_INFO[ability];
+  if (!info) return;
+  abilityTipName.textContent = info.name;
+  abilityTipCost.textContent = info.cost;
+  abilityTipDesc.textContent = info.desc;
+  abilityTip.dataset.class = info.klass;
+  const rect = anchor.getBoundingClientRect();
+  // Centered over the button, clamped to the viewport edges.
+  const half = 160;
+  const x = Math.min(Math.max(rect.left + rect.width / 2, half + 8), window.innerWidth - half - 8);
+  abilityTip.style.left = `${x}px`;
+  abilityTip.style.bottom = `${window.innerHeight - rect.top + 10}px`;
+  abilityTip.classList.add("show");
+  abilityTipFor = ability;
+}
+
+function hideAbilityTip() {
+  abilityTip.classList.remove("show");
+  abilityTipFor = null;
+}
+
+/** Ability buttons hold a label span + the "i" gem — plain textContent
+ *  assignment would wipe the gem, so armed-state relabels go through here. */
+function setAbilityLabel(btn: HTMLButtonElement, text: string) {
+  let label = btn.querySelector<HTMLSpanElement>(".ability-label");
+  if (!label) {
+    label = document.createElement("span");
+    label.className = "ability-label";
+    const gem = document.createElement("span");
+    gem.className = "ability-info";
+    gem.textContent = "i";
+    gem.title = "What does this do?";
+    btn.append(label, gem);
+  }
+  label.textContent = text;
+}
+
 function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
   currentMoves = legalMoves;
   eligibleTokenIds.clear();
@@ -1085,6 +1189,7 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
  *  renderMoves() just cleared). Normal moves stay tap-to-move, unchanged —
  *  this only adds the extra Push/Re-flip/Charge affordances a class needs. */
 function renderPowerActions(isMyTurn: boolean) {
+  hideAbilityTip(); // buttons are about to be rebuilt under it
   pushArmed = false;
   pushTargetIds.clear();
   chargedShotArmed = false;
@@ -1104,8 +1209,9 @@ function renderPowerActions(isMyTurn: boolean) {
   // offered independent of the charges<1 gate below.
   if (cls === "mage" && currentPower.ultimateReady[mySide] && currentPower.blinkStrikeTargets.length > 0) {
     const btn = document.createElement("button");
+    btn.dataset.ability = "blinkStrike";
     const setLabel = () => {
-      btn.textContent = blinkStrikeArmed ? "Blink Strike: tap a target…" : "Blink Strike ✦";
+      setAbilityLabel(btn, blinkStrikeArmed ? "Blink Strike: tap a target…" : "Blink Strike ✦");
       btn.className = blinkStrikeArmed ? "ability ultimate armed" : "ability ultimate";
     };
     setLabel();
@@ -1120,8 +1226,9 @@ function renderPowerActions(isMyTurn: boolean) {
   }
   if (cls === "warrior" && currentPower.ultimateReady[mySide] && currentPower.warpathTargets.length > 0) {
     const btn = document.createElement("button");
+    btn.dataset.ability = "warpath";
     const setLabel = () => {
-      btn.textContent = warpathArmed ? "Warpath: tap a target…" : "Warpath ✦";
+      setAbilityLabel(btn, warpathArmed ? "Warpath: tap a target…" : "Warpath ✦");
       btn.className = warpathArmed ? "ability ultimate armed" : "ability ultimate";
     };
     setLabel();
@@ -1139,7 +1246,8 @@ function renderPowerActions(isMyTurn: boolean) {
 
   if (cls === "mage") {
     const btn = document.createElement("button");
-    btn.textContent = `Re-flip (1⚡)`;
+    btn.dataset.ability = "reflip";
+    setAbilityLabel(btn, `Re-flip (1⚡)`);
     btn.className = "ability";
     btn.addEventListener("click", () => {
       sendToServer({ type: "usePower", action: { kind: "reflip" } });
@@ -1148,8 +1256,9 @@ function renderPowerActions(isMyTurn: boolean) {
   } else if (cls === "archer") {
     if (currentPower.pushTargets.length > 0) {
       const btn = document.createElement("button");
+      btn.dataset.ability = "push";
       const setLabel = () => {
-        btn.textContent = pushArmed ? "Push: tap a target…" : `Push (1⚡)`;
+        setAbilityLabel(btn, pushArmed ? "Push: tap a target…" : `Push (1⚡)`);
         btn.className = pushArmed ? "ability armed" : "ability";
       };
       setLabel();
@@ -1167,8 +1276,9 @@ function renderPowerActions(isMyTurn: boolean) {
     // alongside it (not instead of it) when both are available.
     if (charges === CHARGE_CAP && currentPower.chargedShotTargets.length > 0) {
       const btn = document.createElement("button");
+      btn.dataset.ability = "chargedShot";
       const setLabel = () => {
-        btn.textContent = chargedShotArmed ? "Charged Shot: tap a target…" : `Charged Shot (${CHARGE_CAP}⚡)`;
+        setAbilityLabel(btn, chargedShotArmed ? "Charged Shot: tap a target…" : `Charged Shot (${CHARGE_CAP}⚡)`);
         btn.className = chargedShotArmed ? "ability ultimate armed" : "ability ultimate";
       };
       setLabel();
@@ -1187,8 +1297,9 @@ function renderPowerActions(isMyTurn: boolean) {
     // a Warrior with a spare charge can pick either each turn.
     if (currentPower.bulwarkTargets.length > 0) {
       const btn = document.createElement("button");
+      btn.dataset.ability = "bulwark";
       const setLabel = () => {
-        btn.textContent = bulwarkArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`;
+        setAbilityLabel(btn, bulwarkArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`);
         btn.className = bulwarkArmed ? "ability armed" : "ability";
       };
       setLabel();
@@ -1206,7 +1317,8 @@ function renderPowerActions(isMyTurn: boolean) {
         const m = currentPowerMoves[i];
         if (!m.chargeAvailable) continue;
         const btn = document.createElement("button");
-        btn.textContent = `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`;
+        btn.dataset.ability = "charge";
+        setAbilityLabel(btn, `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`);
         btn.className = "ability";
         const moveIndex = i;
         btn.addEventListener("click", () => {
@@ -1218,9 +1330,37 @@ function renderPowerActions(isMyTurn: boolean) {
   }
 }
 
+// The "i" gem opens the ability card INSTEAD of firing the ability — capture
+// phase so it wins over the button's own activation listener.
+movesEl.addEventListener(
+  "click",
+  (e) => {
+    const gem = (e.target as HTMLElement).closest(".ability-info");
+    if (!gem) return;
+    e.stopPropagation();
+    const btn = gem.closest("button") as HTMLButtonElement;
+    if (abilityTipFor === btn.dataset.ability) hideAbilityTip();
+    else showAbilityTip(btn.dataset.ability!, btn);
+  },
+  true,
+);
+// Desktop: hovering an ability button shows its card, like any game tooltip.
+movesEl.addEventListener("pointerover", (e) => {
+  if (!window.matchMedia("(hover: hover)").matches) return;
+  const btn = (e.target as HTMLElement).closest("button[data-ability]") as HTMLButtonElement | null;
+  if (btn) showAbilityTip(btn.dataset.ability!, btn);
+});
+movesEl.addEventListener("pointerout", (e) => {
+  if (!window.matchMedia("(hover: hover)").matches) return;
+  const to = (e as PointerEvent).relatedTarget as HTMLElement | null;
+  if (!to || !to.closest("button[data-ability]")) hideAbilityTip();
+});
+
 movesEl.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("button");
   if (!btn) return;
+  // Activating an ability puts the card away (arming flows take the screen).
+  if (btn.dataset.ability) hideAbilityTip();
   // "Play Again" branch. No more per-move buttons live here.
   if (btn.dataset.newmatch) {
     sendToServer({ type: "newMatch" });
@@ -1573,8 +1713,26 @@ volumeSlider.addEventListener("input", () => {
   updateAudioIcon();
 });
 updateAudioIcon();
-// Tapping the board puts the popout away.
-canvas.addEventListener("pointerdown", () => railEl.classList.remove("audio-open"));
+// Tapping the board puts the popout (and any open ability card) away.
+canvas.addEventListener("pointerdown", () => {
+  railEl.classList.remove("audio-open");
+  hideAbilityTip();
+  exitConfirm.classList.remove("show");
+});
+
+// The door out — back to the main menu, with a "you sure?" beat first so a
+// stray tap can't abandon a live match. Leaving clears the saved seat, so
+// the next load doesn't auto-resume a table we walked away from.
+const exitToggle = document.getElementById("exit-toggle") as HTMLButtonElement;
+const exitConfirm = document.getElementById("exit-confirm") as HTMLDivElement;
+exitToggle.addEventListener("click", () => exitConfirm.classList.toggle("show"));
+(document.getElementById("exit-no") as HTMLButtonElement).addEventListener("click", () => {
+  exitConfirm.classList.remove("show");
+});
+(document.getElementById("exit-yes") as HTMLButtonElement).addEventListener("click", () => {
+  exitConfirm.classList.remove("show");
+  resetToMenu("");
+});
 
 // ---------------------------------------------------------------------------
 // In-match chat (PvP only). The chat button lives in the rail; it's shown
@@ -1662,6 +1820,33 @@ function showAnnouncement(text: string, klass?: string, ms = 1800) {
   }, ms);
 }
 
+// --- Ability proc banner (Master Killer) -----------------------------------
+// The flashy class-colored callout ("Reroll!", "Warpath!") that pops center
+// screen when a power fires. It rides the same state events as the detail
+// banner above, so both players see every proc — the caster and the victim.
+const procEl = document.getElementById("proc") as HTMLDivElement;
+const procText = procEl.querySelector(".proc-text") as HTMLDivElement;
+const procGlyphs = procEl.querySelectorAll<HTMLSpanElement>(".proc-glyph");
+
+const PROC_GLYPHS: Record<PlayerClass, string> = {
+  archer: "➳",
+  mage: "✦",
+  // U+FE0E forces text presentation so the swords take our color + glow
+  // instead of rendering as a full-color emoji on iOS.
+  warrior: "⚔︎",
+};
+
+function showProc(klass: PlayerClass, text: string, glyphs?: [string, string]) {
+  procEl.dataset.class = klass;
+  procText.textContent = text;
+  const [left, right] = glyphs ?? [PROC_GLYPHS[klass], PROC_GLYPHS[klass]];
+  procGlyphs[0].textContent = left;
+  procGlyphs[1].textContent = right;
+  procEl.classList.remove("show");
+  void procEl.offsetWidth; // restart the CSS animation from frame 0
+  procEl.classList.add("show");
+}
+
 function playerLabel(p: PlayerId): string {
   // Seat-relative: the viewer is always "Red", the opponent always "Blue".
   return p === (myRole ?? "p1") ? "Red" : "Blue";
@@ -1693,12 +1878,18 @@ function announceFromState(msg: {
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
   lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+  lastChargeSweep?: { sweptTokenIds: number[] } | null;
+  power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
   skipReason: "flip-zero" | "no-legal-move" | null;
 }) {
   const chargeFor = (player: PlayerId): string =>
     msg.lastChargeEvent && msg.lastChargeEvent.player === player ? chargeSuffix(msg.lastChargeEvent.delta) : "";
+  // Class lookup for the proc banner — absent in classic rooms, so every
+  // showProc below is inert there by construction.
+  const classOf = (player: PlayerId | null | undefined): PlayerClass | null =>
+    player && msg.power ? (msg.power.classes[player] ?? null) : null;
 
   if (msg.wasSkipped && msg.skippedPlayer) {
     const who = playerLabel(msg.skippedPlayer);
@@ -1721,6 +1912,8 @@ function announceFromState(msg: {
     const isMine = first?.owner === myRole;
     const subject = isMine ? "Your" : "Their";
     const plural = msg.lastBulwarkBlock.tokenIds.length > 1 ? "s" : "";
+    const k = classOf(first?.owner);
+    if (k) showProc(k, "Blocked!");
     showAnnouncement(`${subject} Bulwark${plural} blocked a capture!`, "shield");
     return;
   }
@@ -1730,6 +1923,8 @@ function announceFromState(msg: {
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
     const target = isMe ? "your" : "their";
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Bulwark!");
     showAnnouncement(`${subject} raised Bulwark on ${target} token${chargeFor(msg.lastMovePlayer)}`, "shield");
     return;
   }
@@ -1742,6 +1937,8 @@ function announceFromState(msg: {
     const targetToken = msg.state.tokens.find((t) => t.id === msg.lastPush!.targetTokenId);
     const sentHome = !targetToken || targetToken.position === -1;
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Push!");
     showAnnouncement(`${subject} pushed ${target} token ${where}${chargeFor(msg.lastMovePlayer)}`, "capture");
     return;
   }
@@ -1754,6 +1951,8 @@ function announceFromState(msg: {
     const targetToken = msg.state.tokens.find((t) => t.id === msg.lastChargedShot!.targetTokenId);
     const sentHome = !targetToken || targetToken.position === -1;
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Charged Shot!");
     showAnnouncement(
       `${subject} loosed a Charged Shot — ${target} token knocked ${where}${chargeFor(msg.lastMovePlayer)}`,
       "capture",
@@ -1769,6 +1968,8 @@ function announceFromState(msg: {
     const label = msg.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
     const sweptCount = msg.lastUltimate.sweptTokenIds.length;
     const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, `${label}!`);
     showAnnouncement(
       `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}!${chargeFor(msg.lastMovePlayer)}`,
       "ultimate",
@@ -1782,6 +1983,15 @@ function announceFromState(msg: {
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
     const suffix = chargeFor(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+
+    // Move-borne ability procs fire even on a winning move — the win screen
+    // celebrates the outcome, the proc celebrates the power that caused it.
+    // Rain of Arrows (below) deliberately overrides a same-move Snipe.
+    if (k && msg.lastChargeSweep) showProc(k, "Charge!");
+    else if (k && "bonusCaptures" in m && m.bonusCaptures.length > 0) showProc(k, "Snipe!");
+    else if (k && "breaksWard" in m && m.breaksWard) showProc(k, "Ward Breaker!");
+    if (k && msg.lastRainOfArrows) showProc(k, "Rain of Arrows!");
 
     if (m.causesWin) {
       // Win screen will handle the celebration; don't double-announce.
@@ -1801,9 +2011,12 @@ function announceFromState(msg: {
     }
     // Master Killer moves may carry Snipe/Charge-sweep bonus captures on
     // top of captures — PowerMove is a structural superset of Move, so
-    // these fields are simply absent (undefined) on a classic Move.
+    // these fields are simply absent (undefined) on a classic Move. The
+    // sweep count comes from lastChargeSweep (what the Charge actually
+    // took), NOT the move's chargeSweepCaptures, which is only the preview
+    // offered before the player chose whether to spend the charge.
     const bonusCaptures = "bonusCaptures" in m ? m.bonusCaptures.length : 0;
-    const sweepCaptures = "chargeSweepCaptures" in m ? m.chargeSweepCaptures.length : 0;
+    const sweepCaptures = msg.lastChargeSweep ? msg.lastChargeSweep.sweptTokenIds.length : 0;
     const totalCaptures = m.captures.length + bonusCaptures + sweepCaptures;
     if (totalCaptures > 0) {
       const target = isMe ? "opponent's" : "your";
@@ -1832,6 +2045,9 @@ function announceFromState(msg: {
     const who = playerLabel(msg.lastChargeEvent.player);
     const isMe = msg.lastChargeEvent.player === myRole;
     const subject = isMe ? "You" : who;
+    // Two mismatched dice — Kasen's request: the "you get to roll again"
+    // image every gamer already knows, even though Regatta flips coins.
+    if (classOf(msg.lastChargeEvent.player) === "mage") showProc("mage", "Reroll!", ["⚁", "⚄"]);
     showAnnouncement(`${subject} re-flipped${chargeSuffix(msg.lastChargeEvent.delta)}`, "shield");
   }
 }
@@ -2063,6 +2279,10 @@ function processResponse(v: RoomResponse) {
     resetToMenu("Opponent left the game");
     return;
   }
+  // Action replies and poll replies both land here and can cross on the
+  // wire — never let an older snapshot regress an overlay we've already
+  // rendered past. (Events are separately seq-gated below regardless.)
+  if (v.latestSeq < lastSeq) return;
   if (v.resync) {
     // Too far behind for replay: snap silently (no banners, no tumbles).
     seenOpeningFlips = { ...v.openingFlips };
@@ -2174,6 +2394,7 @@ function doJoin(
       const j = raw as RoomJoinResponse;
       session = { room: j.room, seat: j.player, seatToken: j.seatToken };
       saveSession(session);
+      exitToggle.classList.add("show");
       closeLobby();
       seatSelf(j.player, j.room, j.vsCpu, j.variant);
       processResponse(j.view as RoomResponse);
@@ -2206,6 +2427,7 @@ function resumeSession(s: SeatSession) {
   lastSeq = 0;
   pendingFlipSeq = 0;
   armedFlipSeq = 0;
+  exitToggle.classList.add("show");
   hud.textContent = "Reconnecting to your game…";
   void pollLoop();
 }
@@ -2231,7 +2453,7 @@ let inCpuGame = false;
 let selectedVariant: "classic" | "masterKiller" = "classic";
 function updateVariantToggleLabel() {
   const mk = selectedVariant === "masterKiller";
-  menuVariantToggle.textContent = mk ? "⚔ Mode: Master Killer" : "Mode: Classic";
+  menuVariantToggle.textContent = mk ? "⚔︎ Ruleset · Master Killer" : "Ruleset · Classic";
   menuVariantToggle.classList.toggle("variant-mk", mk);
 }
 menuVariantToggle.addEventListener("click", () => {
@@ -2289,13 +2511,14 @@ function sendToServer(msg: ClientMessage) {
   }
   if (!session) return;
   const { type, ...rest } = msg as { type: string } & Record<string, unknown>;
-  post({ ...session, op: type, ...rest })
+  // `since` lets the reply carry this action's own events — the move renders
+  // the moment the POST returns instead of waiting out the poll loop's next
+  // re-check (that gap was a visible tap-to-response lag).
+  post({ ...session, op: type, ...rest, since: lastSeq })
     .then((raw) => {
       const v = raw as RoomResponse;
-      if (v.error) {
-        setStatus(`Server: ${v.error}`, "err");
-        applyOverlay(v); // re-sync interactive state to the server's truth
-      }
+      processResponse(v);
+      if (v.error) setStatus(`Server: ${v.error}`, "err");
     })
     .catch((err) => {
       if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
@@ -2356,6 +2579,8 @@ function resetToMenu(message: string) {
   myRoom = null;
   inCpuGame = false;
   clearSession();
+  exitToggle.classList.remove("show");
+  exitConfirm.classList.remove("show");
   hud.textContent = message;
   menuEl.classList.add("show");
 }
@@ -2458,21 +2683,43 @@ lobbyEl.addEventListener("click", (e) => {
 
 
 // ---------------------------------------------------------------------------
-// Game guide booklet — a little parchment book with flippable spreads.
+// Game guide booklet — a parchment book of chapters.
+//
+// The book opens on its CONTENTS page; every entry is tappable and jumps
+// straight to its chapter. One chapter = exactly one spread (two facing
+// pages), each class gets its own, and nothing ever scrolls — a chapter is
+// written to fit, and the leftover blank space is the end-of-chapter signal,
+// like real paper. On narrow screens the book shows one page at a time
+// (compact mode) so the pages stay readable instead of clipping.
 // ---------------------------------------------------------------------------
 
 const GUIDE_SPREADS: [string, string][] = [
   [
-    `<h2>Regatta</h2>
+    `<h2>Contents</h2>
+     <ol class="toc">
+       <li data-goto="1"><span>The Game &amp; the Table</span><i></i><b>I</b></li>
+       <li data-goto="2"><span>Taking a Turn</span><i></i><b>II</b></li>
+       <li data-goto="3"><span>Master Killer</span><i></i><b>III</b></li>
+       <li data-goto="4"><span>The Archer</span><i></i><b>IV</b></li>
+       <li data-goto="5"><span>The Mage</span><i></i><b>V</b></li>
+       <li data-goto="6"><span>The Warrior</span><i></i><b>VI</b></li>
+     </ol>`,
+    `<h2>How to Read This Book</h2>
+     <p>Tap any entry in the contents to open its chapter directly.</p>
+     <p>Each chapter fills exactly one spread. When the words run out, the
+     chapter is done — nothing hides below the fold, and nothing scrolls.</p>
+     <p>Turn pages with the arrows below, tap a page, or tap a dot to jump
+     between chapters.</p>`,
+  ],
+  [
+    `<h2>The Game</h2>
      <p>A race across the water, played on one carved ship. Regatta is a
      rendition of the <em>Royal Game of Ur</em> — a four-thousand-year-old
      race game — as it appears on the tavern tables of Soulframe.</p>
      <p>Two crews race to sail all <span class="gold">four stones</span> down
      their own shore, across the contested midline, and home to the far dock.
-     First crew to walk all four off the board wins.</p>
-     <p style="margin-top:14px; font-style:italic;">Turn the page to learn the
-     table &rsaquo;</p>`,
-    `<h2>The Table</h2>
+     First crew to walk all four off the board wins.</p>`,
+    `<div class="runner">The Game &middot; the table</div>
      <ul>
        <li><b>Your stones</b> bear the <span class="gold">red blossom</span>,
        matching your shore's stamps, and wait in a pile by your coins. The
@@ -2486,7 +2733,7 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
   ],
   [
-    `<h2>A Turn</h2>
+    `<h2>Taking a Turn</h2>
      <ul>
        <li>Every match opens with a <span class="gold">flip-off</span>: both
        crews tap their coins, and the higher roll takes first move. A tie
@@ -2499,14 +2746,14 @@ const GUIDE_SPREADS: [string, string][] = [
        <li>Your route: down your shore toward the prow, up the shared middle,
        then back along your shore to the dock.</li>
      </ul>`,
-    `<h2>Shields, Swords &amp; Home</h2>
+    `<div class="runner">Taking a Turn &middot; shields, swords &amp; home</div>
      <ul>
        <li><b>Shield tiles</b> (the crest glyph) grant an
        <span class="gold">extra turn</span> and protect the stone standing
        there from capture.</li>
        <li>Land on an enemy stone in shared water and it is
        <span class="gold">captured</span> — sent back to their hand to start
-       over. Hover an enemy stone to see if you can take it.</li>
+       over.</li>
        <li>Two of your own stones cannot share a tile.</li>
        <li>The final dock demands an <b>exact roll</b> — overshoot and the
        stone must wait.</li>
@@ -2520,14 +2767,25 @@ const GUIDE_SPREADS: [string, string][] = [
     `<h2>Master Killer</h2>
      <p>A darker table, offered from the menu before you sit down: each crew
      picks a <span class="gold">class</span> before the flip-off and plays
-     the whole match armed with its powers. It does not mix with the classic
-     rules mid-match — pick it fresh from the menu.</p>
+     the whole match armed with its powers.</p>
      <p>Every capture, every zero you roll, and every shield tile you land on
      fills your <span class="gold">charge</span> — up to two banked at once.
      Spend a charge to fire your class's active power, offered as a button
-     beside your coins whenever you can afford it.</p>
-     <p style="margin-top:14px; font-style:italic;">Turn the page to meet the
-     three classes &rsaquo;</p>`,
+     beside your coins whenever you can afford it.</p>`,
+    `<div class="runner">Master Killer &middot; the three classes</div>
+     <ul>
+       <li><b>The Archer</b> strikes from range — free Snipes on the water,
+       Pushes and the heavy Charged Shot to knock enemies home.</li>
+       <li><b>The Mage</b> bends fate — Wards its lead stone against capture
+       and Re-flips a bad roll.</li>
+       <li><b>The Warrior</b> walks through wards — breaks them on contact,
+       sweeps the lane with Charge, shelters behind Bulwark.</li>
+     </ul>
+     <p>Each class keeps its own chapter in this book — and each hides an
+     <span class="gold">ultimate</span>, earned by landing on shield tiles
+     three times in a row without your turn ever passing.</p>`,
+  ],
+  [
     `<h2>The Archer</h2>
      <ul>
        <li><b>Snipe</b> (passive, free): move onto shared water, and if an
@@ -2538,23 +2796,22 @@ const GUIDE_SPREADS: [string, string][] = [
        the board, and it is sent all the way home to their hand — and your
        charge comes right back, since that's really a capture.</li>
        <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
-       Push entirely — the charge is spent, but the stone doesn't move.
-       Reach for Charged Shot if you want to touch a Warded stone.</li>
-       <li><b>Charged Shot</b> (active, both charges at once): loose a
-       heavier shot at an enemy stone in shared water, knocking it back a
-       full ${CHARGED_SHOT_DISTANCE} paces — or ${CHARGED_SHOT_WARD_DISTANCE}
-       paces against a <span class="gold">Warded</span> stone, the one shot
-       that can still reach it at all. Send a target all the way home and
-       one charge comes right back; otherwise it's a costly shove. The
-       Archer's answer to a Warrior, who can never be Warded and so always
+       Push entirely — the charge is spent, but the stone doesn't move.</li>
+     </ul>`,
+    `<div class="runner">The Archer &middot; continued</div>
+     <ul>
+       <li><b>Charged Shot</b> (active, spends both charges): a heavier shot
+       at an enemy stone in shared water, knocking it back
+       ${CHARGED_SHOT_DISTANCE} paces — or ${CHARGED_SHOT_WARD_DISTANCE}
+       against a <span class="gold">Warded</span> stone, the one shot that
+       can still reach it at all. Send the target all the way home and one
+       charge comes right back. A Warrior can never be Warded, so it always
        takes the full hit.</li>
-       <li><b>Rain of Arrows</b> (passive, free — the Archer's ultimate):
-       land on a shield tile three times in a row, with your turn never
-       once passing to the opponent in between, and that third landing
-       strikes down a random enemy stone anywhere in shared water — even
-       one standing on a shield, warded by a Mage, or sheltered by a
-       Warrior's Bulwark. Rare by design: only three shield tiles exist on
-       the whole board.</li>
+       <li><b>Rain of Arrows</b> (the ultimate, free): chain three shield
+       landings in a row, your turn never passing between them, and the
+       third strikes down a random enemy stone in shared water — through
+       shields, Wards, and Bulwarks alike. Rare by design: the board holds
+       only three shield tiles.</li>
      </ul>`,
   ],
   [
@@ -2564,18 +2821,23 @@ const GUIDE_SPREADS: [string, string][] = [
        two charges, your furthest-along stone still on the water cannot be
        captured — by anyone but a Warrior's Ward Breaker, and a Charged
        Shot can still knock it home. A plain Push can't budge it at all.</li>
-       <li><b>Re-flip</b> (active, 1 charge): dislike your roll? Spend a
-       charge to flip again instead of moving — once per turn, and it does
-       not end your turn.</li>
        <li>Ward always follows whichever of your stones is furthest along —
        send that one all the way home and it passes to whichever stone
        takes the lead.</li>
+     </ul>`,
+    `<div class="runner">The Mage &middot; continued</div>
+     <ul>
+       <li><b>Re-flip</b> (active, 1 charge): dislike your roll? Spend a
+       charge to flip again instead of moving — once per turn, and it does
+       not end your turn.</li>
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight
        onto any enemy in shared water — capturing it even through a shield
        or a Ward.</li>
      </ul>`,
+  ],
+  [
     `<h2>The Warrior</h2>
      <ul>
        <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
@@ -2583,21 +2845,23 @@ const GUIDE_SPREADS: [string, string][] = [
        stands safe from capture until it next moves.</li>
        <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
        enemy stone in shared water between where you started and where you
-       land is captured too, Warded or not. Ward Breaker means Warriors
-       cut through a Ward wherever they meet one, mid-sweep included.</li>
+       land is captured too, Warded or not.</li>
        <li>The Warrior is the one class no Ward can stop cold — everyone
        else needs a Push or a lucky Re-flip instead.</li>
-       <li><b>Warpath</b> (active, spends your ultimate): land on a shield
-       tile three times running, then teleport your least-advanced stone
-       onto any enemy in shared water — capturing it plus every unprotected
-       enemy stone caught between where it started and where it lands, no
-       cap, Warded or not. Break a Ward along the way and the landing stone
-       stands safe from capture until it next moves.</li>
+     </ul>`,
+    `<div class="runner">The Warrior &middot; continued</div>
+     <ul>
        <li><b>Bulwark</b> (active, 1 charge): raise a shield over one of
        YOUR OWN stones — it cannot be captured, swept by Charge, or taken by
        an enemy ultimate, and a Push can only shove it, never send it home.
-       It fades after a few of your turns unused, or the instant it actually
-       saves the stone, whichever comes first.</li>
+       It fades after a few of your turns unused, or the instant it saves
+       the stone.</li>
+       <li><b>Warpath</b> (active, spends your ultimate): land on a shield
+       tile three times running, then teleport your least-advanced stone
+       onto any enemy in shared water — capturing it plus every unprotected
+       enemy stone caught between where it started and where it lands,
+       Warded or not. Break a Ward along the way and the landing stone
+       stands safe from capture until it next moves.</li>
      </ul>`,
   ],
 ];
@@ -2607,14 +2871,24 @@ const guideBook = document.getElementById("guide-book") as HTMLDivElement;
 const guideLeft = document.getElementById("guide-left") as HTMLDivElement;
 const guideRight = document.getElementById("guide-right") as HTMLDivElement;
 const guideDots = document.getElementById("guide-dots") as HTMLDivElement;
-let guideSpread = 0;
+/** Compact = one page per view (narrow screens). */
+const guideCompact = window.matchMedia("(max-width: 740px)");
+/** Spread index in full mode; PAGE index (spread*2 or +1) in compact mode. */
+let guidePos = 0;
 
 function renderGuide() {
-  const [l, r] = GUIDE_SPREADS[guideSpread];
-  guideLeft.innerHTML = l;
-  guideRight.innerHTML = r;
+  const compact = guideCompact.matches;
+  guideBook.classList.toggle("compact", compact);
+  if (compact) {
+    guideLeft.innerHTML = GUIDE_SPREADS.flat()[guidePos];
+  } else {
+    const [l, r] = GUIDE_SPREADS[guidePos];
+    guideLeft.innerHTML = l;
+    guideRight.innerHTML = r;
+  }
+  const spreadOn = compact ? Math.floor(guidePos / 2) : guidePos;
   guideDots.innerHTML = GUIDE_SPREADS.map(
-    (_, i) => `<span${i === guideSpread ? ' class="on"' : ""}></span>`,
+    (_, i) => `<span data-goto="${i}"${i === spreadOn ? ' class="on"' : ""}></span>`,
   ).join("");
   // retrigger the page-flip animation
   guideBook.classList.remove("flip");
@@ -2623,14 +2897,26 @@ function renderGuide() {
 }
 
 function turnGuide(dir: number) {
-  const next = guideSpread + dir;
-  if (next < 0 || next >= GUIDE_SPREADS.length) return;
-  guideSpread = next;
+  const count = guideCompact.matches ? GUIDE_SPREADS.length * 2 : GUIDE_SPREADS.length;
+  const next = guidePos + dir;
+  if (next < 0 || next >= count) return;
+  guidePos = next;
   renderGuide();
 }
 
+function jumpToSpread(spread: number) {
+  guidePos = guideCompact.matches ? spread * 2 : spread;
+  renderGuide();
+}
+
+// Rotating/resizing while the book is open: keep the same spread in view.
+guideCompact.addEventListener("change", () => {
+  guidePos = guideCompact.matches ? guidePos * 2 : Math.floor(guidePos / 2);
+  if (guideOverlay.classList.contains("show")) renderGuide();
+});
+
 (document.getElementById("guide-toggle") as HTMLButtonElement).addEventListener("click", () => {
-  guideSpread = 0;
+  guidePos = 0; // the book always opens on its contents page
   renderGuide();
   guideOverlay.classList.add("show");
 });
@@ -2642,8 +2928,18 @@ function turnGuide(dir: number) {
 guideOverlay.addEventListener("click", (e) => {
   if (e.target === guideOverlay) guideOverlay.classList.remove("show");
 });
-guideRight.addEventListener("click", () => turnGuide(1));
-guideLeft.addEventListener("click", () => turnGuide(-1));
+// One delegated handler: TOC entries + dots jump, otherwise tapping a page
+// turns it (right/forward, left/back — in compact mode any tap reads on).
+guideBook.addEventListener("click", (e) => {
+  const t = e.target as HTMLElement;
+  const link = t.closest("[data-goto]") as HTMLElement | null;
+  if (link) {
+    jumpToSpread(Number(link.dataset.goto));
+    return;
+  }
+  if (t.closest("#guide-right") || (guideCompact.matches && t.closest("#guide-left"))) turnGuide(1);
+  else if (t.closest("#guide-left")) turnGuide(-1);
+});
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") guideOverlay.classList.remove("show");
 });

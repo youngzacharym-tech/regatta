@@ -180,6 +180,12 @@ export type RoomEvent =
       lastChargeEvent: { player: PlayerId; delta: number } | null;
       lastRainOfArrows: { targetTokenId: number | null } | null;
       lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+      /** Warrior's Charge was just EXECUTED this commit (vs the normal move
+       *  it was offered on). lastMove's chargeSweepCaptures is only a
+       *  PREVIEW list — this is the authoritative "it actually happened"
+       *  signal, same lifecycle as lastPush. `sweptTokenIds` are the extra
+       *  captures the sweep actually took (may be empty). */
+      lastChargeSweep: { sweptTokenIds: number[] } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -231,6 +237,9 @@ export interface RoomDoc {
   lastPush: { targetTokenId: number } | null;
   lastChargedShot: { targetTokenId: number } | null;
   lastChargeEvent: { player: PlayerId; delta: number } | null;
+  /** See RoomEvent's doc: set only on the commit where a Charge executed.
+   *  Docs persisted before this field existed read as undefined ≙ null. */
+  lastChargeSweep?: { sweptTokenIds: number[] } | null;
   /** Bridges a zero-flip's charge grant (flip commit) to the auto-skip
    *  commit that announces it — two separate commits/events. */
   zeroFlipChargeBefore: number | null;
@@ -385,6 +394,7 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastChargeEvent: doc.lastChargeEvent,
     lastRainOfArrows: doc.lastRainOfArrows,
     lastUltimate: doc.lastUltimate,
+    lastChargeSweep: doc.lastChargeSweep ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -639,6 +649,7 @@ const CLEAR_SLOTS = {
   lastChargeEvent: null,
   lastRainOfArrows: null,
   lastUltimate: null,
+  lastChargeSweep: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -684,6 +695,7 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
     lastRainOfArrows: r.rainOfArrows,
+    lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures },
   };
   return commitFrame(next, now, stateEventOf(next));
 }

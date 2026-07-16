@@ -7,6 +7,7 @@
     <meta name="description" content="Master Killer — a two-player race across the board with class powers. Play a friend or the computer." />
     <meta name="theme-color" content="#16161e" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="preload" href="/fonts/cinzel-decorative-700.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="icon" href="/icons/icon-192.png" type="image/png" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -54,6 +55,7 @@
       .frame-gem.top { top: -10px; left: 50%; margin-left: -8px; }
       .frame-gem.bottom { bottom: -10px; left: 50%; margin-left: -8px; }
       .gilt-title {
+        font-family: "Cinzel Decorative", Georgia, serif; font-weight: 700;
         background: linear-gradient(180deg, #f8ecc0 0%, var(--gold-text) 42%, #9a7433 75%, #e2bf72 100%);
         -webkit-background-clip: text; background-clip: text; color: transparent;
         letter-spacing: 2px;
@@ -120,6 +122,42 @@
         background: linear-gradient(180deg, #f0d189 0%, #c9a35c 45%, #a67c33 55%, #dcb96a 100%) padding-box, linear-gradient(160deg, #fff3c8, #7a5c2e) border-box;
         color: #2a1a08; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
       }
+      /* The little "i" gem on every ability button — opens the ability card. */
+      #moves button .ability-info {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 17px; height: 17px; margin-left: 8px; border-radius: 50%;
+        font-size: 11px; font-weight: 700; font-style: italic; line-height: 1;
+        font-family: Georgia, serif;
+        background: rgba(0, 0, 0, 0.35); color: rgba(255, 244, 214, 0.85);
+        border: 1px solid rgba(255, 244, 214, 0.45);
+        vertical-align: 1px;
+      }
+      #moves button .ability-info:hover { background: rgba(0, 0, 0, 0.55); }
+      /* The ability card — name, cost, and what the power actually does.
+         Class-tinted name, gilded wood card, floats just above the buttons. */
+      #ability-tip {
+        position: fixed; z-index: 130; width: 320px; max-width: 92vw;
+        transform: translateX(-50%);
+        border: 2px solid transparent; border-radius: 12px;
+        background: linear-gradient(165deg, rgba(40, 27, 16, 0.97), rgba(24, 16, 12, 0.97)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 12px 36px rgba(0, 0, 0, 0.6);
+        padding: 12px 15px 13px; pointer-events: none;
+        display: none; text-align: left;
+        --tip-color: #ffd370;
+      }
+      #ability-tip.show { display: block; }
+      #ability-tip[data-class="archer"]  { --tip-color: #7de996; }
+      #ability-tip[data-class="mage"]    { --tip-color: #d9a5ff; }
+      #ability-tip[data-class="warrior"] { --tip-color: #8fc1ff; }
+      #ability-tip .tip-name {
+        font-size: 15px; font-weight: 700; color: var(--tip-color);
+        letter-spacing: 0.03em; margin-bottom: 2px;
+      }
+      #ability-tip .tip-cost {
+        font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.12em;
+        color: #b8a888; margin-bottom: 7px;
+      }
+      #ability-tip .tip-desc { font-size: 13px; line-height: 1.5; color: var(--parchment); }
       #status {
         position: fixed; top: 10px; right: 10px;
         border: 2px solid transparent;
@@ -306,6 +344,30 @@
       #rail button:hover { filter: brightness(1.2); }
       #install-toggle { display: none; color: #ffc98a; }
       #install-toggle.show { display: block; }
+      /* Leave-the-table door — only shown while seated at a game. */
+      #exit-toggle { display: none; }
+      #exit-toggle.show { display: block; }
+      #exit-confirm {
+        position: fixed; right: 72px; bottom: 14px; z-index: 62;
+        border: 2px solid transparent; border-radius: 12px;
+        background: linear-gradient(165deg, rgba(40, 27, 16, 0.97), rgba(24, 16, 12, 0.97)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 12px 36px rgba(0, 0, 0, 0.6);
+        padding: 13px 16px; display: none; text-align: center;
+      }
+      #exit-confirm.show { display: block; }
+      #exit-confirm .msg { color: var(--parchment); font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+      #exit-confirm .row { display: flex; gap: 8px; justify-content: center; }
+      #exit-confirm button {
+        border: 2px solid transparent; border-radius: 9px;
+        padding: 7px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+        background: linear-gradient(180deg, #32241a, #1e1510) padding-box, var(--gold-rim) border-box;
+        color: var(--gold-text);
+      }
+      #exit-confirm button:hover { filter: brightness(1.2); }
+      #exit-confirm #exit-yes {
+        background: linear-gradient(180deg, #5a2020, #341010) padding-box, linear-gradient(160deg, #ffb9a8, #7c2d2d 55%, #e8c87e) border-box;
+        color: #ffcfc2;
+      }
       /* Volume slider pops out to the LEFT of the audio button. */
       #volume {
         position: absolute; right: 58px; bottom: 6px;
@@ -328,8 +390,10 @@
         background: #ff6a4a; border: 2px solid #17100a;
       }
       #chat-panel {
-        position: fixed; right: 14px; bottom: 72px; z-index: 61;
-        width: min(320px, 78vw); height: min(360px, 52vh);
+        /* Docked to the LEFT of the utility rail (never over it — the chat
+           toggle must stay visible so the panel can be closed again). */
+        position: fixed; right: 72px; bottom: 14px; z-index: 61;
+        width: min(320px, calc(100vw - 88px)); height: min(360px, 52vh);
         display: none; flex-direction: column;
         border: 2px solid transparent;
         background: linear-gradient(165deg, rgba(34, 23, 14, 0.95), rgba(20, 13, 10, 0.95)) padding-box, var(--gold-rim) border-box;
@@ -358,7 +422,7 @@
       #chat-input:focus { outline: none; }
       #chat-input::placeholder { color: #8a7a63; }
       @media (max-width: 740px), (max-height: 480px) {
-        #chat-panel { bottom: 64px; height: min(300px, 60vh); }
+        #chat-panel { right: 58px; bottom: 10px; width: min(320px, calc(100vw - 72px)); height: min(300px, 60vh); }
       }
 
       @media (max-width: 740px), (max-height: 480px) {
@@ -396,7 +460,9 @@
         color: #3b2a17; font-family: Georgia, "Times New Roman", serif;
       }
       #guide-book .page {
-        flex: 1; padding: 26px 30px; overflow-y: auto;
+        /* NEVER scrolls: every section is written to fit its spread, and the
+           leftover blank space is the "end of chapter" signal, like paper. */
+        flex: 1; padding: 26px 30px; overflow: hidden;
         font-size: 14px; line-height: 1.55;
       }
       #guide-book .page h2 {
@@ -407,6 +473,33 @@
       #guide-book .page ul { margin: 0 0 9px 18px; }
       #guide-book .page li { margin-bottom: 5px; }
       #guide-book .page .gold { color: #a06010; font-weight: bold; }
+      /* Right-page continuation marker ("The Archer · continued") */
+      #guide-book .page .runner {
+        font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+        color: rgba(90, 60, 20, 0.55); margin-bottom: 12px;
+      }
+      /* Table of contents — tappable chapter list with dot leaders */
+      #guide-book .toc { list-style: none; margin: 4px 0 0; }
+      #guide-book .toc li {
+        display: flex; align-items: baseline; gap: 8px;
+        padding: 7px 4px; cursor: pointer; border-radius: 6px;
+      }
+      #guide-book .toc li:hover { background: rgba(160, 96, 16, 0.12); }
+      #guide-book .toc li span { white-space: nowrap; }
+      #guide-book .toc li i {
+        flex: 1; border-bottom: 2px dotted rgba(90, 60, 20, 0.4);
+        transform: translateY(-3px);
+      }
+      #guide-book .toc li b { color: #a06010; }
+      /* Compact mode (narrow screens): the book shows ONE page at a time —
+         two skinny side-by-side columns would clip or need scrolling. */
+      #guide-book.compact { width: min(430px, 94vw); }
+      #guide-book.compact .spine, #guide-book.compact #guide-right { display: none; }
+      @media (max-height: 520px) {
+        #guide-book { height: 92vh; }
+        #guide-book .page { padding: 18px 22px; font-size: 12.5px; line-height: 1.5; }
+        #guide-book .page h2 { font-size: 16px; margin-bottom: 7px; }
+      }
       #guide-book .spine {
         width: 3px; align-self: stretch;
         background: linear-gradient(to right, rgba(60, 35, 10, 0.05), rgba(60, 35, 10, 0.5), rgba(60, 35, 10, 0.05));
@@ -438,6 +531,59 @@
         background: rgba(90, 60, 20, 0.3);
       }
       #guide-dots span.on { background: #a06010; }
+
+      /* --- Ability proc banner (Master Killer) ---
+         Big glowing class-colored callout ("Reroll!", "Warpath!") that pops
+         on BOTH screens whenever a power fires. One display face for every
+         ability; only the color and flanking glyphs change per class. The
+         font ships locally (stage/public/fonts) so the PWA has it offline. */
+      @font-face {
+        font-family: "Cinzel Decorative";
+        src: url("/fonts/cinzel-decorative-700.woff2") format("woff2");
+        font-weight: 700;
+        font-style: normal;
+        font-display: swap;
+      }
+      #proc {
+        position: fixed; top: 34%; left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 140; /* above the table + plates, below guide/menu overlays */
+        display: flex; align-items: center; gap: 20px;
+        pointer-events: none; opacity: 0;
+        font-family: "Cinzel Decorative", Georgia, serif;
+        white-space: nowrap;
+        /* Neutral gold fallback; each class overrides via data-class. */
+        --proc-color: #ffe9b8; --proc-glow: rgba(255, 211, 112, 0.6);
+      }
+      /* Light tint for the letterforms, the class's gem color as the glow —
+         saturated text on the dark felt reads muddy, glow reads magical. */
+      #proc[data-class="archer"]  { --proc-color: #c8ffd6; --proc-glow: rgba(61, 220, 101, 0.65); }
+      #proc[data-class="mage"]    { --proc-color: #eed6ff; --proc-glow: rgba(180, 92, 255, 0.65); }
+      #proc[data-class="warrior"] { --proc-color: #d0e4ff; --proc-glow: rgba(63, 131, 255, 0.65); }
+      #proc .proc-text {
+        font-size: clamp(34px, 7.5vw, 64px);
+        font-weight: 700;
+        color: var(--proc-color);
+        letter-spacing: 0.05em;
+        text-shadow:
+          0 0 12px var(--proc-glow),
+          0 0 34px var(--proc-glow),
+          0 0 72px var(--proc-glow),
+          0 3px 6px rgba(0, 0, 0, 0.85);
+      }
+      #proc .proc-glyph {
+        font-size: clamp(30px, 6vw, 52px);
+        color: var(--proc-color);
+        text-shadow: 0 0 14px var(--proc-glow), 0 2px 4px rgba(0, 0, 0, 0.85);
+      }
+      #proc.show { animation: proc-pop 2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+      @keyframes proc-pop {
+        0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+        10%  { opacity: 1; transform: translate(-50%, -50%) scale(1.12); }
+        18%  { transform: translate(-50%, -50%) scale(1); }
+        78%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        100% { opacity: 0; transform: translate(-50%, -54%) scale(1.04); }
+      }
 
       /* --- Event announcement banner --- */
       #announce {
@@ -474,16 +620,46 @@
       }
       #menu.show { display: flex; }
       #menu .card {
-        padding: 32px 38px;
-        min-width: 300px;
+        padding: 38px 46px 28px;
+        min-width: 340px;
         text-align: center;
       }
-      #menu h1 { font-size: 28px; margin-bottom: 4px; white-space: nowrap; }
-      #menu .tagline { font-size: 12px; color: #b8a888; margin-bottom: 22px; letter-spacing: 1px; }
+      #menu h1 { font-size: 30px; margin-bottom: 8px; white-space: nowrap; }
+      #menu .tagline {
+        font-size: 11px; color: #b8a888; margin-bottom: 14px;
+        letter-spacing: 0.28em; text-transform: uppercase;
+      }
+      /* Filigree rule — hairline with a set gem, echoing the frame gems. */
+      #menu .menu-rule {
+        position: relative; height: 1px; margin: 0 6px 22px;
+        background: linear-gradient(90deg, transparent, rgba(216, 184, 119, 0.5) 18%, rgba(216, 184, 119, 0.5) 82%, transparent);
+      }
+      #menu .menu-rule::after {
+        content: ""; position: absolute; left: 50%; top: -3.5px;
+        width: 7px; height: 7px; transform: translateX(-50%) rotate(45deg);
+        background: radial-gradient(circle at 35% 30%, #fff5d0 0%, var(--gem-amber) 55%, #a05e10 100%);
+        border-radius: 1px;
+        box-shadow: 0 0 7px rgba(255, 179, 71, 0.55);
+      }
       #menu button.mode {
         display: block; width: 100%;
-        padding: 13px 20px; font-size: 15px;
-        margin-bottom: 10px;
+        padding: 14px 20px; font-size: 15px; letter-spacing: 0.02em;
+        margin-bottom: 11px;
+      }
+      /* The ruleset pick is a quiet pill, not a fourth loud action —
+         hierarchy: what you PLAY is louder than what rules you play by. */
+      #menu button.mode.variant-toggle {
+        width: auto; margin: 0 auto 20px;
+        background: rgba(246, 227, 164, 0.03);
+        border: 1px solid rgba(216, 184, 119, 0.4); border-radius: 999px;
+        color: #cdb68a; box-shadow: none;
+        font-size: 11px; font-weight: 600;
+        letter-spacing: 0.18em; text-transform: uppercase;
+        padding: 9px 18px;
+      }
+      #menu button.mode.variant-toggle:hover {
+        border-color: rgba(246, 227, 164, 0.75); color: #f0dfae;
+        background: rgba(246, 227, 164, 0.07); filter: none;
       }
       /* --- Room browser (lobby) --- */
       #lobby {
@@ -627,23 +803,29 @@
         backdrop-filter: blur(3px);
       }
       #classpick.show { display: flex; }
+      /* While picking a class the utility rail + chat stay usable ABOVE the
+         overlay backdrop (chat with your opponent about picks; the guide,
+         which the rail opens, must in turn sit above the raised rail). */
+      body:has(#classpick.show) #rail { z-index: 253; }
+      body:has(#classpick.show) #chat-panel { z-index: 254; }
+      body:has(#classpick.show) #guide-overlay { z-index: 255; }
       #classpick .card {
-        padding: 30px 38px;
+        padding: 38px 48px;
         min-width: 300px;
         text-align: center;
       }
-      #classpick h1 { font-size: 28px; margin-bottom: 4px; }
-      #classpick .tagline { font-size: 12px; color: #b8a888; margin-bottom: 20px; min-height: 16px; }
-      #classpick .classes { display: flex; gap: 18px; justify-content: center; }
+      #classpick h1 { font-size: 36px; margin-bottom: 6px; }
+      #classpick .tagline { font-size: 14px; color: #b8a888; margin-bottom: 26px; min-height: 18px; }
+      #classpick .classes { display: flex; gap: 28px; justify-content: center; }
       #classpick button.class {
-        width: 158px;
+        width: 210px;
         background: transparent; color: var(--parchment); border: none;
-        padding: 6px 4px 10px; border-radius: 12px;
-        font-size: 16px; font-weight: 600; cursor: pointer;
+        padding: 8px 6px 14px; border-radius: 14px;
+        font-size: 20px; font-weight: 600; cursor: pointer;
         text-align: center;
       }
       #classpick button.class img {
-        display: block; width: 116px; height: 116px; margin: 0 auto 10px;
+        display: block; width: 160px; height: 160px; margin: 0 auto 12px;
         border-radius: 50%; border: 3px solid #7a5c2e;
         box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.55);
         transition: transform 0.15s ease-out, box-shadow 0.15s ease-out, border-color 0.15s;
@@ -662,20 +844,43 @@
         box-shadow: 0 0 20px 5px rgba(255, 211, 112, 0.55), 0 6px 16px rgba(0, 0, 0, 0.55);
       }
       #classpick button.class .class-desc {
-        display: block; font-size: 11px; font-weight: 400; opacity: 0.75; margin-top: 4px; line-height: 1.4;
+        display: block; font-size: 13px; font-weight: 400; opacity: 0.75; margin-top: 6px; line-height: 1.45;
+      }
+      /* Portrait phones: row of three fixed-width buttons can't fit, so stack
+         them — avatar left, name + description right — and keep avatars big. */
+      @media (max-width: 740px) and (min-height: 481px) {
+        #classpick .card { padding: 22px 20px; min-width: 0; max-width: min(92vw, 440px); }
+        #classpick h1 { font-size: 30px; }
+        #classpick .tagline { margin-bottom: 18px; }
+        #classpick .classes { flex-direction: column; gap: 14px; align-items: stretch; }
+        #classpick button.class {
+          width: 100%;
+          display: grid; grid-template-columns: 104px 1fr; grid-template-rows: auto auto;
+          column-gap: 16px; align-items: center;
+          padding: 8px 12px; text-align: left; font-size: 19px;
+        }
+        #classpick button.class img { grid-row: 1 / 3; width: 104px; height: 104px; margin: 0; }
+        #classpick button.class b { align-self: end; }
+        #classpick button.class .class-desc { align-self: start; margin-top: 2px; }
       }
       @media (max-height: 480px) {
         #classpick .card { padding: 16px 22px; }
-        #classpick h1 { font-size: 19px; }
-        #classpick .tagline { margin-bottom: 10px; }
-        #classpick button.class { width: 128px; }
-        #classpick button.class img { width: 76px; height: 76px; margin-bottom: 6px; }
+        #classpick h1 { font-size: 22px; }
+        #classpick .tagline { margin-bottom: 12px; }
+        #classpick button.class { width: 158px; font-size: 17px; }
+        #classpick button.class img { width: 96px; height: 96px; margin-bottom: 8px; }
+        #classpick button.class .class-desc { font-size: 11px; }
       }
 
       /* --- Menu's Master Killer mode toggle --- */
       #menu button.mode.variant-toggle.variant-mk {
-        background: linear-gradient(180deg, #5a2020, #341010) padding-box, linear-gradient(160deg, #ffb9a8, #7c2d2d 55%, #e8c87e) border-box;
-        color: #ffcfc2;
+        background: rgba(122, 45, 45, 0.28);
+        border-color: rgba(255, 154, 138, 0.55);
+        color: #ffb9a8;
+      }
+      #menu button.mode.variant-toggle.variant-mk:hover {
+        border-color: rgba(255, 185, 168, 0.8); color: #ffd6cb;
+        background: rgba(122, 45, 45, 0.4);
       }
 
       /* --- Room invite banner (shown while waiting for a friend) --- */
@@ -719,7 +924,15 @@
       <button id="guide-toggle" title="How to play">📖</button>
       <button id="install-toggle" title="Install Regatta">⬇</button>
       <button id="mute-toggle" title="Sound">🔊</button>
+      <button id="exit-toggle" title="Leave the table">🚪</button>
       <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
+    </div>
+    <div id="exit-confirm">
+      <div class="msg">Leave the table?</div>
+      <div class="row">
+        <button id="exit-yes">Leave</button>
+        <button id="exit-no">Stay</button>
+      </div>
     </div>
     <div id="chat-panel">
       <div id="chat-log"></div>
@@ -745,13 +958,24 @@
         <div id="guide-dots"></div>
       </div>
     </div>
+    <div id="proc" aria-hidden="true">
+      <span class="proc-glyph"></span>
+      <div class="proc-text"></div>
+      <span class="proc-glyph"></span>
+    </div>
+    <div id="ability-tip">
+      <div class="tip-name"></div>
+      <div class="tip-cost"></div>
+      <div class="tip-desc"></div>
+    </div>
     <div id="announce"></div>
     <div id="menu">
       <div class="card gilt-card">
         <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
         <h1 class="gilt-title">MASTER KILLER</h1>
         <div class="tagline">a race across the board</div>
-        <button class="mode variant-toggle gilt-btn" id="menu-variant-toggle" type="button">Mode: Classic</button>
+        <div class="menu-rule"></div>
+        <button class="mode variant-toggle gilt-btn" id="menu-variant-toggle" type="button">Ruleset · Classic</button>
         <button class="mode gilt-btn primary" id="menu-cpu">Play vs Computer</button>
         <button class="mode gilt-btn" id="menu-create">Create Room</button>
         <button class="mode gilt-btn" id="menu-browse">Join Room</button>

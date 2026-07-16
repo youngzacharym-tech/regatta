@@ -257,9 +257,12 @@ export async function POST(request: Request): Promise<Response> {
       return { doc: tick(stepped.doc, now), error: stepped.error };
     });
     if (!r) return json({ error: "Room not found" }, 404);
-    // Action replies carry no replay (since = latest): the client's poll
-    // loop delivers the new events, exactly once, ordered by seq.
-    const view: RoomResponse = { ...viewFor(r.doc, seat, r.doc.seq, now), error: r.error };
+    // Action replies replay past the client's `since` so the actor's own
+    // move renders immediately from this response — the poll loop's copy of
+    // the same events dedupes against the client's seq gate. Old clients
+    // that don't send `since` get the old contract (no replay).
+    const actionSince = typeof msg.since === "number" ? msg.since : r.doc.seq;
+    const view: RoomResponse = { ...viewFor(r.doc, seat, actionSince, now), error: r.error };
     return json(view);
   } catch (err) {
     console.error("room handler error", err);
