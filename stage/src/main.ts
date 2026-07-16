@@ -613,6 +613,9 @@ scene.add(fireSprite);
 // can take bathes it in a warm halo.
 // ---------------------------------------------------------------------------
 
+/** Marker indexes pulsed as movable last frame (see the render loop). */
+const pulsedEligible = new Set<number>();
+
 const hoverGlow = new THREE.Mesh(
   new THREE.PlaneGeometry(0.66, 0.66),
   new THREE.MeshBasicMaterial({
@@ -831,7 +834,12 @@ function refreshMarkers(state: GameState) {
  *  (currentPower === null) always take the clear-everything branch — a
  *  no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
+/** Last state handed to updateTokenTints — the eligible-stone pulse in the
+ *  render loop re-applies these tints when a stone stops being movable. */
+let lastTintedState: GameState | null = null;
+
 function updateTokenTints(state: GameState) {
+  lastTintedState = state;
   const safe = currentPower ? new Set(currentPower.safeTokens) : null;
   const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
   const fakePower: PowerState | null = currentPower
@@ -3142,6 +3150,31 @@ function tick() {
       }
     } else {
       marker.mesh.position.lerp(marker.target, lerp);
+    }
+  }
+  // Movable stones breathe gold — "stones you may move light up", as the
+  // guide and tutorial promise. The pulse rides OVER the status tints
+  // (ward/bulwark/safe) while it's your turn; the moment a stone stops
+  // being movable, the plain tints are re-applied from the last state.
+  if (pulsedEligible.size > 0) {
+    let stale = false;
+    for (const i of pulsedEligible)
+      if (!eligibleTokenIds.has(i)) {
+        stale = true;
+        break;
+      }
+    if (stale) {
+      pulsedEligible.clear();
+      if (lastTintedState) updateTokenTints(lastTintedState);
+    }
+  }
+  if (eligibleTokenIds.size > 0) {
+    const glow = 0.4 + 0.35 * Math.abs(Math.sin(now * 0.004));
+    for (const i of eligibleTokenIds) {
+      const mat = markers[i].mesh.material as THREE.MeshStandardMaterial;
+      mat.emissive.setHex(0xffc36a);
+      mat.emissiveIntensity = glow;
+      pulsedEligible.add(i);
     }
   }
   // Gentle breathing on the capture-hover glow.
