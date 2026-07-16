@@ -559,9 +559,11 @@
 
       /* --- Ability proc banner (Master Killer) ---
          Big glowing class-colored callout ("Reroll!", "Warpath!") that pops
-         on BOTH screens whenever a power fires. One display face for every
-         ability; only the color and flanking glyphs change per class. The
-         font ships locally (stage/public/fonts) so the PWA has it offline. */
+         on BOTH screens whenever a power fires: title text with the ability's
+         ornamental icon beneath it (proc-icons.ts), both tinted by the
+         caster's class via --proc-color. The icon's entrance trails the text
+         pop by ~120ms inside the same 2s window. The font ships locally
+         (stage/public/fonts) so the PWA has it offline. */
       @font-face {
         font-family: "Cinzel Decorative";
         src: url("/fonts/cinzel-decorative-700.woff2") format("woff2");
@@ -573,35 +575,71 @@
         position: fixed; top: 34%; left: 50%;
         transform: translate(-50%, -50%);
         z-index: 140; /* above the table + plates, below guide/menu overlays */
-        display: flex; align-items: center; gap: 20px;
+        display: flex; flex-direction: column; align-items: center; gap: 10px;
         pointer-events: none; opacity: 0;
         font-family: "Cinzel Decorative", Georgia, serif;
-        white-space: nowrap;
+        /* Long titles ("Reinforced Bulwark!") overflow a 390px viewport at the
+           34px clamp floor — wrap to centered lines instead; short procs still
+           fit on one. */
+        white-space: normal; max-width: 94vw; text-align: center;
         /* Neutral gold fallback; each class overrides via data-class. */
         --proc-color: #ffe9b8; --proc-glow: rgba(255, 211, 112, 0.6);
       }
-      /* Light tint for the letterforms, the class's gem color as the glow —
-         saturated text on the dark felt reads muddy, glow reads magical. */
-      #proc[data-class="archer"]  { --proc-color: #c8ffd6; --proc-glow: rgba(61, 220, 101, 0.65); }
-      #proc[data-class="mage"]    { --proc-color: #eed6ff; --proc-glow: rgba(180, 92, 255, 0.65); }
-      #proc[data-class="warrior"] { --proc-color: #d0e4ff; --proc-glow: rgba(63, 131, 255, 0.65); }
+      /* Mid-lightness class tint for the letterforms, the class's gem color
+         as the glow. Fully saturated text on the dark felt reads muddy;
+         the old ~90%-lightness pastels all read near-white at arm's length —
+         these sit between, unmistakably classed and still legible. */
+      #proc[data-class="archer"]  { --proc-color: #7ef29d; --proc-glow: rgba(61, 220, 101, 0.8); }
+      #proc[data-class="mage"]    { --proc-color: #d9a3ff; --proc-glow: rgba(180, 92, 255, 0.8); }
+      #proc[data-class="warrior"] { --proc-color: #9cc2ff; --proc-glow: rgba(63, 131, 255, 0.8); }
       #proc .proc-text {
         font-size: clamp(34px, 7.5vw, 64px);
+        line-height: 1.08;
         font-weight: 700;
         color: var(--proc-color);
         letter-spacing: 0.05em;
         text-shadow:
+          0 0 6px var(--proc-glow),
           0 0 12px var(--proc-glow),
           0 0 34px var(--proc-glow),
           0 0 72px var(--proc-glow),
           0 3px 6px rgba(0, 0, 0, 0.85);
       }
-      #proc .proc-glyph {
-        font-size: clamp(30px, 6vw, 52px);
+      #proc .proc-icon {
+        position: relative;
+        width: clamp(56px, 9vw, 76px); height: clamp(56px, 9vw, 76px);
         color: var(--proc-color);
-        text-shadow: 0 0 14px var(--proc-glow), 0 2px 4px rgba(0, 0, 0, 0.85);
+        filter: drop-shadow(0 0 10px var(--proc-glow)) drop-shadow(0 2px 3px rgba(0, 0, 0, 0.85));
+      }
+      #proc .proc-icon svg { width: 100%; height: 100%; display: block; }
+      /* Ultimates land bigger than the rest of the roster (scale the svg,
+         not the container — proc-icon-in owns the container's transform). */
+      #proc .proc-icon[data-icon="blinkStrike"] svg,
+      #proc .proc-icon[data-icon="warpath"] svg { transform: scale(1.15); }
+      /* Cheap halo bloom — transform/opacity only; never animate filter
+         (iOS repaints the whole layer per frame). */
+      #proc .proc-icon::before {
+        content: ""; position: absolute; inset: -30%; z-index: -1; border-radius: 50%;
+        background: radial-gradient(circle, var(--proc-glow) 0%, transparent 65%);
+        opacity: 0;
       }
       #proc.show { animation: proc-pop 2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+      /* Child entrances are gated on .show, so displayProc's remove/reflow/
+         re-add restart trick restarts them in lockstep with the text. */
+      #proc.show .proc-icon { animation: proc-icon-in 2s cubic-bezier(0.16, 1, 0.3, 1) both; }
+      #proc.show .proc-icon::before { animation: proc-halo 2s ease-out both; }
+      @keyframes proc-icon-in {
+        0%, 6% { opacity: 0; transform: scale(0.4) translateY(-6px); }
+        16%    { opacity: 1; transform: scale(1.16) translateY(0); }
+        24%    { transform: scale(1); }
+        100%   { opacity: 1; transform: scale(1); }
+      }
+      @keyframes proc-halo {
+        0%, 8% { opacity: 0; transform: scale(0.5); }
+        18%    { opacity: 0.9; transform: scale(1.25); }
+        42%    { opacity: 0.35; transform: scale(1); }
+        100%   { opacity: 0.35; transform: scale(1); }
+      }
       @keyframes proc-pop {
         0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
         10%  { opacity: 1; transform: translate(-50%, -50%) scale(1.12); }
@@ -991,9 +1029,8 @@
       </div>
     </div>
     <div id="proc" aria-hidden="true">
-      <span class="proc-glyph"></span>
       <div class="proc-text"></div>
-      <span class="proc-glyph"></span>
+      <div class="proc-icon"></div>
     </div>
     <div id="ability-tip">
       <div class="tip-name"></div>

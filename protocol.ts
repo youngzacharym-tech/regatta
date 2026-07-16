@@ -243,6 +243,12 @@ export type ServerMessage =
        *  empty for Blink Strike, which never sweeps). Server-computed,
        *  never re-derived client-side. */
       lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+      /** Master Killer mode only: Mage's Re-flip just resolved on this
+       *  broadcast. Deliberately separate from lastChargeEvent, which nets
+       *  to null when the replacement flip is a zero (the spent charge is
+       *  refunded) even though a re-flip DID happen and the client owes an
+       *  announcement. Server-computed, never re-derived client-side. */
+      lastReflip?: { player: PlayerId } | null;
     }
   | {
       type: "gameOver";

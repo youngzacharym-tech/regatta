@@ -21,6 +21,7 @@ import type {
 import { BOARD_LAYOUT } from "../../rulebook.ts";
 import { tileWorldPos, reservePos, escapedPos } from "./layout.ts";
 import { audio } from "./audio.ts";
+import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (myVariant stays "classic", currentPower stays null, and every
 // branch that reads them is gated accordingly).
@@ -2327,26 +2328,73 @@ function showAnnouncement(text: string, klass?: string, ms = 1800) {
 // banner above, so both players see every proc — the caster and the victim.
 const procEl = document.getElementById("proc") as HTMLDivElement;
 const procText = procEl.querySelector(".proc-text") as HTMLDivElement;
-const procGlyphs = procEl.querySelectorAll<HTMLSpanElement>(".proc-glyph");
+const procIcon = procEl.querySelector(".proc-icon") as HTMLDivElement;
 
-const PROC_GLYPHS: Record<PlayerClass, string> = {
-  archer: "➳",
-  mage: "✦",
-  // U+FE0E forces text presentation so the swords take our color + glow
-  // instead of rendering as a full-color emoji on iOS.
-  warrior: "⚔︎",
-};
-
-function showProc(klass: PlayerClass, text: string, glyphs?: [string, string]) {
+/** Paint one proc RIGHT NOW — queue-internal; everyone else calls showProc. */
+function displayProc(klass: PlayerClass, text: string, icon: ProcIconId) {
   procEl.dataset.class = klass;
   procText.textContent = text;
-  const [left, right] = glyphs ?? [PROC_GLYPHS[klass], PROC_GLYPHS[klass]];
-  procGlyphs[0].textContent = left;
-  procGlyphs[1].textContent = right;
+  // Static trusted strings from proc-icons.ts only — never server-derived.
+  procIcon.innerHTML = PROC_ICONS[icon];
+  procIcon.dataset.icon = icon; // ultimates upscale via a CSS attribute hook
   procEl.classList.remove("show");
   void procEl.offsetWidth; // restart the CSS animation from frame 0
   procEl.classList.add("show");
 }
+
+// Batched event replay (a bot turn + the next flip answered by one poll, or
+// an iPad returning from the background) used to call the banner back-to-back
+// and only the LAST proc survived the restart — the visible banner was
+// routinely the OTHER player's event in the other player's color. Queue
+// instead: show immediately when idle, otherwise hold each proc for a
+// readable beat. Capped — a long catch-up drops the OLDEST, newest info wins.
+const PROC_SPACING_MS = 950; // pop-in settles ~360ms in; hold runs to 1560ms
+const PROC_QUEUE_CAP = 3;
+let procQueue: Array<{ klass: PlayerClass; text: string; icon: ProcIconId }> = [];
+let procBusyUntil = 0;
+let procDrainTimer: number | null = null;
+
+function showProc(klass: PlayerClass, text: string, icon: ProcIconId) {
+  const now = performance.now();
+  if (now >= procBusyUntil && procQueue.length === 0) {
+    displayProc(klass, text, icon);
+    procBusyUntil = now + PROC_SPACING_MS;
+    return;
+  }
+  if (procQueue.length >= PROC_QUEUE_CAP) procQueue.shift();
+  procQueue.push({ klass, text, icon });
+  if (procDrainTimer === null) {
+    procDrainTimer = window.setTimeout(drainProcQueue, Math.max(0, procBusyUntil - now));
+  }
+}
+
+function drainProcQueue() {
+  procDrainTimer = null;
+  const next = procQueue.shift();
+  if (!next) return;
+  displayProc(next.klass, next.text, next.icon);
+  procBusyUntil = performance.now() + PROC_SPACING_MS;
+  if (procQueue.length > 0) {
+    procDrainTimer = window.setTimeout(drainProcQueue, PROC_SPACING_MS);
+  }
+}
+
+/** A fresh match (menu reset or rematch flip-off) owes nothing to the last
+ *  one — drop any procs still waiting their beat. */
+function clearProcQueue() {
+  procQueue = [];
+  procBusyUntil = 0;
+  if (procDrainTimer !== null) {
+    clearTimeout(procDrainTimer);
+    procDrainTimer = null;
+  }
+}
+
+// Manual-QA affordance: fire any proc from the console, e.g.
+//   __proc("mage", "Reroll!", "reflip")
+// Deliberately unconditional — tsconfig has no vite/client types, so an
+// import.meta.env.DEV gate would not typecheck.
+(window as unknown as { __proc: typeof showProc }).__proc = showProc;
 
 // --- Tutorial coach ---------------------------------------------------------
 // "Regatta Tutorial" from the menu is a REAL classic game vs the CPU with a
@@ -2404,6 +2452,7 @@ function announceFromState(msg: {
   lastRainOfArrows?: { targetTokenId: number | null } | null;
   lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
   lastChargeSweep?: { sweptTokenIds: number[] } | null;
+  lastReflip?: { player: PlayerId } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -2432,6 +2481,14 @@ function announceFromState(msg: {
     return;
   }
 
+  // Mage Re-flip proc — the same commit can ALSO reveal a Bulwark block
+  // below (a re-flip that lands on a warded threat), and that branch returns
+  // early. Fire the Reroll BEFORE it so the queue plays both, purple then
+  // blue, instead of Blocked! swallowing the mage's own proc.
+  if (msg.lastReflip && classOf(msg.lastReflip.player) === "mage") {
+    showProc("mage", "Reroll!", "reflip");
+  }
+
   // Bulwark actually blocking a capture is its own signal, independent of
   // lastMovePlayer (it fires the instant a fresh flip reveals the block —
   // see master-killer.ts's tickBulwarkForNewTurn — which can be before the
@@ -2442,7 +2499,7 @@ function announceFromState(msg: {
     const subject = isMine ? "Your" : "Their";
     const plural = msg.lastBulwarkBlock.tokenIds.length > 1 ? "s" : "";
     const k = classOf(first?.owner);
-    if (k) showProc(k, "Blocked!");
+    if (k) showProc(k, "Blocked!", "bulwarkBlock");
     showAnnouncement(`${subject} Bulwark${plural} blocked a capture!`, "shield");
     return;
   }
@@ -2454,7 +2511,7 @@ function announceFromState(msg: {
     const target = isMe ? "your" : "their";
     const reinforced = msg.lastBulwark.reinforced === true;
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, reinforced ? "Reinforced Bulwark!" : "Bulwark!");
+    if (k) showProc(k, reinforced ? "Reinforced Bulwark!" : "Bulwark!", reinforced ? "bulwarkReinforced" : "bulwark");
     showAnnouncement(
       `${subject} raised ${reinforced ? "a REINFORCED Bulwark" : "Bulwark"} on ${target} token${chargeFor(msg.lastMovePlayer)}`,
       "shield",
@@ -2471,7 +2528,7 @@ function announceFromState(msg: {
     const sentHome = !targetToken || targetToken.position === -1;
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, "Push!");
+    if (k) showProc(k, "Push!", "push");
     showAnnouncement(`${subject} pushed ${target} token ${where}${chargeFor(msg.lastMovePlayer)}`, "capture");
     return;
   }
@@ -2485,7 +2542,7 @@ function announceFromState(msg: {
     const sentHome = !targetToken || targetToken.position === -1;
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, "Charged Shot!");
+    if (k) showProc(k, "Charged Shot!", "chargedShot");
     showAnnouncement(
       `${subject} loosed a Charged Shot — ${target} token knocked ${where}${chargeFor(msg.lastMovePlayer)}`,
       "capture",
@@ -2502,7 +2559,7 @@ function announceFromState(msg: {
     const sweptCount = msg.lastUltimate.sweptTokenIds.length;
     const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, `${label}!`);
+    if (k) showProc(k, `${label}!`, msg.lastUltimate.kind);
     showAnnouncement(
       `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}!${chargeFor(msg.lastMovePlayer)}`,
       "ultimate",
@@ -2520,11 +2577,15 @@ function announceFromState(msg: {
 
     // Move-borne ability procs fire even on a winning move — the win screen
     // celebrates the outcome, the proc celebrates the power that caused it.
-    // Rain of Arrows (below) deliberately overrides a same-move Snipe.
-    if (k && msg.lastChargeSweep) showProc(k, "Charge!");
-    else if (k && "bonusCaptures" in m && m.bonusCaptures.length > 0) showProc(k, "Snipe!");
-    else if (k && "breaksWard" in m && m.breaksWard) showProc(k, "Ward Breaker!");
-    if (k && msg.lastRainOfArrows) showProc(k, "Rain of Arrows!");
+    // ONE proc per commit, highest priority first: Rain of Arrows outranks a
+    // same-move Snipe (it used to rely on banner overwrite for that — under
+    // the queue an overwrite would mean "show both," so it's explicit now).
+    if (k) {
+      if (msg.lastRainOfArrows) showProc(k, "Rain of Arrows!", "rainOfArrows");
+      else if (msg.lastChargeSweep) showProc(k, "Charge!", "charge");
+      else if ("bonusCaptures" in m && m.bonusCaptures.length > 0) showProc(k, "Snipe!", "snipe");
+      else if ("breaksWard" in m && m.breaksWard) showProc(k, "Ward Breaker!", "wardBreaker");
+    }
 
     if (m.causesWin) {
       // Win screen will handle the celebration; don't double-announce.
@@ -2583,17 +2644,21 @@ function announceFromState(msg: {
     return;
   }
 
-  // No move, no push, no skip — the only thing left that can still change
-  // a charge count is a Re-flip (which doesn't end the turn, so none of
-  // the above fire). Give it its own small confirmation.
-  if (msg.lastChargeEvent) {
-    const who = playerLabel(msg.lastChargeEvent.player);
-    const isMe = msg.lastChargeEvent.player === myRole;
+  // No move, no push, no skip — the only thing left that can reach here is
+  // a Re-flip (which doesn't end the turn, so none of the above fire).
+  // Keyed on lastReflip so a net-zero charge delta (re-flip cost refunded by
+  // a zero replacement flip) still announces — lastChargeEvent alone missed
+  // roughly one re-flip in sixteen entirely.
+  const reflipper = msg.lastReflip?.player ?? msg.lastChargeEvent?.player;
+  if (reflipper) {
+    const who = playerLabel(reflipper);
+    const isMe = reflipper === myRole;
     const subject = isMe ? "You" : who;
-    // Two mismatched dice — Kasen's request: the "you get to roll again"
-    // image every gamer already knows, even though Regatta flips coins.
-    if (classOf(msg.lastChargeEvent.player) === "mage") showProc("mage", "Reroll!", ["⚁", "⚄"]);
-    showAnnouncement(`${subject} re-flipped${chargeSuffix(msg.lastChargeEvent.delta)}`, "shield");
+    // Deploy-order fallback: an old server sends no lastReflip, so the
+    // hoisted proc at the top never fired — keep today's behavior here.
+    if (!msg.lastReflip && classOf(reflipper) === "mage") showProc("mage", "Reroll!", "reflip");
+    const suffix = msg.lastChargeEvent ? chargeSuffix(msg.lastChargeEvent.delta) : "";
+    showAnnouncement(`${subject} re-flipped${suffix}`, "shield");
   }
 }
 
@@ -2681,6 +2746,7 @@ function replayEvent(ev: RoomEvent) {
   if (ev.kind === "chat" || ev.kind === "classPick") return; // overlay-rendered
   if (ev.kind === "opening") {
     hideWinScreen(); // a rematch re-enters the flip-off
+    clearProcQueue(); // last match's queued procs die with it
     const mySide: PlayerId = myRole ?? "p1";
     // Tumble any flips we haven't shown yet this round.
     for (const seat of ["p1", "p2"] as PlayerId[]) {
@@ -3136,6 +3202,7 @@ function resetToMenu(message: string) {
   resetMug(theirMug);
   hideWinScreen();
   hideRoomInfo();
+  clearProcQueue();
   classpickEl.classList.remove("show");
   movesEl.innerHTML = "";
   currentMoves = null;

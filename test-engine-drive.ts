@@ -104,6 +104,16 @@ function playOne(variant: "classic" | "masterKiller", p1Class: PlayerClass, p2Cl
           act({ op: "usePower", action: { kind: "charge", moveIndex: moves.indexOf(action.move) } });
         } else {
           act({ op: "usePower", action } as RoomActionInput);
+          if (action.kind === "reflip") {
+            // The re-flip commit must announce itself even when the charge
+            // math nets to zero (cost refunded by a zero replacement flip) —
+            // the client's Reroll! proc keys on this field, not the delta.
+            const newest = doc.events[doc.events.length - 1];
+            assert(
+              newest?.kind === "state" && newest.lastReflip?.player === "p1",
+              "reflip commit missing lastReflip",
+            );
+          }
         }
         return;
       }

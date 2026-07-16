@@ -1015,6 +1015,7 @@ function stateEventOf(doc) {
     lastRainOfArrows: doc.lastRainOfArrows,
     lastUltimate: doc.lastUltimate,
     lastChargeSweep: doc.lastChargeSweep ?? null,
+    lastReflip: doc.lastReflip ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason
@@ -1047,6 +1048,7 @@ function freshMatchFields(variant) {
     lastUltimate: null,
     lastBulwark: null,
     lastBulwarkBlock: null,
+    lastReflip: null,
     rescueAttempted: false
   };
 }
@@ -1212,6 +1214,7 @@ var CLEAR_SLOTS = {
   lastRainOfArrows: null,
   lastUltimate: null,
   lastChargeSweep: null,
+  lastReflip: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null
@@ -1325,6 +1328,7 @@ function applyMkReflip(doc, seat, now, rand) {
     lastMovePlayer: doc.lastMovePlayer,
     lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastReflip: { player: seat },
     // A re-rolled zero still ends in the auto-skip path, which announces the
     // NET delta computed here — don't re-derive from zeroFlipChargeBefore.
     zeroFlipChargeBefore: null

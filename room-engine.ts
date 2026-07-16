@@ -213,6 +213,12 @@ export type RoomEvent =
        *  signal, same lifecycle as lastPush. `sweptTokenIds` are the extra
        *  captures the sweep actually took (may be empty). */
       lastChargeSweep: { sweptTokenIds: number[] } | null;
+      /** Mage's Re-flip just resolved on this commit. lastChargeEvent alone
+       *  can't signal it: a re-rolled zero refunds the spent charge, the
+       *  delta nets to 0 and the event goes null — but the re-flip still
+       *  happened and the client still owes the proc. Events from before
+       *  this field existed read as undefined ≙ null. */
+      lastReflip?: { player: PlayerId } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -274,6 +280,9 @@ export interface RoomDoc {
   lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
   lastBulwark: { tokenId: number; reinforced?: boolean } | null;
   lastBulwarkBlock: { tokenIds: number[] } | null;
+  /** See RoomEvent's doc: set only on the commit where a Re-flip resolved.
+   *  Docs persisted before this field existed read as undefined ≙ null. */
+  lastReflip?: { player: PlayerId } | null;
 }
 
 // ============================================================================
@@ -426,6 +435,7 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastRainOfArrows: doc.lastRainOfArrows,
     lastUltimate: doc.lastUltimate,
     lastChargeSweep: doc.lastChargeSweep ?? null,
+    lastReflip: doc.lastReflip ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -450,7 +460,7 @@ export function freshMatchFields(
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
-  | "rescueAttempted"
+  | "lastReflip" | "rescueAttempted"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -475,6 +485,7 @@ export function freshMatchFields(
     lastUltimate: null,
     lastBulwark: null,
     lastBulwarkBlock: null,
+    lastReflip: null,
     rescueAttempted: false,
   };
 }
@@ -688,6 +699,7 @@ const CLEAR_SLOTS = {
   lastRainOfArrows: null,
   lastUltimate: null,
   lastChargeSweep: null,
+  lastReflip: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -818,6 +830,7 @@ function applyMkReflip(doc: RoomDoc, seat: PlayerId, now: number, rand: () => nu
     lastMovePlayer: doc.lastMovePlayer,
     lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastReflip: { player: seat },
     // A re-rolled zero still ends in the auto-skip path, which announces the
     // NET delta computed here — don't re-derive from zeroFlipChargeBefore.
     zeroFlipChargeBefore: null,
