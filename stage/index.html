@@ -290,7 +290,10 @@
          Plates only .show in Master Killer rooms; the rail is always there. */
       #plate-cluster {
         position: fixed; left: 14px; bottom: 14px; z-index: 60;
+        /* One knob sizes YOUR plate AND the ability arc that rides its rim. */
+        --plate-me: 232px;
       }
+      #plate-me .plate-ring { width: var(--plate-me); height: var(--plate-me); }
       .plate { display: none; }
       .plate.show { display: block; }
       .plate-ring {
@@ -352,21 +355,34 @@
       #plate-them { position: fixed; top: 54px; right: 14px; z-index: 60; }
       #plate-them .plate-ring { width: 150px; height: 150px; }
 
-      /* --- Ability Dock — plate-anchored class-power gems ---
-         One gem button per active ability, in a row off my plate's right
-         shoulder. Built ONCE per class by buildDock(); every update just
-         toggles state classes so transitions animate instead of snapping:
-           (base)    off-turn / pre-roll — #dock.off dims the whole row
+      /* --- Ability Dock — gems SET INTO the plate's gold frame ---
+         One gem button per active ability, riding the avatar ring's rim on
+         an arc from 11 o'clock to 2 o'clock (buildDock computes each slot's
+         unit vector; --arc-r pushes it just proud of the frame). Built ONCE
+         per class; every update just toggles state classes so transitions
+         animate instead of snapping:
+           (base)    off-turn / pre-roll — #dock.off dims the whole arc
            .noafford my turn, can't cast — greyed glass, unlit red pips
            .ready    castable — class tint + breathing glow
            .armed    aiming — gold lock ring; every sibling gets .dim
            .spent    Re-flip out of uses, or a dormant ultimate (the goal,
                      always visible for Mage/Warrior)                    */
       #dock {
-        position: fixed; left: 226px; bottom: 20px; z-index: 60;
-        display: none; align-items: flex-end; gap: 10px;
+        position: absolute; left: 0; top: 0; z-index: 3;
+        width: var(--plate-me); height: var(--plate-me);
+        display: none; pointer-events: none;
+        --arc-r: 54%;
       }
-      #dock.show { display: flex; }
+      #dock.show { display: block; }
+      /* Slot positioner: carries the clock-angle placement so the button
+         keeps its own transform channel for shake/armed-scale animations. */
+      .dock-slot {
+        position: absolute;
+        left: calc(50% + var(--ax) * var(--arc-r));
+        top: calc(50% + var(--ay) * var(--arc-r));
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
       #dock.off { opacity: 0.45; filter: saturate(0.55); }
       /* Class gem palettes — tint, glow, and the gem's own glass. */
       #dock[data-class="archer"]  { --gem-color: #3ddc65; --gem-glow: rgba(61, 220, 101, 0.7);  --gem-grad: radial-gradient(circle at 35% 28%, #2c8a4a, #123a20 75%); }
@@ -374,6 +390,7 @@
       #dock[data-class="warrior"] { --gem-color: #3f83ff; --gem-glow: rgba(63, 131, 255, 0.7);  --gem-grad: radial-gradient(circle at 35% 28%, #2f5fb4, #12264a 75%); }
       .dock-btn {
         position: relative; padding: 0; border: none; background: transparent;
+        pointer-events: auto;
         cursor: pointer; touch-action: manipulation;
         -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
         transition: transform 0.14s cubic-bezier(0.2, 1.4, 0.4, 1), opacity 0.18s ease-out;
@@ -382,17 +399,17 @@
       .dock-btn.dim { opacity: 0.3; }
       .dock-gem {
         position: relative; display: flex; align-items: center; justify-content: center;
-        width: 68px; height: 68px; border-radius: 50%;
+        width: 58px; height: 58px; border-radius: 50%;
         border: 2px solid transparent;
         background: var(--gem-grad) padding-box, var(--gold-rim) border-box;
         box-shadow: 0 0 0 2px var(--wood-dark), 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 0 10px rgba(0, 0, 0, 0.55);
       }
-      .dock-btn.ult .dock-gem { width: 76px; height: 76px; }
+      .dock-btn.ult .dock-gem { width: 64px; height: 64px; }
       .dock-icon {
-        font-size: 30px; line-height: 1; color: #f2ead6;
+        font-size: 26px; line-height: 1; color: #f2ead6;
         text-shadow: 0 0 8px var(--gem-glow), 0 1px 2px #000;
       }
-      .dock-btn.ult .dock-icon { font-size: 34px; }
+      .dock-btn.ult .dock-icon { font-size: 28px; }
       /* Charge cost — mini marquise pips riding the gem's bottom rim; lit
          pips = charges you HOLD toward the cost, so a half-funded 2-cost
          gem reads as one lit + one dark. */
@@ -437,14 +454,9 @@
         font-size: 11px; font-weight: 700; color: #fff; line-height: 1;
       }
       @keyframes warnPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
-      /* Names hang below without widening the flex row (absolute), so the
-         gems stay an even rhythm no matter how long the label runs. */
-      .dock-name {
-        position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
-        margin-top: 7px; white-space: nowrap;
-        font-size: 10px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
-        color: #e8d8c0; text-shadow: 0 1px 2px #000;
-      }
+      /* Labels retired on the arc — gems ride the frame like set jewels;
+         hold-to-peek carries the names. (Kept in the DOM for the cards.) */
+      .dock-name { display: none; }
       .dock-btn.noafford .dock-gem { filter: grayscale(0.55) brightness(0.75); }
       .dock-btn.noafford .dock-cost i { border-color: #8a3a30; }
       /* Breathing ready-glow: a fixed shadow whose OPACITY animates —
@@ -639,7 +651,7 @@
         #plate-them .plate-ring { width: 88px; height: 88px; }
         #plate-them .plate-gems { bottom: -8px; gap: 9px; }
         .gem { width: 15px; height: 15px; }
-        #plate-cluster { left: 10px; bottom: 10px; }
+        #plate-cluster { left: 10px; bottom: 10px; --plate-me: 150px; }
         #rail { right: 10px; bottom: 10px; gap: 6px; }
         #rail button { width: 42px; height: 42px; font-size: 17px; }
         #volume { right: 50px; width: 110px; }
@@ -650,13 +662,13 @@
         #moves { bottom: 8px; gap: 4px; }
         #moves button { font-size: 12px; padding: 7px 11px; border-radius: 8px; }
         #chat-panel { bottom: 56px; }
-        /* Dock rides the smaller 118px plate; labels go — the gems carry it. */
-        #dock { left: 138px; bottom: 12px; gap: 8px; }
-        .dock-gem { width: 52px; height: 52px; }
-        .dock-btn.ult .dock-gem { width: 58px; height: 58px; }
-        .dock-icon { font-size: 24px; }
-        .dock-btn.ult .dock-icon { font-size: 26px; }
-        .dock-name { display: none; }
+        /* Arc rides the 150px plate; gems shrink to keep 30° air between
+           warrior's four slots (chord ≈ 44px at 57%). */
+        #dock { --arc-r: 57%; }
+        .dock-gem { width: 42px; height: 42px; }
+        .dock-btn.ult .dock-gem { width: 46px; height: 46px; }
+        .dock-icon { font-size: 20px; }
+        .dock-btn.ult .dock-icon { font-size: 22px; }
         .dock-cost i { width: 9px; height: 9px; }
         .dock-warn { width: 15px; height: 15px; }
         .dock-warn::after { font-size: 9px; }
@@ -670,15 +682,14 @@
          than landscape so the whole dock row clears 390px, and the utility
          rail lifts out of the dock's corner. */
       @media (max-width: 500px) and (orientation: portrait) {
-        #plate-cluster { left: 10px; bottom: 10px; }
+        #plate-cluster { left: 10px; bottom: 10px; --plate-me: 108px; }
         .plate-ring { width: 84px; height: 84px; }
-        #dock { left: 102px; bottom: 12px; gap: 8px; }
-        .dock-gem { width: 56px; height: 56px; }
-        .dock-btn.ult .dock-gem { width: 62px; height: 62px; }
-        .dock-icon { font-size: 26px; }
-        .dock-btn.ult .dock-icon { font-size: 28px; }
-        .dock-name { display: none; }
-        .dock-cost i { width: 10px; height: 10px; }
+        #dock { --arc-r: 62%; }
+        .dock-gem { width: 34px; height: 34px; }
+        .dock-btn.ult .dock-gem { width: 38px; height: 38px; }
+        .dock-icon { font-size: 16px; }
+        .dock-btn.ult .dock-icon { font-size: 18px; }
+        .dock-cost i { width: 8px; height: 8px; }
         #rail { bottom: 108px; }
       }
       #guide-overlay {

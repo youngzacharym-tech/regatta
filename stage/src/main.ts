@@ -1784,7 +1784,20 @@ function buildDock(cls: PlayerClass) {
   hideAbilityTip();
   dockEl.dataset.class = cls;
   dockEl.innerHTML = "";
-  for (const slot of DOCK_SLOTS[cls]) {
+  const slots = DOCK_SLOTS[cls];
+  slots.forEach((slot, i) => {
+    // Gems sit IN the plate's gold frame along the 11-to-2 o'clock arc
+    // (clock angle, clockwise from 12: 11h = -30°, 2h = +60°), spread
+    // evenly endpoints-inclusive. The slot carries only the unit vector;
+    // CSS turns it into a rim position via --arc-r, so every breakpoint
+    // rescales for free. The button keeps its own transform channel for
+    // the shake/armed animations.
+    const deg = slots.length === 1 ? 15 : -30 + (90 * i) / (slots.length - 1);
+    const rad = (deg * Math.PI) / 180;
+    const wrap = document.createElement("div");
+    wrap.className = "dock-slot";
+    wrap.style.setProperty("--ax", Math.sin(rad).toFixed(4));
+    wrap.style.setProperty("--ay", (-Math.cos(rad)).toFixed(4));
     const btn = document.createElement("button");
     btn.className = slot.ult ? "dock-btn ult" : "dock-btn";
     btn.dataset.ability = slot.ability;
@@ -1796,8 +1809,9 @@ function buildDock(cls: PlayerClass) {
         : "") +
       (cost > 0 ? `<span class="dock-cost">${"<i></i>".repeat(cost)}</span>` : "") +
       `</span><span class="dock-name">${DOCK_NAMES[slot.ability]}</span>`;
-    dockEl.appendChild(btn);
-  }
+    wrap.appendChild(btn);
+    dockEl.appendChild(wrap);
+  });
 }
 
 type DockState = "ready" | "noafford" | "spent";
