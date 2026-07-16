@@ -2343,6 +2343,15 @@ volumeSlider.addEventListener("input", () => {
 // starts immediately. No overlay — just the mute button on screen.
 window.addEventListener("pointerdown", () => audio.unlock(), { once: true });
 audio.startMusic();
+// iOS — worst in the installed PWA — parks the AudioContext in an
+// "interrupted" state on every app switch (and can reject the first resume
+// outright), then never auto-recovers. Re-kick the whole chain on every
+// gesture and on return to the foreground; no-op while healthy.
+window.addEventListener("pointerdown", () => audio.resumeIfNeeded());
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) audio.resumeIfNeeded();
+});
+window.addEventListener("pageshow", () => audio.resumeIfNeeded());
 
 // ---------------------------------------------------------------------------
 // App feel: on the first tap, go fullscreen + lock landscape where the

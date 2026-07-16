@@ -26,6 +26,7 @@ class AudioBank {
   private unlocked = false;
   private muted = false;
   private musicEl: HTMLAudioElement | null = null;
+  private crackleEl: HTMLAudioElement | null = null;
   private musicGain: GainNode | null = null;
   private musicWanted = false;
   private volume = 0.2; // slider position 0..1 (default 20%)
@@ -132,11 +133,25 @@ class AudioBank {
     this.crackleGain = ctx.createGain();
     this.crackleGain.gain.value = this.muted ? 0 : this.effectiveGain() * 2.6 * this.crackleVolume;
     this.crackleGain.connect(this.masterGain!);
-    const el = new Audio("/sounds/fire-crackle.mp3");
-    el.loop = true;
-    el.preload = "auto";
-    ctx.createMediaElementSource(el).connect(this.crackleGain);
-    void el.play().catch(() => {});
+    this.crackleEl = new Audio("/sounds/fire-crackle.mp3");
+    this.crackleEl.loop = true;
+    this.crackleEl.preload = "auto";
+    ctx.createMediaElementSource(this.crackleEl).connect(this.crackleGain);
+    void this.crackleEl.play().catch(() => {});
+  }
+
+  /** iOS (worst in the installed PWA) parks the AudioContext in an
+   *  "interrupted"/"suspended" state on every app switch — and can even
+   *  reject the FIRST resume — then never auto-recovers, so a one-shot
+   *  unlock leaves the whole session silent. Call this from any gesture
+   *  and on return-to-foreground: it re-runs the entire resume chain.
+   *  Idempotent and near-free when everything is already running. */
+  resumeIfNeeded(): void {
+    if (!this.unlocked) return; // pre-unlock, the once-only unlock() owns startup
+    const ctx = this.ensureCtx();
+    if ((ctx.state as string) !== "running") void ctx.resume().catch(() => {});
+    if (this.musicWanted && this.musicEl?.paused) void this.musicEl.play().catch(() => {});
+    if (this.crackleEl?.paused) void this.crackleEl.play().catch(() => {});
   }
 
   setMuted(muted: boolean): void {
