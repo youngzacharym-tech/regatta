@@ -210,11 +210,14 @@ export async function POST(request: Request): Promise<Response> {
       }
     }
 
-    // A game action.
+    // A game action. Tick FIRST so overdue deadlines (a bot's pick, an
+    // auto-skip whose window closed) land before the action does — the same
+    // order the old wall-clock timers produced.
     const now = Date.now();
     const action = msg as RoomActionInput & { room: string; seat: PlayerId; seatToken: string };
     const r = await withDoc(room, (doc) => {
-      const stepped = applyAction(touchSeat(doc, seat, now), seat, action, now);
+      const pre = tick(touchSeat(doc, seat, now), now);
+      const stepped = applyAction(pre, seat, action, now);
       return { doc: tick(stepped.doc, now), error: stepped.error };
     });
     if (!r) return json({ error: "Room not found" }, 404);
