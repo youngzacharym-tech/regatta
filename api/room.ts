@@ -26,7 +26,7 @@
 import Redis from "ioredis";
 import { randomUUID } from "crypto";
 import type { PlayerId } from "../rulebook";
-import type { RoomRequest, RoomJoinResponse, RoomResponse } from "../protocol";
+import type { RoomRequest, RoomJoinResponse, RoomResponse, RoomListResponse } from "../protocol";
 import {
   createRoomDoc,
   startRoom,
@@ -55,6 +55,12 @@ function getRedis(): Redis {
 }
 
 const roomKey = (code: string) => `room:${code}`;
+/** Set of codes for PUBLIC PvP rooms still waiting for an opponent — the
+ *  lobby list. Self-healing: listRooms prunes members whose room is gone,
+ *  full, or whose host stopped polling. */
+const OPEN_ROOMS_KEY = "rooms:open";
+/** Hosts poll while they wait, so a fresh heartbeat means a live lobby. */
+const LOBBY_HOST_FRESH_MS = 45_000;
 
 /** Compare-and-set on the doc's version field (same contract as the WS era). */
 const CAS_LUA = `
@@ -135,6 +141,7 @@ async function handleJoin(msg: Extract<RoomRequest, { op: "join" }>): Promise<Re
       let next = startRoom({ ...doc, seats: { ...doc.seats, p2: token } }, now);
       next = tick(next, now);
       if (await casStore(doc.version, next)) {
+        await getRedis().srem(OPEN_ROOMS_KEY, code); // room is full — leave the lobby
         const body: RoomJoinResponse = {
           player: "p2",
           room: code,
@@ -155,10 +162,12 @@ async function handleJoin(msg: Extract<RoomRequest, { op: "join" }>): Promise<Re
   const token = randomUUID();
   for (let attempt = 0; attempt < 20; attempt++) {
     const code = newRoomCode();
-    let doc = createRoomDoc(code, vsCpu, variant, token, now);
+    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true);
     doc = tick(doc, now);
     const ok = await getRedis().set(roomKey(code), JSON.stringify(doc), "EX", ROOM_TTL_S, "NX");
     if (ok === "OK") {
+      // Public PvP rooms enter the lobby list until someone takes p2.
+      if (!vsCpu && !doc.unlisted) await getRedis().sadd(OPEN_ROOMS_KEY, code);
       const body: RoomJoinResponse = {
         player: "p1",
         room: code,
@@ -185,6 +194,33 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     if (msg.op === "join") return await handleJoin(msg);
+
+    if (msg.op === "listRooms") {
+      const now = Date.now();
+      const codes = await getRedis().smembers(OPEN_ROOMS_KEY);
+      const rooms: RoomListResponse["rooms"] = [];
+      const stale: string[] = [];
+      if (codes.length > 0) {
+        const raws = await getRedis().mget(codes.map(roomKey));
+        codes.forEach((code, i) => {
+          const raw = raws[i];
+          if (!raw) return void stale.push(code); // room expired
+          const doc = JSON.parse(raw) as RoomDoc;
+          const hostFresh = now - doc.seatLastSeen.p1 < LOBBY_HOST_FRESH_MS;
+          if (doc.started || doc.seats.p2 !== null || doc.unlisted || !hostFresh) {
+            return void stale.push(code);
+          }
+          rooms.push({
+            code,
+            variant: doc.variant,
+            ageSeconds: Math.max(0, Math.round((now - doc.waitingSince) / 1000)),
+          });
+        });
+        if (stale.length > 0) await getRedis().srem(OPEN_ROOMS_KEY, ...stale);
+      }
+      rooms.sort((a, b) => a.ageSeconds - b.ageSeconds);
+      return json({ rooms: rooms.slice(0, 20) } satisfies RoomListResponse);
+    }
 
     const { room, seat, seatToken } = msg;
     if (!room || !seat || !seatToken) return json({ error: "Missing room/seat/seatToken" }, 400);

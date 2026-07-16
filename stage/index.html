@@ -385,6 +385,81 @@
       #menu button.mode:hover { background: #d84; }
       #menu button.mode.alt { background: #35506e; }
       #menu button.mode.alt:hover { background: #416085; }
+      /* --- Room browser (lobby) --- */
+      #lobby {
+        position: fixed; inset: 0; z-index: 252;
+        background: rgba(10, 10, 15, 0.82);
+        display: none; justify-content: center; align-items: center;
+        backdrop-filter: blur(3px);
+      }
+      #lobby.show { display: flex; }
+      #lobby .card {
+        position: relative;
+        background: linear-gradient(160deg, #262636, #16161e);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 28px 34px;
+        width: min(400px, 92vw);
+        text-align: center;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+      }
+      #lobby h1 { font-size: 24px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
+      #lobby .tagline { font-size: 12px; color: #8888a0; margin-bottom: 16px; }
+      #lobby .close {
+        position: absolute; top: 8px; right: 12px;
+        background: transparent; border: none; color: #6a6a80;
+        font-size: 24px; line-height: 1; cursor: pointer;
+      }
+      #lobby .close:hover { color: #ccc; }
+      #lobby-list {
+        max-height: min(300px, 40vh); overflow-y: auto;
+        display: flex; flex-direction: column; gap: 8px;
+        margin-bottom: 14px;
+      }
+      #lobby-list .room-row {
+        display: flex; align-items: center; gap: 10px;
+        width: 100%;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px; padding: 11px 14px;
+        color: #fff; cursor: pointer; text-align: left;
+      }
+      #lobby-list .room-row:hover { background: rgba(255, 255, 255, 0.1); }
+      #lobby-list .room-row .code {
+        font-family: monospace; font-size: 17px; letter-spacing: 3px; color: #ffd370;
+      }
+      #lobby-list .room-row .meta { flex: 1; font-size: 12px; color: #a0a0b0; }
+      #lobby-list .room-row .meta .mk { color: #ffcaca; }
+      #lobby-list .room-row .go {
+        background: #c73; color: #fff; border: none; border-radius: 7px;
+        padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+      }
+      #lobby-list .lobby-empty { font-size: 13px; color: #8888a0; padding: 18px 0; font-style: italic; }
+      #lobby .lobby-divider {
+        height: 1px; background: rgba(255, 255, 255, 0.12); margin: 4px 0 12px;
+      }
+      #lobby-private {
+        width: 100%; margin-top: 10px;
+        background: transparent; color: #8fb8d8;
+        border: 1px solid rgba(143, 184, 216, 0.35); border-radius: 8px;
+        padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+      }
+      #lobby-private:hover { background: rgba(143, 184, 216, 0.1); }
+      #lobby .join-row { display: flex; gap: 8px; }
+      #lobby .join-row input {
+        flex: 1; min-width: 0;
+        background: rgba(255,255,255,0.06); color: #fff;
+        border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
+        padding: 12px; font-size: 15px; text-transform: uppercase;
+        text-align: center; letter-spacing: 4px; font-family: monospace;
+      }
+      #lobby .join-row button {
+        background: #35506e; color: white; border: none;
+        padding: 12px 18px; border-radius: 8px; font-size: 15px;
+        font-weight: 600; cursor: pointer;
+      }
+      #lobby .join-row button:hover { background: #416085; }
+
       #menu .join-row { display: flex; gap: 8px; margin-top: 4px; }
       #menu .join-row input {
         flex: 1; min-width: 0;
@@ -583,10 +658,7 @@
         <button class="mode variant-toggle" id="menu-variant-toggle" type="button">Mode: Classic</button>
         <button class="mode" id="menu-cpu">Play vs Computer</button>
         <button class="mode alt" id="menu-create">Create Room</button>
-        <div class="join-row">
-          <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" />
-          <button id="menu-join">Join</button>
-        </div>
+        <button class="mode alt" id="menu-browse">Join Room</button>
         <div class="menu-error" id="menu-error"></div>
         <button id="menu-install">⬇  Install Regatta</button>
         <div class="credit">
@@ -594,6 +666,20 @@
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
           — used with the artist's blessing
         </div>
+      </div>
+    </div>
+    <div id="lobby">
+      <div class="card">
+        <button class="close" id="lobby-close" title="Back">×</button>
+        <h1>OPEN TABLES</h1>
+        <div class="tagline">tap a room to sit down</div>
+        <div id="lobby-list"><div class="lobby-empty">Looking for open tables…</div></div>
+        <div class="lobby-divider"></div>
+        <div class="join-row">
+          <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" />
+          <button id="menu-join">Join</button>
+        </div>
+        <button id="lobby-private">Create private room</button>
       </div>
     </div>
     <div id="classpick">

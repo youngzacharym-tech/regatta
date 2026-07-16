@@ -2146,21 +2146,38 @@ function seatSelf(seat: PlayerId, room: string, vsCpu: boolean, variant: "classi
   hud.textContent = vsCpu ? "You are Red — vs Computer" : "You are Red. Waiting for opponent…";
 }
 
-function doJoin(mode: "cpu" | "create" | "join", room?: string, variant?: "classic" | "masterKiller") {
+function doJoin(
+  mode: "cpu" | "create" | "join",
+  room?: string,
+  variant?: "classic" | "masterKiller",
+  unlisted = false,
+) {
   menuError.textContent = "";
   setStatus("Joining…");
-  post({ op: "join", mode, room, variant })
+  post({ op: "join", mode, room, variant, unlisted })
     .then((raw) => {
       const j = raw as RoomJoinResponse;
       session = { room: j.room, seat: j.player, seatToken: j.seatToken };
       saveSession(session);
+      closeLobby();
       seatSelf(j.player, j.room, j.vsCpu, j.variant);
       processResponse(j.view as RoomResponse);
       void pollLoop();
     })
     .catch((err) => {
-      menuEl.classList.add("show");
-      menuError.textContent = err instanceof Error ? err.message : "Could not join";
+      // Surface the reason wherever the player is looking (lobby or menu).
+      const msg = err instanceof Error ? err.message : "Could not join";
+      if (lobbyEl.classList.contains("show")) {
+        lobbyList.innerHTML = "";
+        const div = document.createElement("div");
+        div.className = "lobby-empty";
+        div.textContent = msg;
+        lobbyList.appendChild(div);
+        void refreshLobby();
+      } else {
+        menuEl.classList.add("show");
+        menuError.textContent = msg;
+      }
     });
 }
 
@@ -2348,6 +2365,80 @@ function submitJoinCode() {
 (document.getElementById("menu-join") as HTMLButtonElement).addEventListener("click", submitJoinCode);
 menuCodeInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") submitJoinCode();
+});
+
+// ---------------------------------------------------------------------------
+// Room browser — "Join Room" opens a live list of open public tables. Tap a
+// row to sit down; the code entry (for private rooms) lives in here too.
+// ---------------------------------------------------------------------------
+
+const lobbyEl = document.getElementById("lobby") as HTMLDivElement;
+const lobbyList = document.getElementById("lobby-list") as HTMLDivElement;
+let lobbyTimer: ReturnType<typeof setInterval> | null = null;
+
+function renderLobby(rooms: { code: string; variant: string; ageSeconds: number }[]) {
+  lobbyList.innerHTML = "";
+  if (rooms.length === 0) {
+    const div = document.createElement("div");
+    div.className = "lobby-empty";
+    div.textContent = "No open tables right now — create a room and a rival will find you.";
+    lobbyList.appendChild(div);
+    return;
+  }
+  for (const r of rooms) {
+    const row = document.createElement("button");
+    row.className = "room-row";
+    const code = document.createElement("span");
+    code.className = "code";
+    code.textContent = r.code;
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    const age = r.ageSeconds < 60 ? `${r.ageSeconds}s` : `${Math.round(r.ageSeconds / 60)}m`;
+    meta.innerHTML =
+      r.variant === "masterKiller"
+        ? `<span class="mk">⚔ Master Killer</span> · waiting ${age}`
+        : `Classic · waiting ${age}`;
+    const go = document.createElement("span");
+    go.className = "go";
+    go.textContent = "Join";
+    row.append(code, meta, go);
+    row.addEventListener("click", () => doJoin("join", r.code));
+    lobbyList.appendChild(row);
+  }
+}
+
+async function refreshLobby() {
+  try {
+    const v = (await post({ op: "listRooms" })) as { rooms: { code: string; variant: string; ageSeconds: number }[] };
+    if (lobbyEl.classList.contains("show")) renderLobby(v.rooms);
+  } catch {
+    /* transient — next refresh retries */
+  }
+}
+
+function openLobby() {
+  menuError.textContent = "";
+  lobbyEl.classList.add("show");
+  void refreshLobby();
+  if (lobbyTimer) clearInterval(lobbyTimer);
+  lobbyTimer = setInterval(() => void refreshLobby(), 2500);
+}
+
+function closeLobby() {
+  lobbyEl.classList.remove("show");
+  if (lobbyTimer) {
+    clearInterval(lobbyTimer);
+    lobbyTimer = null;
+  }
+}
+
+(document.getElementById("menu-browse") as HTMLButtonElement).addEventListener("click", openLobby);
+(document.getElementById("lobby-close") as HTMLButtonElement).addEventListener("click", closeLobby);
+lobbyEl.addEventListener("click", (e) => {
+  if (e.target === lobbyEl) closeLobby();
+});
+(document.getElementById("lobby-private") as HTMLButtonElement).addEventListener("click", () => {
+  doJoin("create", undefined, selectedVariant, true);
 });
 
 

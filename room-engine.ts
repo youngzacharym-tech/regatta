@@ -191,6 +191,9 @@ export interface RoomDoc {
   vsCpu: boolean;
   seats: { p1: string | null; p2: string | null }; // seat tokens ("BOT" for cpu p2)
   started: boolean;
+  /** True = private room: joinable by code, never shown in the public
+   *  lobby list. (Docs created before this field existed read as false.) */
+  unlisted: boolean;
   phase: RoomPhase;
   openingFlips: { p1: number | null; p2: number | null };
   state: GameState;
@@ -441,12 +444,14 @@ export function createRoomDoc(
   variant: Variant,
   p1Token: string,
   now: number,
+  unlisted = false,
 ): RoomDoc {
   const doc: RoomDoc = {
     code,
     vsCpu,
     seats: { p1: p1Token, p2: vsCpu ? "BOT" : null },
     started: vsCpu, // cpu rooms are "full" with one human
+    unlisted,
     version: 1,
     variant,
     waitingSince: now,

@@ -975,13 +975,14 @@ function freshMatchFields(variant) {
     rescueAttempted: false
   };
 }
-function createRoomDoc(code, vsCpu, variant, p1Token, now) {
+function createRoomDoc(code, vsCpu, variant, p1Token, now, unlisted = false) {
   const doc = {
     code,
     vsCpu,
     seats: { p1: p1Token, p2: vsCpu ? "BOT" : null },
     started: vsCpu,
     // cpu rooms are "full" with one human
+    unlisted,
     version: 1,
     variant,
     waitingSince: now,
@@ -1480,6 +1481,8 @@ function getRedis() {
   return redis;
 }
 var roomKey = (code) => `room:${code}`;
+var OPEN_ROOMS_KEY = "rooms:open";
+var LOBBY_HOST_FRESH_MS = 45e3;
 var CAS_LUA = `
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
@@ -1541,6 +1544,7 @@ async function handleJoin(msg) {
       let next = startRoom({ ...doc, seats: { ...doc.seats, p2: token2 } }, now);
       next = tick(next, now);
       if (await casStore(doc.version, next)) {
+        await getRedis().srem(OPEN_ROOMS_KEY, code);
         const body = {
           player: "p2",
           room: code,
@@ -1559,10 +1563,11 @@ async function handleJoin(msg) {
   const token = randomUUID();
   for (let attempt = 0; attempt < 20; attempt++) {
     const code = newRoomCode();
-    let doc = createRoomDoc(code, vsCpu, variant, token, now);
+    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true);
     doc = tick(doc, now);
     const ok = await getRedis().set(roomKey(code), JSON.stringify(doc), "EX", ROOM_TTL_S, "NX");
     if (ok === "OK") {
+      if (!vsCpu && !doc.unlisted) await getRedis().sadd(OPEN_ROOMS_KEY, code);
       const body = {
         player: "p1",
         room: code,
@@ -1586,6 +1591,32 @@ async function POST(request) {
   }
   try {
     if (msg.op === "join") return await handleJoin(msg);
+    if (msg.op === "listRooms") {
+      const now2 = Date.now();
+      const codes = await getRedis().smembers(OPEN_ROOMS_KEY);
+      const rooms = [];
+      const stale = [];
+      if (codes.length > 0) {
+        const raws = await getRedis().mget(codes.map(roomKey));
+        codes.forEach((code, i) => {
+          const raw = raws[i];
+          if (!raw) return void stale.push(code);
+          const doc = JSON.parse(raw);
+          const hostFresh = now2 - doc.seatLastSeen.p1 < LOBBY_HOST_FRESH_MS;
+          if (doc.started || doc.seats.p2 !== null || doc.unlisted || !hostFresh) {
+            return void stale.push(code);
+          }
+          rooms.push({
+            code,
+            variant: doc.variant,
+            ageSeconds: Math.max(0, Math.round((now2 - doc.waitingSince) / 1e3))
+          });
+        });
+        if (stale.length > 0) await getRedis().srem(OPEN_ROOMS_KEY, ...stale);
+      }
+      rooms.sort((a, b) => a.ageSeconds - b.ageSeconds);
+      return json({ rooms: rooms.slice(0, 20) });
+    }
     const { room, seat, seatToken } = msg;
     if (!room || !seat || !seatToken) return json({ error: "Missing room/seat/seatToken" }, 400);
     const probe = await loadDoc(room);

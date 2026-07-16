@@ -41,6 +41,13 @@ export type RoomRequest =
       room?: string;
       /** Ruleset for a NEW room; ignored for mode "join". */
       variant?: "classic" | "masterKiller";
+      /** Create a PRIVATE room: joinable by code, hidden from the lobby. */
+      unlisted?: boolean;
+    }
+  | {
+      /** Browse open PvP rooms (no seat required). Replies with
+       *  RoomListResponse. */
+      op: "listRooms";
     }
   | ({
       room: string;
@@ -69,6 +76,18 @@ export interface RoomJoinResponse {
 /** Poll/action replies are the seat's current RoomView; action rejections
  *  carry `error` alongside the authoritative view so the client re-syncs. */
 export type RoomResponse = RoomView & { error?: string };
+
+/** One open room in the public lobby list. */
+export interface LobbyRoom {
+  code: string;
+  variant: "classic" | "masterKiller";
+  /** Seconds the host has been waiting for an opponent. */
+  ageSeconds: number;
+}
+
+export interface RoomListResponse {
+  rooms: LobbyRoom[];
+}
 
 /** Server -> Client */
 export type ServerMessage =

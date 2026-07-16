@@ -26,7 +26,7 @@ import { extname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
 import type { PlayerId } from "./rulebook.ts";
-import type { RoomRequest, RoomJoinResponse, RoomResponse } from "./protocol.ts";
+import type { RoomRequest, RoomJoinResponse, RoomResponse, RoomListResponse } from "./protocol.ts";
 import {
   createRoomDoc,
   startRoom,
@@ -141,7 +141,7 @@ function handleJoin(msg: Extract<RoomRequest, { op: "join" }>, res: ServerRespon
   const variant = msg.variant === "masterKiller" ? "masterKiller" : "classic";
   const token = randomUUID();
   const code = newRoomCode();
-  const doc = tick(createRoomDoc(code, vsCpu, variant, token, now), now);
+  const doc = tick(createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true), now);
   rooms.set(code, doc);
   console.log(`[+] p1 seated in room ${code} (${variant})${vsCpu ? " (vs CPU)" : ""}`);
   const body: RoomJoinResponse = {
@@ -172,6 +172,27 @@ async function handleRoomApi(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (msg.op === "join") return handleJoin(msg, res);
+
+  if (msg.op === "listRooms") {
+    // Open = a public PvP room still waiting for its p2, with a live host
+    // (the waiting client's poll loop keeps p1's heartbeat fresh).
+    const now = Date.now();
+    const body: RoomListResponse = {
+      rooms: [...rooms.values()]
+        .filter(
+          (d) =>
+            !d.vsCpu && !d.started && !d.unlisted && d.seats.p2 === null && now - d.seatLastSeen.p1 < 45_000,
+        )
+        .sort((a, b) => b.waitingSince - a.waitingSince)
+        .slice(0, 20)
+        .map((d) => ({
+          code: d.code,
+          variant: d.variant,
+          ageSeconds: Math.max(0, Math.round((now - d.waitingSince) / 1000)),
+        })),
+    };
+    return sendJson(res, body);
+  }
 
   const { room, seat, seatToken } = msg;
   const doc0 = rooms.get(room ?? "");
