@@ -1,7 +1,8 @@
-# The WS function deploys as the pre-bundled api/ws.js (npm run build:api).
+# The room function deploys as the pre-bundled api/room.js (npm run build:api).
 # The TS source must not upload or Vercel would build a second, broken
 # function on the same route (its per-file compiler can't resolve the shared
 # modules at the repo root).
+api/room.ts
 api/ws.ts
 
 # Local-only artifacts

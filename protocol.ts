@@ -12,12 +12,63 @@ import type { PlayerClass, PowerMove } from "./master-killer";
 
 /** One line of in-match chat. `seat` is the sender's protocol seat (the
  *  client maps it to "You"/"Opponent"); `text` is already trimmed and
- *  length-capped server-side. Chat is delivered on its own channel, fully
- *  decoupled from game-state broadcasts. */
+ *  length-capped server-side. */
 export interface ChatMsg {
   seat: PlayerId;
   text: string;
 }
+
+// ============================================================================
+// HTTP-POLLING TRANSPORT (the current wire protocol)
+//
+// One POST endpoint (/api/room). The client polls with `op:"poll"` (long-poll:
+// the server holds until something new lands or a ~20s cap) and sends actions
+// as their own ops. RoomActionInput and RoomView are defined next to the
+// engine that produces them — see room-engine.ts.
+//
+// The WebSocket ServerMessage/ClientMessage types below this block are the
+// LEGACY protocol, kept only until the old transports are deleted.
+// ============================================================================
+
+import type { RoomActionInput, RoomView } from "./room-engine";
+
+export type RoomRequest =
+  | {
+      /** Take a seat: create/join/cpu. Replies with RoomJoinResponse. */
+      op: "join";
+      mode: "cpu" | "create" | "join";
+      /** Room code, required for mode "join". */
+      room?: string;
+      /** Ruleset for a NEW room; ignored for mode "join". */
+      variant?: "classic" | "masterKiller";
+    }
+  | ({
+      room: string;
+      seat: PlayerId;
+      seatToken: string;
+    } & (
+      | {
+          op: "poll";
+          /** Highest event seq the client has fully rendered. */
+          since: number;
+          /** True = long-poll (server holds until news or its cap). */
+          wait?: boolean;
+        }
+      | RoomActionInput
+    ));
+
+export interface RoomJoinResponse {
+  player: PlayerId;
+  room: string;
+  vsCpu: boolean;
+  variant: "classic" | "masterKiller";
+  seatToken: string;
+  view: RoomView;
+}
+
+/** Poll/action replies are the seat's current RoomView; action rejections
+ *  carry `error` alongside the authoritative view so the client re-syncs. */
+export type RoomResponse = RoomView & { error?: string };
 
 /** Server -> Client */
 export type ServerMessage =

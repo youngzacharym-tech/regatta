@@ -12,7 +12,7 @@
     "referee": "tsx referee.ts",
     "start": "tsx referee.ts",
     "build:stage": "cd stage && npm install && npm run build",
-    "build:api": "esbuild api/ws.ts --bundle --platform=node --format=esm --target=node20 --external:@vercel/functions --external:ioredis --external:ws --outfile=api/ws.js",
+    "build:api": "esbuild api/room.ts --bundle --platform=node --format=esm --target=node20 --external:ioredis --outfile=api/room.js",
     "build": "npm run build:stage",
     "deploy": "npm run build:api && npx vercel deploy --prod",
     "test-referee": "tsx test-two-random-clients.ts"
