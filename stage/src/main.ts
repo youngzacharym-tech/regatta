@@ -2407,7 +2407,11 @@ async function pollLoop() {
   const gen = ++pollGen;
   let backoff = 1000;
   while (session && gen === pollGen) {
-    const hidden = document.hidden;
+    // Trust flowing frames over the visibility API: iOS can leave
+    // visibilityState stuck on "hidden" after an app switch while the
+    // player is right there playing (see the render-loop watchdog). If
+    // frames are rendering, poll like a foreground player regardless.
+    const hidden = document.hidden && performance.now() - lastFrameAt > 3000;
     try {
       // Backgrounded tabs drop to a slow, non-holding heartbeat: the room
       // keeps advancing and the opponent never sees a false "away", but we
@@ -3153,9 +3157,17 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // Render loop (with per-frame lerp toward marker targets for smooth motion)
 // ---------------------------------------------------------------------------
 
+let rafId = 0;
+/** Stamped every frame — the watchdog below and the poll loop's hidden
+ *  check both trust flowing frames over what the visibility API claims. */
+let lastFrameAt = 0;
+/** Last moment we KNOW the player was here (input, focus, visibility). */
+let lastPresenceAt = 0;
+
 function tick() {
-  requestAnimationFrame(tick);
-  const now = performance.now();
+  rafId = requestAnimationFrame(tick);
+  lastFrameAt = performance.now();
+  const now = lastFrameAt;
   const lerp = 0.18;
 
   for (let i = 0; i < markers.length; i++) {
@@ -3232,4 +3244,39 @@ function tick() {
   renderer.render(scene, camera);
 }
 tick();
+
+// ---------------------------------------------------------------------------
+// Render-loop watchdog — THE fix for "the board freezes after an app switch".
+//
+// iOS Safari (worst as an installed PWA) sometimes returns from an app
+// switch with requestAnimationFrame still suspended — and occasionally with
+// visibilityState stuck on "hidden" — so no visibility event ever fires and
+// the canvas freezes on its last frame while the DOM, timers, and polling
+// all run on: dead game showing behind the menu, mug stuck mid-pose, but
+// taps still land. (The WebGL context itself stays alive, which is why the
+// context-loss recovery above never triggers for this.)
+//
+// Interval timers demonstrably DO keep firing in that state, so: watch for
+// stalled frames and re-kick the loop by hand. Each kick re-frames (resize
+// also rebuilds the drawing buffer, which un-ghosts the compositor layer)
+// and renders immediately — so even if rAF stays wedged the game runs at
+// watchdog cadence instead of freezing, and the instant iOS unwedges rAF,
+// full frame rate resumes and the watchdog goes quiet. Presence-gated so a
+// genuinely backgrounded tab stays as cheap as before.
+// ---------------------------------------------------------------------------
+window.addEventListener("pointerdown", () => (lastPresenceAt = performance.now()), {
+  capture: true,
+  passive: true,
+});
+window.addEventListener("focus", () => (lastPresenceAt = performance.now()));
+window.addEventListener("pageshow", () => (lastPresenceAt = performance.now()));
+document.addEventListener("visibilitychange", () => (lastPresenceAt = performance.now()));
+setInterval(() => {
+  if (performance.now() - lastFrameAt < 2000) return; // frames are flowing — all good
+  const userPresent = performance.now() - lastPresenceAt < 30_000;
+  if (document.hidden && !userPresent) return; // truly backgrounded: stay quiet
+  cancelAnimationFrame(rafId); // no double chains when rAF wakes back up
+  resize();
+  tick();
+}, 1000);
 
