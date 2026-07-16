@@ -1300,8 +1300,8 @@ const movesEl = document.getElementById("moves") as HTMLDivElement;
 // Bottom-left: my portrait + charge gems + turn glow. Top-right: the
 // opponent's. Hidden outside Master Killer rooms. The plate is pure DISPLAY
 // (who you are, how many charges you hold, whose turn it is); ability
-// triggering lives in the #moves button rail (renderPowerActions), which is
-// the only surface rich enough for two actives + an ultimate per class.
+// triggering lives in the Ability Dock (buildDock/updateDock below) — the
+// gem-button row anchored off this plate's right shoulder.
 const plateMe = document.getElementById("plate-me") as HTMLDivElement;
 const plateThem = document.getElementById("plate-them") as HTMLDivElement;
 const portraitMe = document.getElementById("portrait-me") as HTMLImageElement;
@@ -1341,6 +1341,9 @@ function flashGems(container: HTMLDivElement, kind: "flare" | "spend") {
  *  comes from pickedClasses; once the match is underway, currentPower is
  *  authoritative. Classic rooms take the hide branch. */
 function updatePlates(state: GameState | null) {
+  // The Ability Dock rides the plate: any refresh that can change class or
+  // charges (state replays, resyncs, class pick) re-syncs the dock too.
+  updateDock();
   const mySide: PlayerId = myRole ?? "p1";
   const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
   const mine = currentPower ? currentPower.classes[mySide] : pickedClasses[mySide];
@@ -1404,35 +1407,27 @@ let currentPower: {
  *  (which gets the same array structurally, via tap-to-move) so Warrior's
  *  Charge buttons can read chargeAvailable/from/to per move. */
 let currentPowerMoves: PowerMove[] | null = null;
-/** True while an Archer has tapped "Push" and is waiting to tap a target. */
-let pushArmed = false;
-/** Push's targetable enemy tokens while pushArmed — lit the same way as
- *  capturableIds, via the shared hover-glow helper below. */
-const pushTargetIds = new Set<number>();
-/** True while an Archer has tapped "Charged Shot" and is waiting to tap a
- *  target — same lifecycle as pushArmed, offered alongside Push (not
- *  instead of it) whenever charges === CHARGE_CAP. */
-let chargedShotArmed = false;
-const chargedShotTargetIds = new Set<number>();
-/** True while a Mage has tapped "Blink Strike" and is waiting to tap a
- *  target — same lifecycle as pushArmed. */
-let blinkStrikeArmed = false;
-const blinkStrikeTargetIds = new Set<number>();
-/** True while a Warrior has tapped "Warpath" and is waiting to tap a
- *  target — same lifecycle as pushArmed. */
-let warpathArmed = false;
-const warpathTargetIds = new Set<number>();
-/** True while a Warrior has tapped "Bulwark" and is waiting to tap a
- *  target — unlike every other armed flow above, the tap target here is one
- *  of the MOVER'S OWN tokens, not an enemy's. Reuses the exact same
- *  raycast/hover helpers (findTargetUnderPointer works over any token id
- *  set regardless of owner), so no new targeting plumbing is needed. */
-let bulwarkArmed = false;
-const bulwarkTargetIds = new Set<number>();
-/** True when the armed Bulwark tap is the REINFORCED (full-bank) cast —
- *  same targeting flow, the tap just sends `reinforced: true`. Only
- *  meaningful while bulwarkArmed. */
-let bulwarkArmedReinforced = false;
+/** Master Killer targeting — ONE mutually exclusive armed state for every
+ *  aim-then-tap ability (the dock's gems arm it; the canvas tap consumes
+ *  it). Arming anything disarms whatever else was armed, so Bulwark-vs-
+ *  Reinforced exclusivity (and every other pairing) falls out for free.
+ *  `targetIds` always come from the server's own lists — enemy tokens for
+ *  Push/Charged Shot/ultimates, MY OWN tokens for Bulwark and Charge — and
+ *  findTargetUnderPointer works over any of them regardless of owner. */
+type ArmedKind =
+  | "push"
+  | "chargedShot"
+  | "blinkStrike"
+  | "warpath"
+  | "bulwark"
+  | "bulwarkReinforced"
+  | "charge";
+let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
+/** Warrior Charge: token id -> index into currentPowerMoves for every
+ *  sweep-capable move of the current roll (rebuilt by updateDock). The
+ *  server emits at most one PowerMove per token, so the map is
+ *  unambiguous — and a Charge tap sends this INDEX, never move data. */
+const chargeMoveIndexByToken = new Map<number, number>();
 
 // --- Opening flip-off ---
 /** True while the match start waits for THIS player to tap their pile.
@@ -1510,16 +1505,15 @@ const eligibleTokenIds = new Set<number>();
 const moveIndexByToken = new Map<number, number>();
 
 // --- Ability cards -----------------------------------------------------
-// Every ability button carries a small "i" gem; hovering the button (desktop)
-// or tapping the gem (touch) opens a card above the buttons that says what
-// the ability actually does — cost, effect, edge cases — like any game's
-// tooltip. Tapping the button proper still fires/arms the ability.
+// Hovering a dock gem (desktop) or holding one ~280ms (touch) opens a card
+// above the gem that says what the ability actually does — cost, effect,
+// edge cases — like any game's tooltip. A quick tap still fires/arms.
 const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; klass: PlayerClass }> = {
   reflip: {
     name: "Re-flip",
     cost: "1 charge each · keeps your turn",
     klass: "mage",
-    desc: `Don't like your roll? Flip all four coins again instead of moving — up to ${REFLIPS_PER_TURN} times a turn, one charge each. Mind your Ward: it only holds at a full bank, so the second re-flip drops it.`,
+    desc: `Don't like your roll? Flip all four coins again instead of moving — up to ${REFLIPS_PER_TURN} times a turn, one charge each. Mind your Ward: it only holds at a full bank, so any re-flip from a full bank drops it — unless the new flip is a zero, which banks the charge right back.`,
   },
   push: {
     name: "Push",
@@ -1568,8 +1562,9 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
 const abilityTip = document.getElementById("ability-tip") as HTMLDivElement;
 const abilityTipName = abilityTip.querySelector(".tip-name") as HTMLDivElement;
 const abilityTipCost = abilityTip.querySelector(".tip-cost") as HTMLDivElement;
+const abilityTipPips = abilityTip.querySelector(".tip-pips") as HTMLDivElement;
 const abilityTipDesc = abilityTip.querySelector(".tip-desc") as HTMLDivElement;
-let abilityTipFor: string | null = null;
+const abilityTipWarn = abilityTip.querySelector(".tip-warn") as HTMLDivElement;
 
 function showAbilityTip(ability: string, anchor: HTMLElement) {
   const info = ABILITY_INFO[ability];
@@ -1577,6 +1572,17 @@ function showAbilityTip(ability: string, anchor: HTMLElement) {
   abilityTipName.textContent = info.name;
   abilityTipCost.textContent = info.cost;
   abilityTipDesc.textContent = info.desc;
+  // Cost pips mirror the dock button's (ultimates carry no pip row), and
+  // Re-flip's card warns about the Ward while the Ward is actually up.
+  const pipCost = DOCK_COST[ability] ?? 0;
+  abilityTipPips.innerHTML = "<i></i>".repeat(pipCost);
+  abilityTipPips.classList.toggle("show", pipCost > 0);
+  abilityTipWarn.classList.toggle(
+    "show",
+    ability === "reflip" &&
+      currentPower !== null &&
+      currentPower.charges[myRole ?? "p1"] === CHARGE_CAP,
+  );
   abilityTip.dataset.class = info.klass;
   const rect = anchor.getBoundingClientRect();
   // Centered over the button, clamped to the viewport edges.
@@ -1585,28 +1591,10 @@ function showAbilityTip(ability: string, anchor: HTMLElement) {
   abilityTip.style.left = `${x}px`;
   abilityTip.style.bottom = `${window.innerHeight - rect.top + 10}px`;
   abilityTip.classList.add("show");
-  abilityTipFor = ability;
 }
 
 function hideAbilityTip() {
   abilityTip.classList.remove("show");
-  abilityTipFor = null;
-}
-
-/** Ability buttons hold a label span + the "i" gem — plain textContent
- *  assignment would wipe the gem, so armed-state relabels go through here. */
-function setAbilityLabel(btn: HTMLButtonElement, text: string) {
-  let label = btn.querySelector<HTMLSpanElement>(".ability-label");
-  if (!label) {
-    label = document.createElement("span");
-    label.className = "ability-label";
-    const gem = document.createElement("span");
-    gem.className = "ability-info";
-    gem.textContent = "i";
-    gem.title = "What does this do?";
-    btn.append(label, gem);
-  }
-  label.textContent = text;
 }
 
 function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
@@ -1624,210 +1612,410 @@ function renderMoves(legalMoves: Move[] | null, isMyTurn: boolean) {
   movesEl.innerHTML = "";
 }
 
-/** Master Killer only: append active-ability buttons to #moves (which
- *  renderMoves() just cleared). Normal moves stay tap-to-move, unchanged —
- *  this only adds the extra Push/Re-flip/Charge affordances a class needs. */
-function renderPowerActions(isMyTurn: boolean) {
-  hideAbilityTip(); // buttons are about to be rebuilt under it
-  pushArmed = false;
-  pushTargetIds.clear();
-  chargedShotArmed = false;
-  chargedShotTargetIds.clear();
-  blinkStrikeArmed = false;
-  blinkStrikeTargetIds.clear();
-  warpathArmed = false;
-  warpathTargetIds.clear();
-  bulwarkArmed = false;
-  bulwarkArmedReinforced = false;
-  bulwarkTargetIds.clear();
-  if (!isMyTurn || myVariant !== "masterKiller" || !currentPower) return;
+// ---------------------------------------------------------------------------
+// Ability Dock — the plate-anchored gem buttons that trigger class powers.
+//
+// Built ONCE per class by buildDock() (state changes toggle CSS classes, so
+// transitions animate instead of snapping); updateDock() re-reads
+// currentPower / currentPowerMoves on every overlay and maps each ability
+// onto the visual states the #dock CSS defines. Aim-then-tap abilities arm
+// the single `armed` state above; the canvas pointerdown consumes it. The
+// dock only ever sends ids/indexes from server-sent lists — trust model
+// unchanged.
+// ---------------------------------------------------------------------------
+
+const dockEl = document.getElementById("dock") as HTMLDivElement;
+const ribbonEl = document.getElementById("target-ribbon") as HTMLDivElement;
+const ribbonIconEl = ribbonEl.querySelector(".ribbon-icon") as HTMLSpanElement;
+const ribbonTextEl = ribbonEl.querySelector(".ribbon-text") as HTMLSpanElement;
+const vignetteEl = document.getElementById("target-vignette") as HTMLDivElement;
+
+/** Placeholder glyphs — real icon art is a later pass. U+FE0E forces text
+ *  presentation where iOS would otherwise serve a color emoji. */
+const DOCK_GLYPHS: Record<string, string> = {
+  reflip: "⟳",
+  push: "➳",
+  chargedShot: "➶",
+  charge: "»",
+  bulwark: "⛉︎",
+  bulwarkReinforced: "⛉︎",
+  blinkStrike: "✦",
+  warpath: "⚔︎",
+};
+/** Charge cost per ability — drives the pip rows here and on the card.
+ *  Ultimates cost no charges (their price is the shield streak, telegraphed
+ *  by the always-visible dormant slot), so they carry no pips. */
+const DOCK_COST: Record<string, number> = {
+  reflip: 1,
+  push: 1,
+  chargedShot: CHARGE_CAP,
+  charge: 1,
+  bulwark: 1,
+  bulwarkReinforced: CHARGE_CAP,
+  blinkStrike: 0,
+  warpath: 0,
+};
+/** Short names for the 10px labels under the gems (cards carry full names). */
+const DOCK_NAMES: Record<string, string> = {
+  reflip: "Re-flip",
+  push: "Push",
+  chargedShot: "Charged Shot",
+  charge: "Charge",
+  bulwark: "Bulwark",
+  bulwarkReinforced: "Reinforced",
+  blinkStrike: "Blink Strike",
+  warpath: "Warpath",
+};
+/** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
+ *  so the goal is visible from turn one. Archer's ult (Rain of Arrows) is
+ *  passive and gets no slot. */
+const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean }[]> = {
+  archer: [{ ability: "push" }, { ability: "chargedShot" }],
+  mage: [{ ability: "reflip" }, { ability: "blinkStrike", ult: true }],
+  warrior: [
+    { ability: "charge" },
+    { ability: "bulwark" },
+    { ability: "bulwarkReinforced" },
+    { ability: "warpath", ult: true },
+  ],
+};
+/** Ground-ring tint while targeting — the caster's class color (the ring
+ *  texture is drawn white so this is a plain material recolor, see tick()). */
+const DOCK_RING_TINTS: Record<PlayerClass, number> = {
+  archer: 0x3ddc65,
+  mage: 0xb45cff,
+  warrior: 0x3f83ff,
+};
+/** What the ribbon asks the player to do, per armed ability. */
+const RIBBON_COPY: Record<ArmedKind, string> = {
+  push: "tap a glowing enemy stone",
+  chargedShot: "tap a glowing enemy stone",
+  charge: "tap one of your glowing stones to sweep",
+  bulwark: "tap one of your stones to shield",
+  bulwarkReinforced: "tap one of your stones",
+  blinkStrike: "tap an enemy to strike",
+  warpath: "tap an enemy to end on",
+};
+
+/** Class the dock is currently built for — rebuild only on change. */
+let dockClass: PlayerClass | null = null;
+/** True when it's my turn, the flip is revealed, and no roll gate is up —
+ *  the only time dock taps do anything. Mirrors the boolean the old
+ *  #moves ability rail received. */
+let dockActive = false;
+/** Change detector: disarm only when the power situation ACTUALLY changed,
+ *  so heartbeat polls (which re-apply the same overlay) stop wiping an
+ *  armed state mid-aim. */
+let dockKey = "";
+
+function buildDock(cls: PlayerClass) {
+  if (dockClass === cls) return;
+  dockClass = cls;
+  hideAbilityTip();
+  dockEl.dataset.class = cls;
+  dockEl.innerHTML = "";
+  for (const slot of DOCK_SLOTS[cls]) {
+    const btn = document.createElement("button");
+    btn.className = slot.ult ? "dock-btn ult" : "dock-btn";
+    btn.dataset.ability = slot.ability;
+    const cost = DOCK_COST[slot.ability];
+    btn.innerHTML =
+      `<span class="dock-gem"><span class="dock-icon">${DOCK_GLYPHS[slot.ability]}</span>` +
+      (slot.ability === "reflip"
+        ? `<span class="dock-uses">${"<i></i>".repeat(REFLIPS_PER_TURN)}</span><span class="dock-warn"></span>`
+        : "") +
+      (cost > 0 ? `<span class="dock-cost">${"<i></i>".repeat(cost)}</span>` : "") +
+      `</span><span class="dock-name">${DOCK_NAMES[slot.ability]}</span>`;
+    dockEl.appendChild(btn);
+  }
+}
+
+type DockState = "ready" | "noafford" | "spent";
+/** Pure affordability: can `ability` be cast RIGHT NOW, and if not, why.
+ *  (Whether it's even my turn is the caller's `.off` gate, not this.) */
+function abilityState(ability: string, charges: number, reflipsUsed: number): { state: DockState; reason?: string } {
+  const p = currentPower!;
   const mySide: PlayerId = myRole ?? "p1";
-  const cls = currentPower.classes[mySide];
-  const charges = currentPower.charges[mySide];
-
-  // Ultimates spend a banked ultimateReady flag, not a charge — so they're
-  // offered independent of the charges<1 gate below.
-  if (cls === "mage" && currentPower.ultimateReady[mySide] && currentPower.blinkStrikeTargets.length > 0) {
-    const btn = document.createElement("button");
-    btn.dataset.ability = "blinkStrike";
-    const setLabel = () => {
-      setAbilityLabel(btn, blinkStrikeArmed ? "Blink Strike: tap a target…" : "Blink Strike ✦");
-      btn.className = blinkStrikeArmed ? "ability ultimate armed" : "ability ultimate";
-    };
-    setLabel();
-    btn.addEventListener("click", () => {
-      blinkStrikeArmed = !blinkStrikeArmed;
-      blinkStrikeTargetIds.clear();
-      if (blinkStrikeArmed) for (const id of currentPower!.blinkStrikeTargets) blinkStrikeTargetIds.add(id);
-      else hideHoverGlow();
-      setLabel();
-    });
-    movesEl.appendChild(btn);
+  const needCharges = (n: number) => (n === 1 ? "Need a charge" : `Need ${n} charges`);
+  switch (ability) {
+    case "reflip":
+      if (reflipsUsed >= REFLIPS_PER_TURN) return { state: "spent", reason: "No re-flips left this turn" };
+      if (charges < 1) return { state: "noafford", reason: needCharges(1) };
+      return { state: "ready" };
+    case "push":
+      if (charges < 1) return { state: "noafford", reason: needCharges(1) };
+      if (p.pushTargets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
+      return { state: "ready" };
+    case "chargedShot":
+      if (charges < CHARGE_CAP) return { state: "noafford", reason: needCharges(CHARGE_CAP) };
+      if (p.chargedShotTargets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
+      return { state: "ready" };
+    case "charge":
+      if (charges < 1) return { state: "noafford", reason: needCharges(1) };
+      if (chargeMoveIndexByToken.size === 0) return { state: "noafford", reason: "No sweep on this roll" };
+      return { state: "ready" };
+    case "bulwark":
+      if (charges < 1) return { state: "noafford", reason: needCharges(1) };
+      if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to shield" };
+      return { state: "ready" };
+    case "bulwarkReinforced":
+      if (charges < CHARGE_CAP) return { state: "noafford", reason: needCharges(CHARGE_CAP) };
+      if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to shield" };
+      return { state: "ready" };
+    case "blinkStrike":
+    case "warpath": {
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      const targets = ability === "blinkStrike" ? p.blinkStrikeTargets : p.warpathTargets;
+      if (targets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
+      return { state: "ready" };
+    }
   }
-  if (cls === "warrior" && currentPower.ultimateReady[mySide] && currentPower.warpathTargets.length > 0) {
-    const btn = document.createElement("button");
-    btn.dataset.ability = "warpath";
-    const setLabel = () => {
-      setAbilityLabel(btn, warpathArmed ? "Warpath: tap a target…" : "Warpath ✦");
-      btn.className = warpathArmed ? "ability ultimate armed" : "ability ultimate";
-    };
-    setLabel();
-    btn.addEventListener("click", () => {
-      warpathArmed = !warpathArmed;
-      warpathTargetIds.clear();
-      if (warpathArmed) for (const id of currentPower!.warpathTargets) warpathTargetIds.add(id);
-      else hideHoverGlow();
-      setLabel();
-    });
-    movesEl.appendChild(btn);
+  return { state: "noafford" };
+}
+
+/** Sync the dock to the latest power info. `active` mirrors the boolean the
+ *  old ability rail took (my turn + flip revealed + roll gate down);
+ *  omitted → keep the last value (plate-driven refreshes mid-turn). */
+function updateDock(active?: boolean) {
+  if (active !== undefined) dockActive = active;
+  const mySide: PlayerId = myRole ?? "p1";
+  const cls = myVariant === "masterKiller" && currentPower ? currentPower.classes[mySide] : null;
+  if (!cls) {
+    disarm();
+    dockEl.classList.remove("show", "off");
+    dockClass = null;
+    dockKey = "";
+    return;
+  }
+  buildDock(cls);
+  dockEl.classList.add("show");
+  dockEl.classList.toggle("off", !dockActive);
+
+  const p = currentPower!;
+  const charges = p.charges[mySide];
+  // Off-turn the server's count describes the OPPONENT's turn — show my
+  // Re-flip as unspent (full ticks) until my turn actually starts.
+  const reflipsUsed = dockActive ? (p.reflipsUsedThisTurn ?? 0) : 0;
+
+  // Warrior: which of my tokens can Charge this roll, with which move index.
+  chargeMoveIndexByToken.clear();
+  if (cls === "warrior" && currentPowerMoves) {
+    for (let i = 0; i < currentPowerMoves.length; i++) {
+      if (currentPowerMoves[i].chargeAvailable) chargeMoveIndexByToken.set(currentPowerMoves[i].tokenId, i);
+    }
   }
 
-  if (charges < 1) return;
+  // Disarm only when the situation really changed — a heartbeat poll that
+  // re-applies the same overlay must not wipe an armed state mid-aim.
+  const key = [
+    lastSeq,
+    dockActive,
+    cls,
+    charges,
+    reflipsUsed,
+    p.ultimateReady[mySide],
+    p.pushTargets.join(),
+    p.chargedShotTargets.join(),
+    p.blinkStrikeTargets.join(),
+    p.warpathTargets.join(),
+    p.bulwarkTargets.join(),
+    [...chargeMoveIndexByToken.keys()].join(),
+  ].join("|");
+  if (key !== dockKey) {
+    dockKey = key;
+    disarm();
+  }
 
-  if (cls === "mage") {
-    // Gated on the server-reported per-turn use count too, not just
-    // charges: a Mage can hold a refunded charge (re-rolled zero) while
-    // already at the REFLIPS_PER_TURN cap. Older servers omit the field —
-    // fall back to 0, i.e. the pre-existing charges-only gate.
-    if ((currentPower.reflipsUsedThisTurn ?? 0) < REFLIPS_PER_TURN) {
-      const btn = document.createElement("button");
-      btn.dataset.ability = "reflip";
-      setAbilityLabel(btn, `Re-flip (1⚡)`);
-      btn.className = "ability";
-      btn.addEventListener("click", () => {
-        sendToServer({ type: "usePower", action: { kind: "reflip" } });
-      });
-      movesEl.appendChild(btn);
-    }
-  } else if (cls === "archer") {
-    if (currentPower.pushTargets.length > 0) {
-      const btn = document.createElement("button");
-      btn.dataset.ability = "push";
-      const setLabel = () => {
-        setAbilityLabel(btn, pushArmed ? "Push: tap a target…" : `Push (1⚡)`);
-        btn.className = pushArmed ? "ability armed" : "ability";
-      };
-      setLabel();
-      btn.addEventListener("click", () => {
-        pushArmed = !pushArmed;
-        pushTargetIds.clear();
-        if (pushArmed) for (const id of currentPower!.pushTargets) pushTargetIds.add(id);
-        else hideHoverGlow();
-        setLabel();
-      });
-      movesEl.appendChild(btn);
-    }
-    // Charged Shot: spends BOTH banked charges at once, so it's only offered
-    // at the full charge cap — distinct action/button from Push, offered
-    // alongside it (not instead of it) when both are available.
-    if (charges === CHARGE_CAP && currentPower.chargedShotTargets.length > 0) {
-      const btn = document.createElement("button");
-      btn.dataset.ability = "chargedShot";
-      const setLabel = () => {
-        setAbilityLabel(btn, chargedShotArmed ? "Charged Shot: tap a target…" : `Charged Shot (${CHARGE_CAP}⚡)`);
-        btn.className = chargedShotArmed ? "ability ultimate armed" : "ability ultimate";
-      };
-      setLabel();
-      btn.addEventListener("click", () => {
-        chargedShotArmed = !chargedShotArmed;
-        chargedShotTargetIds.clear();
-        if (chargedShotArmed) for (const id of currentPower!.chargedShotTargets) chargedShotTargetIds.add(id);
-        else hideHoverGlow();
-        setLabel();
-      });
-      movesEl.appendChild(btn);
-    }
-  } else if (cls === "warrior") {
-    // Bulwark: unlike every other armed flow, the tap target is one of the
-    // MOVER'S OWN tokens — offered alongside Charge, not instead of it, so
-    // a Warrior with a spare charge can pick either each turn. At the full
-    // bank a second button offers the REINFORCED cast (2 charges, doubled
-    // lifetime and saves) — same targets, same tap flow; the two buttons
-    // share one armed state, so arming either disarms the other.
-    if (currentPower.bulwarkTargets.length > 0) {
-      const btn = document.createElement("button");
-      btn.dataset.ability = "bulwark";
-      const reinfBtn = charges === CHARGE_CAP ? document.createElement("button") : null;
-      const setLabels = () => {
-        const plainArmed = bulwarkArmed && !bulwarkArmedReinforced;
-        setAbilityLabel(btn, plainArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`);
-        btn.className = plainArmed ? "ability armed" : "ability";
-        if (reinfBtn) {
-          const reinfArmed = bulwarkArmed && bulwarkArmedReinforced;
-          setAbilityLabel(
-            reinfBtn,
-            reinfArmed ? "Reinforced Bulwark: tap your token…" : `Reinforced Bulwark (${CHARGE_CAP}⚡)`,
-          );
-          reinfBtn.className = reinfArmed ? "ability ultimate armed" : "ability ultimate";
-        }
-      };
-      const toggle = (reinforced: boolean) => {
-        const wasThisArmed = bulwarkArmed && bulwarkArmedReinforced === reinforced;
-        bulwarkArmed = !wasThisArmed;
-        bulwarkArmedReinforced = bulwarkArmed && reinforced;
-        bulwarkTargetIds.clear();
-        if (bulwarkArmed) for (const id of currentPower!.bulwarkTargets) bulwarkTargetIds.add(id);
-        else hideHoverGlow();
-        setLabels();
-      };
-      setLabels();
-      btn.addEventListener("click", () => toggle(false));
-      movesEl.appendChild(btn);
-      if (reinfBtn) {
-        reinfBtn.dataset.ability = "bulwarkReinforced";
-        reinfBtn.addEventListener("click", () => toggle(true));
-        movesEl.appendChild(reinfBtn);
-      }
-    }
-    if (currentPowerMoves) {
-      for (let i = 0; i < currentPowerMoves.length; i++) {
-        const m = currentPowerMoves[i];
-        if (!m.chargeAvailable) continue;
-        const btn = document.createElement("button");
-        btn.dataset.ability = "charge";
-        setAbilityLabel(btn, `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`);
-        btn.className = "ability";
-        const moveIndex = i;
-        btn.addEventListener("click", () => {
-          sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
-        });
-        movesEl.appendChild(btn);
-      }
+  for (const btn of dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn")) {
+    const ability = btn.dataset.ability!;
+    const s = abilityState(ability, charges, reflipsUsed);
+    // Off-turn the dock is glanceable, not judgmental: the whole row dims
+    // (.off) and the per-button ready/noafford treatments stand down.
+    btn.classList.toggle("ready", dockActive && s.state === "ready");
+    btn.classList.toggle("noafford", dockActive && s.state === "noafford");
+    btn.classList.toggle("spent", s.state === "spent");
+    btn.dataset.state = s.state;
+    btn.dataset.reason = s.reason ?? "";
+    const cost = DOCK_COST[ability];
+    btn.querySelectorAll(".dock-cost i").forEach((pip, i) => pip.classList.toggle("lit", i < Math.min(charges, cost)));
+    if (ability === "reflip") {
+      const remaining = Math.max(0, REFLIPS_PER_TURN - reflipsUsed);
+      btn.querySelectorAll(".dock-uses i").forEach((tickEl, i) => tickEl.classList.toggle("lit", i < remaining));
+      (btn.querySelector(".dock-warn") as HTMLSpanElement).classList.toggle("show", charges === CHARGE_CAP);
     }
   }
 }
 
-// The "i" gem opens the ability card INSTEAD of firing the ability — capture
-// phase so it wins over the button's own activation listener.
-movesEl.addEventListener(
-  "click",
-  (e) => {
-    const gem = (e.target as HTMLElement).closest(".ability-info");
-    if (!gem) return;
-    e.stopPropagation();
-    const btn = gem.closest("button") as HTMLButtonElement;
-    if (abilityTipFor === btn.dataset.ability) hideAbilityTip();
-    else showAbilityTip(btn.dataset.ability!, btn);
-  },
-  true,
-);
-// Desktop: hovering an ability button shows its card, like any game tooltip.
-movesEl.addEventListener("pointerover", (e) => {
+/** Enter targeting mode for `kind`: lock the gem, dim its siblings, raise
+ *  the vignette + instruction ribbon, and re-point the ground rings at the
+ *  target set in the caster's class color (see tick()). Arming over another
+ *  armed ability just switches — one state, mutually exclusive. */
+function armAbility(kind: ArmedKind) {
+  if (!currentPower || !dockActive) return;
+  disarm();
+  const p = currentPower;
+  const ids = new Set<number>(
+    kind === "push"
+      ? p.pushTargets
+      : kind === "chargedShot"
+        ? p.chargedShotTargets
+        : kind === "blinkStrike"
+          ? p.blinkStrikeTargets
+          : kind === "warpath"
+            ? p.warpathTargets
+            : kind === "charge"
+              ? [...chargeMoveIndexByToken.keys()]
+              : p.bulwarkTargets, // bulwark / bulwarkReinforced
+  );
+  if (ids.size === 0) return;
+  armed = { kind, targetIds: ids };
+  for (const btn of dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn")) {
+    btn.classList.toggle("armed", btn.dataset.ability === kind);
+    btn.classList.toggle("dim", btn.dataset.ability !== kind);
+  }
+  ribbonEl.dataset.class = dockClass ?? "";
+  ribbonIconEl.textContent = DOCK_GLYPHS[kind];
+  ribbonTextEl.innerHTML =
+    `<b>${ABILITY_INFO[kind].name}</b> — ${RIBBON_COPY[kind]} ` +
+    `<span class="ribbon-hint">· tap elsewhere to cancel</span>`;
+  ribbonEl.classList.add("show");
+  vignetteEl.classList.add("show");
+}
+
+/** Leave targeting mode — idempotent, safe to call with nothing armed. */
+function disarm() {
+  armed = null;
+  for (const btn of dockEl.querySelectorAll(".dock-btn")) btn.classList.remove("armed", "dim");
+  ribbonEl.classList.remove("show");
+  vignetteEl.classList.remove("show");
+  hideHoverGlow();
+}
+
+/** The ONLY place armed casts become wire messages — every shape is an id
+ *  or an index into a server-sent list, per the trust model. */
+function fireArmed(tokenId: number) {
+  if (!armed) return;
+  const kind = armed.kind;
+  switch (kind) {
+    case "push":
+      sendToServer({ type: "usePower", action: { kind: "push", targetTokenId: tokenId } });
+      break;
+    case "chargedShot":
+      sendToServer({ type: "usePower", action: { kind: "chargedShot", targetTokenId: tokenId } });
+      break;
+    case "blinkStrike":
+      sendToServer({ type: "usePower", action: { kind: "blinkStrike", targetTokenId: tokenId } });
+      break;
+    case "warpath":
+      sendToServer({ type: "usePower", action: { kind: "warpath", targetTokenId: tokenId } });
+      break;
+    case "bulwark":
+      sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId } });
+      break;
+    case "bulwarkReinforced":
+      sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId, reinforced: true } });
+      break;
+    case "charge": {
+      const moveIndex = chargeMoveIndexByToken.get(tokenId);
+      if (moveIndex !== undefined) sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
+      break;
+    }
+  }
+  flashDockButton(kind, "fired");
+}
+
+/** Restartable one-shot CSS animation on a dock button. */
+function flashDockButton(ability: string, anim: "fired" | "shake") {
+  const btn = dockEl.querySelector<HTMLButtonElement>(`.dock-btn[data-ability="${ability}"]`);
+  if (!btn) return;
+  btn.classList.remove(anim);
+  void btn.offsetWidth; // restart the CSS animation from frame 0
+  btn.classList.add(anim);
+  setTimeout(() => btn.classList.remove(anim), anim === "fired" ? 320 : 420);
+}
+
+// --- Dock input: tap to arm/fire, hold to peek the ability card ------------
+/** Hold a gem this long to peek its card instead of casting. */
+const HOLD_MS = 280;
+let peekTimer = 0;
+let peeking = false;
+/** Set when a hold-to-peek just ended, so the release's click doesn't cast. */
+let suppressDockClick = false;
+
+dockEl.addEventListener("pointerdown", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".dock-btn");
+  if (!btn) return;
+  suppressDockClick = false;
+  clearTimeout(peekTimer);
+  peekTimer = window.setTimeout(() => {
+    peeking = true;
+    showAbilityTip(btn.dataset.ability!, btn);
+  }, HOLD_MS);
+});
+function endDockPeek() {
+  clearTimeout(peekTimer);
+  if (peeking) {
+    peeking = false;
+    hideAbilityTip();
+    suppressDockClick = true;
+  }
+}
+dockEl.addEventListener("pointerup", endDockPeek);
+dockEl.addEventListener("pointercancel", endDockPeek);
+dockEl.addEventListener("pointerleave", endDockPeek);
+// iOS long-press must not pop the selection callout over the gems.
+dockEl.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// Desktop: hovering a gem shows its card, like any game tooltip. Peeking
+// deliberately works in every state — off-turn and unaffordable included.
+dockEl.addEventListener("pointerover", (e) => {
   if (!window.matchMedia("(hover: hover)").matches) return;
-  const btn = (e.target as HTMLElement).closest("button[data-ability]") as HTMLButtonElement | null;
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".dock-btn");
   if (btn) showAbilityTip(btn.dataset.ability!, btn);
 });
-movesEl.addEventListener("pointerout", (e) => {
+dockEl.addEventListener("pointerout", (e) => {
   if (!window.matchMedia("(hover: hover)").matches) return;
   const to = (e as PointerEvent).relatedTarget as HTMLElement | null;
-  if (!to || !to.closest("button[data-ability]")) hideAbilityTip();
+  if (!to || !to.closest(".dock-btn")) hideAbilityTip();
+});
+
+dockEl.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".dock-btn");
+  if (!btn) return;
+  if (suppressDockClick) {
+    suppressDockClick = false;
+    return; // that was a peek release, not a cast
+  }
+  if (dockEl.classList.contains("off")) return; // glanceable, never tappable
+  hideAbilityTip();
+  const ability = btn.dataset.ability!;
+  if (btn.dataset.state !== "ready") {
+    // Can't cast: headshake + the reason, so the gate teaches itself.
+    flashDockButton(ability, "shake");
+    if (btn.dataset.reason) showAnnouncement(btn.dataset.reason, "skip", 1400);
+    return;
+  }
+  if (ability === "reflip") {
+    // Fires instantly — no target to pick, and the Ward-drop badge already
+    // warned (speed over confirm friction). The roll gate re-arms via the
+    // usual pendingFlipSeq path, so the player taps their coins again.
+    sendToServer({ type: "usePower", action: { kind: "reflip" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (armed?.kind === ability) disarm(); // re-tap the armed gem = cancel
+  else armAbility(ability as ArmedKind);
+});
+
+// Cancel affordances beyond tap-outside: the ribbon's ✕ and Escape.
+(document.getElementById("ribbon-cancel") as HTMLButtonElement).addEventListener("click", () => disarm());
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && armed) disarm();
 });
 
 movesEl.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("button");
   if (!btn) return;
-  // Activating an ability puts the card away (arming flows take the screen).
-  if (btn.dataset.ability) hideAbilityTip();
   // "Play Again" branch. No more per-move buttons live here.
   if (btn.dataset.newmatch) {
     sendToServer({ type: "newMatch" });
@@ -1882,65 +2070,13 @@ canvas.addEventListener("pointerdown", (e) => {
     }
     return;
   }
-  // Master Killer: Push is armed and waiting for a target tap.
-  if (pushArmed) {
-    const target = findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY);
-    if (target !== null) {
-      sendToServer({ type: "usePower", action: { kind: "push", targetTokenId: target } });
-      pushArmed = false;
-      pushTargetIds.clear();
-      hideHoverGlow();
-    }
-    return;
-  }
-  // Master Killer: Charged Shot armed and waiting for a target tap — same
-  // enemy-target-tap flow as Push, just a different action kind + target set.
-  if (chargedShotArmed) {
-    const target = findTargetUnderPointer(chargedShotTargetIds, e.clientX, e.clientY);
-    if (target !== null) {
-      sendToServer({ type: "usePower", action: { kind: "chargedShot", targetTokenId: target } });
-      chargedShotArmed = false;
-      chargedShotTargetIds.clear();
-      hideHoverGlow();
-    }
-    return;
-  }
-  // Master Killer: Blink Strike / Warpath armed and waiting for a target tap.
-  if (blinkStrikeArmed) {
-    const target = findTargetUnderPointer(blinkStrikeTargetIds, e.clientX, e.clientY);
-    if (target !== null) {
-      sendToServer({ type: "usePower", action: { kind: "blinkStrike", targetTokenId: target } });
-      blinkStrikeArmed = false;
-      blinkStrikeTargetIds.clear();
-      hideHoverGlow();
-    }
-    return;
-  }
-  if (warpathArmed) {
-    const target = findTargetUnderPointer(warpathTargetIds, e.clientX, e.clientY);
-    if (target !== null) {
-      sendToServer({ type: "usePower", action: { kind: "warpath", targetTokenId: target } });
-      warpathArmed = false;
-      warpathTargetIds.clear();
-      hideHoverGlow();
-    }
-    return;
-  }
-  // Master Killer: Bulwark armed and waiting for a tap on one of the
-  // MOVER'S OWN tokens (bulwarkTargetIds already only lists those) — same
-  // raycast helper as every enemy-targeted flow above, just a different set.
-  if (bulwarkArmed) {
-    const target = findTargetUnderPointer(bulwarkTargetIds, e.clientX, e.clientY);
-    if (target !== null) {
-      sendToServer({
-        type: "usePower",
-        action: { kind: "bulwark", tokenId: target, ...(bulwarkArmedReinforced ? { reinforced: true } : {}) },
-      });
-      bulwarkArmed = false;
-      bulwarkArmedReinforced = false;
-      bulwarkTargetIds.clear();
-      hideHoverGlow();
-    }
+  // Master Killer: an ability is armed — this tap either picks a target or
+  // cancels. Either way it never falls through to sips/roll/move handling.
+  // (Dock and ribbon taps land on their own DOM buttons, never here.)
+  if (armed) {
+    const target = findTargetUnderPointer(armed.targetIds, e.clientX, e.clientY);
+    if (target !== null) fireArmed(target);
+    disarm(); // fired or missed — targeting mode ends (tap-outside cancels)
     return;
   }
   // A waiting swig: tap the mug, drink to the stone you brought home.
@@ -1958,7 +2094,7 @@ canvas.addEventListener("pointerdown", (e) => {
       triggerCoinFlip(pending.flip, myCoins);
       renderHud(pending.state, pending.flip);
       renderMoves(pending.legalMoves, true);
-      renderPowerActions(true);
+      updateDock(true);
       if (pending.legalMoves && pending.legalMoves.length > 0)
         coach(
           "move",
@@ -2027,26 +2163,14 @@ function isMyCoinUnderPointer(clientX: number, clientY: number): boolean {
 canvas.addEventListener("pointermove", (e) => {
   const hit = findEligibleMeshUnderPointer(e.clientX, e.clientY);
   const capturable = findCapturableUnderPointer(e.clientX, e.clientY);
-  const pushable = pushArmed ? findTargetUnderPointer(pushTargetIds, e.clientX, e.clientY) : null;
-  const chargedShotable = chargedShotArmed ? findTargetUnderPointer(chargedShotTargetIds, e.clientX, e.clientY) : null;
-  const blinkStrikeable = blinkStrikeArmed ? findTargetUnderPointer(blinkStrikeTargetIds, e.clientX, e.clientY) : null;
-  const warpathable = warpathArmed ? findTargetUnderPointer(warpathTargetIds, e.clientX, e.clientY) : null;
-  const bulwarkable = bulwarkArmed ? findTargetUnderPointer(bulwarkTargetIds, e.clientX, e.clientY) : null;
+  // Whatever ability is armed: one lookup over its own target set.
+  const armedTarget = armed ? findTargetUnderPointer(armed.targetIds, e.clientX, e.clientY) : null;
   const rollable =
     ((rollPending !== null || openingTapArmed) && isMyCoinUnderPointer(e.clientX, e.clientY)) ||
     (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY));
   canvas.style.cursor =
-    hit !== null ||
-    capturable !== null ||
-    pushable !== null ||
-    chargedShotable !== null ||
-    blinkStrikeable !== null ||
-    warpathable !== null ||
-    bulwarkable !== null ||
-    rollable
-      ? "pointer"
-      : "default";
-  const glowTarget = pushable ?? chargedShotable ?? blinkStrikeable ?? warpathable ?? bulwarkable ?? capturable;
+    hit !== null || capturable !== null || armedTarget !== null || rollable ? "pointer" : "default";
+  const glowTarget = armedTarget ?? capturable;
   if (glowTarget !== null) {
     const m = markers[glowTarget];
     hoverGlow.position.set(m.target.x, m.target.y - 0.062, m.target.z);
@@ -2843,6 +2967,7 @@ function applyOverlay(v: RoomResponse) {
     // resolved too fast for pickedClasses to have caught our own pick.
     currentPower = v.power ?? null;
     updatePlates(null);
+    updateDock(false); // visible but dormant through the flip-off
     const iFlipped = v.openingFlips[mySide] !== null;
     openingTapArmed = !iFlipped;
     if (!iFlipped)
@@ -2876,19 +3001,19 @@ function applyOverlay(v: RoomResponse) {
       renderHud(v.state, null);
       hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
       renderMoves(null, false);
-      renderPowerActions(false);
+      updateDock(false);
     } else if (!rollPending) {
       // Already revealed (tapped) — keep the interactive surfaces fresh.
       renderHud(v.state, v.flip);
       renderMoves(movesForTap, true);
-      renderPowerActions(true);
+      updateDock(true);
     }
     // else: gate armed, waiting on the tap — leave it alone.
   } else {
     rollPending = null;
     renderHud(v.state, v.flip);
     renderMoves(v.flip !== null && mine ? movesForTap : null, mine && v.flip !== null);
-    renderPowerActions(mine && v.flip !== null);
+    updateDock(mine && v.flip !== null);
   }
 
   // Game over — celebrate once per winner.
@@ -3004,17 +3129,10 @@ function seatSelf(
   seenOpeningFlips = { p1: null, p2: null };
   currentPower = null;
   currentPowerMoves = null;
-  pushArmed = false;
-  pushTargetIds.clear();
-  chargedShotArmed = false;
-  chargedShotTargetIds.clear();
-  blinkStrikeArmed = false;
-  blinkStrikeTargetIds.clear();
-  warpathArmed = false;
-  warpathTargetIds.clear();
-  bulwarkArmed = false;
-  bulwarkArmedReinforced = false;
-  bulwarkTargetIds.clear();
+  disarm();
+  chargeMoveIndexByToken.clear();
+  dockKey = "";
+  dockActive = false;
   pickedClasses = { p1: null, p2: null };
   lastSeq = 0;
   pendingFlipSeq = 0;
@@ -3276,17 +3394,13 @@ function resetToMenu(message: string) {
   confirmStart = 0;
   currentPower = null;
   currentPowerMoves = null;
-  pushArmed = false;
-  pushTargetIds.clear();
-  chargedShotArmed = false;
-  chargedShotTargetIds.clear();
-  blinkStrikeArmed = false;
-  blinkStrikeTargetIds.clear();
-  warpathArmed = false;
-  warpathTargetIds.clear();
-  bulwarkArmed = false;
-  bulwarkArmedReinforced = false;
-  bulwarkTargetIds.clear();
+  disarm();
+  hideAbilityTip();
+  chargeMoveIndexByToken.clear();
+  dockEl.classList.remove("show", "off");
+  dockClass = null;
+  dockKey = "";
+  dockActive = false;
   pickedClasses = { p1: null, p2: null };
   myVariant = "classic";
   setChatAvailable(false); // hide + clear chat back at the menu
@@ -3814,11 +3928,17 @@ function tick() {
   const eased = breath * breath * (3 - 2 * breath); // smoothstep: linger, glide
   eligibleRingMat.opacity = 0.5 + 0.38 * eased;
   const ringScale = 0.97 + 0.06 * eased; // ring Ø 0.466–0.494, < tile pitch
+  // Targeting mode composes with the SAME decals instead of stacking a
+  // second affordance: while an ability is armed the gold "movable" rings
+  // stand down and the rings re-point at the armed target set, tinted the
+  // caster's class color (the ring texture is drawn white for exactly this).
+  const ringIds = armed ? armed.targetIds : eligibleTokenIds;
+  eligibleRingMat.color.setHex(armed ? DOCK_RING_TINTS[dockClass ?? "archer"] : 0xffc36a);
   for (let i = 0; i < markers.length; i++) {
     const marker = markers[i];
     const ring = ringMeshes[i];
     ring.visible =
-      marker.mesh.visible && !marker.flying && eligibleTokenIds.has(i);
+      marker.mesh.visible && !marker.flying && ringIds.has(i);
     if (!ring.visible) continue;
     ring.position.set(
       marker.mesh.position.x,
@@ -3901,4 +4021,74 @@ setInterval(() => {
   resize();
   tick();
 }, 1000);
+
+// ---------------------------------------------------------------------------
+// Dev-only Ability Dock harness (localhost, ?dockdemo[=class] — mirrors the
+// ?sips gate above): parks the menu and cycles the dock through every visual
+// state on a timer, since the ultimate states are painful to reach by hand
+// (3 shield landings in a row). Display-only — no session exists, so
+// nothing the dock arms or "fires" can ever reach the wire.
+// ---------------------------------------------------------------------------
+const dockDemoParam =
+  location.hostname === "localhost" ? new URLSearchParams(location.search).get("dockdemo") : null;
+if (dockDemoParam !== null) {
+  const cls: PlayerClass = ["archer", "mage", "warrior"].includes(dockDemoParam)
+    ? (dockDemoParam as PlayerClass)
+    : "warrior";
+  menuEl.classList.remove("show");
+  myVariant = "masterKiller";
+  hud.textContent = `dockdemo: ${cls}`;
+  const demoStates: { label: string; charges: number; ult: boolean; active: boolean; reflips: number }[] = [
+    { label: "off-turn", charges: 1, ult: false, active: false, reflips: 0 },
+    { label: "broke", charges: 0, ult: false, active: true, reflips: 0 },
+    { label: "one charge", charges: 1, ult: false, active: true, reflips: 0 },
+    { label: "full bank", charges: 2, ult: false, active: true, reflips: 0 },
+    { label: "ultimate up", charges: 2, ult: true, active: true, reflips: 1 },
+    { label: "spent", charges: 1, ult: true, active: true, reflips: 2 },
+  ];
+  let demoStep = 0;
+  const applyDemo = () => {
+    const d = demoStates[demoStep % demoStates.length];
+    currentPower = {
+      classes: { p1: cls, p2: "archer" },
+      charges: { p1: d.charges, p2: 1 },
+      safeTokens: [],
+      pushTargets: [4, 5],
+      chargedShotTargets: [4],
+      ultimateReady: { p1: d.ult, p2: false },
+      blinkStrikeTargets: d.ult ? [4, 5] : [],
+      warpathTargets: d.ult ? [4] : [],
+      bulwarkTargets: [0, 1, 2],
+      bulwarkedTokenIds: [],
+      reflipsUsedThisTurn: d.reflips,
+    };
+    currentPowerMoves =
+      cls === "warrior"
+        ? [
+            {
+              tokenId: 1,
+              from: 2,
+              to: 5,
+              captures: [],
+              bonusCaptures: [],
+              landsOnShield: false,
+              causesWin: false,
+              breaksWard: false,
+              chargeAvailable: true,
+              chargeSweepCaptures: [],
+            },
+          ]
+        : null;
+    setStatus(`dockdemo: ${d.label}`, "ok");
+    updatePlates(null); // the plate the dock anchors to — true composition
+    updateDock(d.active);
+    demoStep++;
+  };
+  applyDemo();
+  // Pause the carousel while something is armed — aiming freezes the state
+  // so targeting mode can actually be inspected.
+  setInterval(() => {
+    if (!armed) applyDemo();
+  }, 3000);
+}
 

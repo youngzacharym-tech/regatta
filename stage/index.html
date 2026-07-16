@@ -103,38 +103,15 @@
       }
       #moves button:hover { filter: brightness(1.15); }
       #moves button:active { transform: translateY(1px); }
-      /* Active abilities read as jewel-set gold: amethyst for actives,
-         radiant for ultimates, gold-hot while aiming. */
-      #moves button.ability {
-        background: linear-gradient(180deg, #4b3070, #2c1a45) padding-box, var(--gold-rim) border-box;
-        color: #efe2ff;
-      }
-      #moves button.ability.ultimate {
-        background: linear-gradient(180deg, #7a2d8c, #451a52) padding-box, linear-gradient(160deg, #ffe9b0, #b06ee0 55%, #ffd370) border-box;
-        color: #ffedff;
-      }
-      #moves button.ability.armed,
-      #moves button.armed {
-        background: linear-gradient(180deg, #b57a1e, #7c4d0c) padding-box, linear-gradient(160deg, #fff3c8, #a06010) border-box;
-        color: #fff6dd;
-      }
+      /* Ability buttons moved to the plate-anchored #dock — only the
+         Play Again button still lives in the #moves rail. */
       #moves button.play-again {
         background: linear-gradient(180deg, #f0d189 0%, #c9a35c 45%, #a67c33 55%, #dcb96a 100%) padding-box, linear-gradient(160deg, #fff3c8, #7a5c2e) border-box;
         color: #2a1a08; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
       }
-      /* The little "i" gem on every ability button — opens the ability card. */
-      #moves button .ability-info {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 17px; height: 17px; margin-left: 8px; border-radius: 50%;
-        font-size: 11px; font-weight: 700; font-style: italic; line-height: 1;
-        font-family: Georgia, serif;
-        background: rgba(0, 0, 0, 0.35); color: rgba(255, 244, 214, 0.85);
-        border: 1px solid rgba(255, 244, 214, 0.45);
-        vertical-align: 1px;
-      }
-      #moves button .ability-info:hover { background: rgba(0, 0, 0, 0.55); }
       /* The ability card — name, cost, and what the power actually does.
-         Class-tinted name, gilded wood card, floats just above the buttons. */
+         Class-tinted name, gilded wood card. Opened by hovering a dock gem
+         (desktop) or holding one ~280ms (touch); floats above the gem. */
       #ability-tip {
         position: fixed; z-index: 130; width: 320px; max-width: 92vw;
         transform: translateX(-50%);
@@ -158,6 +135,20 @@
         color: #b8a888; margin-bottom: 7px;
       }
       #ability-tip .tip-desc { font-size: 13px; line-height: 1.5; color: var(--parchment); }
+      /* Cost pips on the card mirror the dock button's (ultimates: none). */
+      #ability-tip .tip-pips { display: none; gap: 6px; margin: 1px 1px 8px; }
+      #ability-tip .tip-pips.show { display: flex; }
+      #ability-tip .tip-pips i {
+        width: 9px; height: 9px; transform: rotate(45deg);
+        background: radial-gradient(circle at 35% 30%, #fff8, var(--tip-color));
+        border-radius: 2px; box-shadow: 0 0 5px 1px var(--tip-color);
+      }
+      /* Ward-drop warning — shown on Re-flip's card while the Ward is up. */
+      #ability-tip .tip-warn {
+        display: none; margin-top: 8px;
+        font-size: 12px; line-height: 1.45; color: #d9a5ff;
+      }
+      #ability-tip .tip-warn.show { display: block; }
       /* --- Tutorial coach card — bottom center, one lesson at a time --- */
       #coach {
         position: fixed; left: 50%; bottom: 78px; transform: translateX(-50%);
@@ -361,6 +352,190 @@
       #plate-them { position: fixed; top: 54px; right: 14px; z-index: 60; }
       #plate-them .plate-ring { width: 150px; height: 150px; }
 
+      /* --- Ability Dock — plate-anchored class-power gems ---
+         One gem button per active ability, in a row off my plate's right
+         shoulder. Built ONCE per class by buildDock(); every update just
+         toggles state classes so transitions animate instead of snapping:
+           (base)    off-turn / pre-roll — #dock.off dims the whole row
+           .noafford my turn, can't cast — greyed glass, unlit red pips
+           .ready    castable — class tint + breathing glow
+           .armed    aiming — gold lock ring; every sibling gets .dim
+           .spent    Re-flip out of uses, or a dormant ultimate (the goal,
+                     always visible for Mage/Warrior)                    */
+      #dock {
+        position: fixed; left: 226px; bottom: 20px; z-index: 60;
+        display: none; align-items: flex-end; gap: 10px;
+      }
+      #dock.show { display: flex; }
+      #dock.off { opacity: 0.45; filter: saturate(0.55); }
+      /* Class gem palettes — tint, glow, and the gem's own glass. */
+      #dock[data-class="archer"]  { --gem-color: #3ddc65; --gem-glow: rgba(61, 220, 101, 0.7);  --gem-grad: radial-gradient(circle at 35% 28%, #2c8a4a, #123a20 75%); }
+      #dock[data-class="mage"]    { --gem-color: #b45cff; --gem-glow: rgba(180, 92, 255, 0.7);  --gem-grad: radial-gradient(circle at 35% 28%, #7a3fb8, #2c1645 75%); }
+      #dock[data-class="warrior"] { --gem-color: #3f83ff; --gem-glow: rgba(63, 131, 255, 0.7);  --gem-grad: radial-gradient(circle at 35% 28%, #2f5fb4, #12264a 75%); }
+      .dock-btn {
+        position: relative; padding: 0; border: none; background: transparent;
+        cursor: pointer; touch-action: manipulation;
+        -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+        transition: transform 0.14s cubic-bezier(0.2, 1.4, 0.4, 1), opacity 0.18s ease-out;
+      }
+      #dock.off .dock-btn { cursor: default; }
+      .dock-btn.dim { opacity: 0.3; }
+      .dock-gem {
+        position: relative; display: flex; align-items: center; justify-content: center;
+        width: 68px; height: 68px; border-radius: 50%;
+        border: 2px solid transparent;
+        background: var(--gem-grad) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 0 10px rgba(0, 0, 0, 0.55);
+      }
+      .dock-btn.ult .dock-gem { width: 76px; height: 76px; }
+      .dock-icon {
+        font-size: 30px; line-height: 1; color: #f2ead6;
+        text-shadow: 0 0 8px var(--gem-glow), 0 1px 2px #000;
+      }
+      .dock-btn.ult .dock-icon { font-size: 34px; }
+      /* Charge cost — mini marquise pips riding the gem's bottom rim; lit
+         pips = charges you HOLD toward the cost, so a half-funded 2-cost
+         gem reads as one lit + one dark. */
+      .dock-cost {
+        position: absolute; bottom: -5px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 5px;
+      }
+      .dock-cost i {
+        width: 11px; height: 11px; transform: rotate(45deg);
+        background: #17100a; border: 1.5px solid #7a5c2e; border-radius: 2px;
+        box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.9);
+      }
+      .dock-cost i.lit {
+        background: radial-gradient(circle at 35% 30%, #fff8, var(--gem-color));
+        box-shadow: 0 0 6px 2px var(--gem-glow);
+      }
+      /* Re-flip's use-ticks along the gem's top edge — lit = uses REMAINING. */
+      .dock-uses {
+        position: absolute; top: -4px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 5px;
+      }
+      .dock-uses i {
+        width: 8px; height: 8px; transform: rotate(45deg);
+        background: #17100a; border: 1.5px solid #7a5c2e; border-radius: 2px;
+      }
+      .dock-uses i.lit {
+        background: radial-gradient(circle at 35% 30%, #fff8, var(--gem-color));
+        box-shadow: 0 0 5px 1px var(--gem-glow);
+      }
+      /* Ward-drop badge: casting Re-flip off a full bank costs the Ward. */
+      .dock-warn {
+        position: absolute; top: -2px; right: -2px; z-index: 2;
+        width: 18px; height: 18px; transform: rotate(45deg);
+        display: none; align-items: center; justify-content: center;
+        background: radial-gradient(circle at 35% 30%, #d9a5ff, #5a2d80);
+        border: 1.5px solid var(--gold-hi); border-radius: 3px;
+        animation: warnPulse 1.6s ease-in-out infinite;
+      }
+      .dock-warn.show { display: flex; }
+      .dock-warn::after {
+        content: "!"; transform: rotate(-45deg);
+        font-size: 11px; font-weight: 700; color: #fff; line-height: 1;
+      }
+      @keyframes warnPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+      /* Names hang below without widening the flex row (absolute), so the
+         gems stay an even rhythm no matter how long the label runs. */
+      .dock-name {
+        position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+        margin-top: 7px; white-space: nowrap;
+        font-size: 10px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+        color: #e8d8c0; text-shadow: 0 1px 2px #000;
+      }
+      .dock-btn.noafford .dock-gem { filter: grayscale(0.55) brightness(0.75); }
+      .dock-btn.noafford .dock-cost i { border-color: #8a3a30; }
+      /* Breathing ready-glow: a fixed shadow whose OPACITY animates —
+         compositor-cheap; never animate the shadow radius itself. */
+      .dock-btn.ready .dock-gem::after {
+        content: ""; position: absolute; inset: -2px; border-radius: 50%;
+        box-shadow: 0 0 14px 5px var(--gem-glow);
+        opacity: 0.35; animation: dockIdle 2.6s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes dockIdle { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
+      /* Ready ultimate: the radiant rim the old #moves ultimate wore. */
+      .dock-btn.ult.ready .dock-gem {
+        background: var(--gem-grad) padding-box, linear-gradient(160deg, #ffe9b0, #b06ee0 55%, #ffd370) border-box;
+      }
+      .dock-btn.ult.ready .dock-gem::after { animation-duration: 2s; }
+      .dock-btn.armed { transform: scale(1.06); }
+      .dock-btn.armed .dock-gem::before {
+        content: ""; position: absolute; inset: -5px; border-radius: 50%;
+        border: 3px solid #ffd370;
+        box-shadow: 0 0 18px 6px rgba(255, 211, 112, 0.55);
+        animation: armedPulse 1.2s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes armedPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+      .dock-btn.spent .dock-gem { filter: brightness(0.5) saturate(0.3); }
+      .dock-btn.ult.spent .dock-icon { opacity: 0.35; }
+      /* Unaffordable tap: a headshake + pip flash (a toast says why). */
+      .dock-btn.shake { animation: dockShake 0.26s ease-in-out; }
+      @keyframes dockShake {
+        0%, 100% { transform: translateX(0); }
+        17%, 50%, 83% { transform: translateX(-4px); }
+        33%, 66% { transform: translateX(4px); }
+      }
+      .dock-btn.shake .dock-cost i { animation: pipFlash 0.4s ease-out; }
+      @keyframes pipFlash {
+        0%   { border-color: #ff6a55; box-shadow: 0 0 8px 3px rgba(255, 106, 85, 0.6); }
+        100% { border-color: #8a3a30; box-shadow: none; }
+      }
+      /* Fire feedback — quick hot flash as the cast goes out. */
+      .dock-btn.fired .dock-gem { animation: dockFired 0.3s ease-out; }
+      @keyframes dockFired {
+        0%   { filter: brightness(1.8); }
+        100% { filter: brightness(1); }
+      }
+
+      /* --- Targeting ribbon — the instruction pill while an ability is
+         armed. Above room-info (90), below the win screen (100). --- */
+      #target-ribbon {
+        position: fixed; top: 12px; left: 50%; z-index: 95;
+        transform: translate(-50%, -8px);
+        display: flex; align-items: center; gap: 12px;
+        padding: 9px 14px 9px 18px; border-radius: 999px;
+        border: 2px solid transparent;
+        background: linear-gradient(165deg, rgba(40, 27, 16, 0.94), rgba(24, 16, 12, 0.94)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 10px 30px rgba(0, 0, 0, 0.6);
+        opacity: 0; pointer-events: none; white-space: nowrap;
+        transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        --ribbon-color: #ffd370;
+      }
+      #target-ribbon.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+      #target-ribbon[data-class="archer"]  { --ribbon-color: #7de996; }
+      #target-ribbon[data-class="mage"]    { --ribbon-color: #d9a5ff; }
+      #target-ribbon[data-class="warrior"] { --ribbon-color: #8fc1ff; }
+      #target-ribbon .ribbon-icon {
+        font-size: 18px; line-height: 1; color: var(--ribbon-color);
+        text-shadow: 0 0 8px var(--ribbon-color);
+      }
+      #target-ribbon .ribbon-text { font-size: 14px; color: var(--parchment); }
+      #target-ribbon .ribbon-text b { color: var(--ribbon-color); }
+      #target-ribbon .ribbon-hint { font-size: 10.5px; color: #b8a888; }
+      #ribbon-cancel {
+        position: relative; width: 32px; height: 32px; border-radius: 50%;
+        border: 2px solid transparent; cursor: pointer;
+        background: linear-gradient(180deg, #32241a, #1e1510) padding-box, var(--gold-rim) border-box;
+        color: var(--gold-text); font-size: 16px; line-height: 1;
+      }
+      /* Invisible halo grows the ✕'s touch target to ~48px. */
+      #ribbon-cancel::after { content: ""; position: absolute; inset: -8px; }
+      #ribbon-cancel:hover { filter: brightness(1.2); }
+
+      /* --- Targeting vignette — dims the 3D room while aiming. Sits right
+         after the canvas in DOM order with NO z-index, so every UI element
+         paints above it and only the scene sinks. --- */
+      #target-vignette {
+        position: fixed; inset: 0; pointer-events: none; opacity: 0;
+        transition: opacity 0.16s ease-out;
+        background: radial-gradient(ellipse at 50% 42%, transparent 30%, rgba(8, 5, 3, 0.5) 100%);
+      }
+      #target-vignette.show { opacity: 1; }
+
       /* --- Utility rail (guide / install / audio) — bottom-right corner --- */
       #rail {
         position: fixed; right: 14px; bottom: 14px; z-index: 60;
@@ -475,6 +650,36 @@
         #moves { bottom: 8px; gap: 4px; }
         #moves button { font-size: 12px; padding: 7px 11px; border-radius: 8px; }
         #chat-panel { bottom: 56px; }
+        /* Dock rides the smaller 118px plate; labels go — the gems carry it. */
+        #dock { left: 138px; bottom: 12px; gap: 8px; }
+        .dock-gem { width: 52px; height: 52px; }
+        .dock-btn.ult .dock-gem { width: 58px; height: 58px; }
+        .dock-icon { font-size: 24px; }
+        .dock-btn.ult .dock-icon { font-size: 26px; }
+        .dock-name { display: none; }
+        .dock-cost i { width: 9px; height: 9px; }
+        .dock-warn { width: 15px; height: 15px; }
+        .dock-warn::after { font-size: 9px; }
+        #target-ribbon { top: 8px; gap: 9px; padding: 7px 11px 7px 14px; }
+        #target-ribbon .ribbon-text { font-size: 12.5px; }
+        #ribbon-cancel { width: 30px; height: 30px; font-size: 14px; }
+      }
+      /* Narrow portrait (the 390px phone spec — phones are rotate-gated
+         today, so this is reached via responsive dev tools and doubles as
+         the guard for any future portrait unlock). The plate shrinks harder
+         than landscape so the whole dock row clears 390px, and the utility
+         rail lifts out of the dock's corner. */
+      @media (max-width: 500px) and (orientation: portrait) {
+        #plate-cluster { left: 10px; bottom: 10px; }
+        .plate-ring { width: 84px; height: 84px; }
+        #dock { left: 102px; bottom: 12px; gap: 8px; }
+        .dock-gem { width: 56px; height: 56px; }
+        .dock-btn.ult .dock-gem { width: 62px; height: 62px; }
+        .dock-icon { font-size: 26px; }
+        .dock-btn.ult .dock-icon { font-size: 28px; }
+        .dock-name { display: none; }
+        .dock-cost i { width: 10px; height: 10px; }
+        #rail { bottom: 108px; }
       }
       #guide-overlay {
         position: fixed; inset: 0; z-index: 150;
@@ -990,6 +1195,10 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <!-- Targeting dim — placed right after the canvas ON PURPOSE: with no
+         z-index it paints above the scene but below every later UI element,
+         so arming an ability dims the room, never the controls. -->
+    <div id="target-vignette"></div>
     <button id="fs-exit" title="Exit fullscreen">✕</button>
     <div id="rotate-hint">
       <div class="glyph">📱</div>
@@ -1007,6 +1216,9 @@
         </div>
         <div class="plate-name" id="plate-name-me"></div>
       </div>
+      <!-- Ability Dock — gem buttons built per class by buildDock(). Fixed-
+           positioned itself, so the cluster's box never constrains it. -->
+      <div id="dock"></div>
     </div>
     <div id="rail">
       <button id="chat-toggle" title="Chat">💬</button>
@@ -1055,7 +1267,9 @@
     <div id="ability-tip">
       <div class="tip-name"></div>
       <div class="tip-cost"></div>
+      <div class="tip-pips"></div>
       <div class="tip-desc"></div>
+      <div class="tip-warn">⚠ Casting now drops your Ward — it needs a full bank</div>
     </div>
     <div id="coach">
       <div class="coach-eyebrow">Tutorial</div>
@@ -1063,6 +1277,10 @@
       <div class="coach-hint">tap to dismiss</div>
     </div>
     <div id="announce"></div>
+    <div id="target-ribbon">
+      <span class="ribbon-icon"></span><span class="ribbon-text"></span>
+      <button id="ribbon-cancel" aria-label="Cancel targeting">✕</button>
+    </div>
     <div id="menu">
       <div class="card gilt-card">
         <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
