@@ -116,17 +116,355 @@ const fill = new THREE.DirectionalLight(0x92aacc, 0.22);
 fill.position.set(-4, 3, -2);
 scene.add(fill);
 
-// The tabletop the board rests on — a dark wood-toned plane that catches the
-// lamp pool and the pieces' shadows.
-const TABLE_Y = -0.42; // just under the board hull's lowest point
-const table = new THREE.Mesh(
-  new THREE.PlaneGeometry(40, 40),
-  new THREE.MeshStandardMaterial({ color: 0x2b1c11, roughness: 0.95 }),
+// ---------------------------------------------------------------------------
+// The room — the board sits on a real table in a firelit tavern: a beveled
+// slab tabletop with a brass inlay line, turned legs on worn plank floor,
+// timbered walls sinking into warm fog, and a stone hearth built around the
+// corner fire. Everything procedural and cheap (~25 draw calls, two tiny
+// generated canvas textures, zero added lights — the lamp and fire do the
+// work). The camera is fixed, so geometry only exists where it can see:
+// the table edges, the floor band beyond them, the lower walls, the hearth.
+// ---------------------------------------------------------------------------
+const TABLE_Y = -0.42; // tabletop SURFACE — mugs/coins/glow discs sit relative to this
+const FLOOR_Y = -3.15;
+
+// Warm near-black fog, same tone as the background: gameplay (closer than
+// ~7.5 units) is untouched; the room beyond sinks into the dark so wall and
+// floor edges never read as a skybox seam.
+scene.fog = new THREE.Fog(0x120d09, 7.5, 21);
+
+function roundedRectShape(w: number, d: number, r: number): THREE.Shape {
+  const s = new THREE.Shape();
+  const hw = w / 2;
+  const hd = d / 2;
+  s.moveTo(-hw + r, -hd);
+  s.lineTo(hw - r, -hd);
+  s.quadraticCurveTo(hw, -hd, hw, -hd + r);
+  s.lineTo(hw, hd - r);
+  s.quadraticCurveTo(hw, hd, hw - r, hd);
+  s.lineTo(-hw + r, hd);
+  s.quadraticCurveTo(-hw, hd, -hw, hd - r);
+  s.lineTo(-hw, -hd + r);
+  s.quadraticCurveTo(-hw, -hd, -hw + r, -hd);
+  return s;
+}
+
+const woodTopMat = new THREE.MeshStandardMaterial({ color: 0x2b1c11, roughness: 0.95 });
+const woodSideMat = new THREE.MeshStandardMaterial({ color: 0x221510, roughness: 0.9 });
+const woodDarkMat = new THREE.MeshStandardMaterial({ color: 0x1c110b, roughness: 0.92 });
+const brassMat = new THREE.MeshStandardMaterial({
+  color: 0x7a5c2e,
+  metalness: 0.85,
+  roughness: 0.42,
+  polygonOffset: true,
+  polygonOffsetFactor: -2,
+  polygonOffsetUnits: -2,
+});
+const wallMat = new THREE.MeshStandardMaterial({ color: 0x2d1e12, roughness: 1 });
+const beamMat = new THREE.MeshStandardMaterial({ color: 0x170f09, roughness: 0.95 });
+const stoneMat = new THREE.MeshStandardMaterial({ color: 0x3c322a, roughness: 1 });
+
+// Two whisper lights sell the room's depth without touching the fire or lamp:
+// a warm ember spill carrying the hearth's glow across the back-left floor
+// and wall band, and a faint cool pick so the right side reads as shapes in
+// shadow instead of a void.
+const emberSpill = new THREE.PointLight(0xff9a45, 5, 15, 2);
+emberSpill.position.set(-4.5, 0.8, -6.2);
+scene.add(emberSpill);
+// ...and a low ember wash BELOW the table lip, raking the exposed floor
+// planks and legs with the fire's glow (the spill above can't reach the
+// floor band the smaller table reveals). Sits under TABLE_Y so the
+// tabletop itself never catches it.
+const floorGlow = new THREE.PointLight(0xff8a3a, 10, 20, 2);
+floorGlow.position.set(-5.6, -1.1, 0.6);
+scene.add(floorGlow);
+const coolPick = new THREE.PointLight(0x7f8fb0, 2.4, 11, 2);
+coolPick.position.set(7.2, 0.6, -4.5);
+scene.add(coolPick);
+
+// --- The table. Top surface exactly at TABLE_Y; sized so every gameplay
+// prop (reserves to x -4.5, escaped stones to x ~4.1, coins/mugs at z ±2.1)
+// sits on wood with margin, while the edges stay inside the camera frame.
+const TABLE_W = 8.7;
+const TABLE_D = 5.8;
+const TABLE_CX = -0.15;
+const TABLE_CZ = 0.15;
+const SLAB_T = 0.34;
+const SLAB_BEVEL = 0.06;
+const tabletop = new THREE.Mesh(
+  new THREE.ExtrudeGeometry(roundedRectShape(TABLE_W, TABLE_D, 0.55), {
+    depth: SLAB_T,
+    bevelEnabled: true,
+    bevelThickness: SLAB_BEVEL,
+    bevelSize: 0.05,
+    bevelSegments: 2,
+    curveSegments: 8,
+  }),
+  [woodTopMat, woodSideMat],
 );
-table.rotation.x = -Math.PI / 2;
-table.position.y = TABLE_Y;
-table.receiveShadow = true;
-scene.add(table);
+// Shape x/y become world x/z; the extrusion runs downward. The top cap lands
+// at position.y + SLAB_BEVEL, so this puts the surface exactly at TABLE_Y.
+tabletop.rotation.x = Math.PI / 2;
+tabletop.position.set(TABLE_CX, TABLE_Y - SLAB_BEVEL, TABLE_CZ);
+tabletop.castShadow = false; // lamp-shadow on the fire-lit floor reads as a random dark patch
+tabletop.receiveShadow = true;
+scene.add(tabletop);
+
+// Brass inlay line chasing the table edge — the one gilded accent out here.
+const inlayShape = roundedRectShape(TABLE_W - 0.62, TABLE_D - 0.62, 0.46);
+inlayShape.holes.push(
+  new THREE.Path(roundedRectShape(TABLE_W - 0.78, TABLE_D - 0.78, 0.42).getPoints(24)),
+);
+const inlay = new THREE.Mesh(new THREE.ShapeGeometry(inlayShape, 8), brassMat);
+inlay.rotation.x = -Math.PI / 2;
+inlay.position.set(TABLE_CX, TABLE_Y + 0.004, TABLE_CZ);
+inlay.renderOrder = -2; // stays under the coin/mug glow discs
+scene.add(inlay);
+
+// Apron + four turned legs (lathe) down to the floor.
+const apron = new THREE.Mesh(
+  new THREE.BoxGeometry(TABLE_W - 1.3, 0.42, TABLE_D - 1.3),
+  woodDarkMat,
+);
+apron.position.set(TABLE_CX, TABLE_Y - SLAB_T - SLAB_BEVEL * 2 - 0.21, TABLE_CZ);
+apron.castShadow = false;
+scene.add(apron);
+
+const legProfile: Array<[number, number]> = [
+  [0.3, 0.0], [0.3, 0.12], [0.2, 0.2], [0.22, 0.62], [0.24, 1.3],
+  [0.34, 1.5], [0.34, 1.62], [0.2, 1.78], [0.28, 1.95], [0.28, 2.27],
+];
+const legGeo = new THREE.LatheGeometry(
+  legProfile.map(([r, y]) => new THREE.Vector2(r, y)),
+  12,
+);
+for (const [lx, lz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+  const leg = new THREE.Mesh(legGeo, woodDarkMat);
+  leg.position.set(
+    TABLE_CX + lx * (TABLE_W / 2 - 1.0),
+    FLOOR_Y,
+    TABLE_CZ + lz * (TABLE_D / 2 - 1.0),
+  );
+  leg.castShadow = false;
+  scene.add(leg);
+}
+
+// --- Worn plank floor. One small generated canvas, tiled.
+function makePlankTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  const planks = 4;
+  const pw = s / planks;
+  // Warm mid-browns — dark enough for the tavern mood, bright enough that
+  // the fire's floor wash actually reads on them (near-black albedo here
+  // made the floor invisible no matter how hard it was lit).
+  const bases = ["#4a3322", "#513826", "#443021", "#4d3524"];
+  for (let i = 0; i < planks; i++) {
+    g.fillStyle = bases[i];
+    g.fillRect(i * pw, 0, pw, s);
+    // Grain: faint streaks running the plank's length.
+    for (let k = 0; k < 14; k++) {
+      const x = i * pw + 2 + Math.random() * (pw - 4);
+      g.strokeStyle = Math.random() < 0.55 ? "rgba(0,0,0,0.14)" : "rgba(255,225,180,0.05)";
+      g.lineWidth = 0.6 + Math.random() * 1.1;
+      const wob = (Math.random() - 0.5) * 6;
+      g.beginPath();
+      g.moveTo(x, -4);
+      g.bezierCurveTo(x + wob, s * 0.3, x - wob, s * 0.7, x + wob, s + 4);
+      g.stroke();
+    }
+    g.fillStyle = "rgba(0,0,0,0.55)"; // seam between planks
+    g.fillRect(i * pw - 1, 0, 2, s);
+    if (Math.random() < 0.8) {
+      // occasional butt joint across the plank
+      g.fillRect(i * pw, Math.random() * s, pw, 1.5);
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.repeat.set(14, 14);
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return tex;
+}
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(46, 46),
+  new THREE.MeshStandardMaterial({ map: makePlankTexture(), roughness: 0.95 }),
+);
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = FLOOR_Y;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// --- Walls: close enough for their lower band to catch fire/lamp spill at
+// the top of the frame, fog does the rest. No ceiling — the camera never
+// looks that high.
+const backWall = new THREE.Mesh(new THREE.PlaneGeometry(40, 10), wallMat);
+backWall.position.set(0, FLOOR_Y + 5, -8.4);
+scene.add(backWall);
+const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(36, 10), wallMat);
+leftWall.rotation.y = Math.PI / 2;
+leftWall.position.set(-8.9, FLOOR_Y + 5, -2);
+scene.add(leftWall);
+const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(36, 10), wallMat);
+rightWall.rotation.y = -Math.PI / 2;
+rightWall.position.set(8.9, FLOOR_Y + 5, -2);
+scene.add(rightWall);
+
+// Timber suggestions: dark posts proud of the plaster, one horizontal rail.
+for (const px of [-7.5, -4, -0.5, 3, 6.5]) {
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.34, 10, 0.18), beamMat);
+  post.position.set(px, FLOOR_Y + 5, -8.3);
+  scene.add(post);
+}
+const rail = new THREE.Mesh(new THREE.BoxGeometry(17.4, 0.3, 0.16), beamMat);
+rail.position.set(-0.5, -1.7, -8.28);
+scene.add(rail);
+for (const pz of [-6.8, -9.5]) {
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 10, 0.34), beamMat);
+  post.position.set(-8.8, FLOOR_Y + 5, pz);
+  scene.add(post);
+}
+for (const pz of [-6, -9]) {
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 10, 0.34), beamMat);
+  post.position.set(8.8, FLOOR_Y + 5, pz);
+  scene.add(post);
+}
+
+// --- The hearth the corner fire lives in: chimney breast against the left
+// wall, raised stone firebox whose mouth wraps the existing fire sprite
+// (fireCfg untouched), stone jambs + lintel that catch the flicker.
+const breast = new THREE.Mesh(new THREE.BoxGeometry(1.9, 6.2, 3.2), wallMat);
+breast.position.set(-7.95, FLOOR_Y + 3.1, -4);
+scene.add(breast);
+const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.4, 3.0), stoneMat);
+plinth.position.set(-6.85, FLOOR_Y + 1.2, -4);
+scene.add(plinth);
+// Unlit near-black sheet across the whole breast face between plinth and
+// lintel — it swallows the fire light's point-blank hot spot so the mouth
+// reads as glowing depth, not a blown-out wall.
+const fireboxBack = new THREE.Mesh(
+  new THREE.PlaneGeometry(2.7, 2.5),
+  new THREE.MeshBasicMaterial({ color: 0x050201 }),
+);
+fireboxBack.rotation.y = Math.PI / 2;
+fireboxBack.position.set(-6.98, 0.4, -4);
+scene.add(fireboxBack);
+for (const jz of [-5.03, -2.97]) {
+  const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.1, 0.52), stoneMat);
+  jamb.position.set(-6.97, 0.3, jz);
+  scene.add(jamb);
+}
+const lintel = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.5, 2.6), stoneMat);
+lintel.position.set(-6.99, 1.6, -4);
+scene.add(lintel);
+const mantel = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.16, 3.0), beamMat);
+mantel.position.set(-6.95, 1.93, -4);
+scene.add(mantel);
+
+// --- A couple of barrels: one catching firelight past the hearth, two
+// fading into the fog on the right.
+const barrelGeo = new THREE.LatheGeometry(
+  ([[0.44, 0], [0.56, 0.3], [0.6, 0.75], [0.56, 1.2], [0.44, 1.5], [0, 1.5]] as Array<
+    [number, number]
+  >).map(([r, y]) => new THREE.Vector2(r, y)),
+  14,
+);
+const barrelMat = new THREE.MeshStandardMaterial({ color: 0x241811, roughness: 0.9 });
+const hoopMat = new THREE.MeshStandardMaterial({
+  color: 0x2a221c,
+  metalness: 0.6,
+  roughness: 0.6,
+});
+function addBarrel(x: number, z: number, scale: number): void {
+  const b = new THREE.Mesh(barrelGeo, barrelMat);
+  b.position.set(x, FLOOR_Y, z);
+  b.scale.setScalar(scale);
+  b.castShadow = false;
+  scene.add(b);
+  for (const hy of [0.42, 1.08]) {
+    const hoop = new THREE.Mesh(new THREE.TorusGeometry(0.578, 0.028, 6, 18), hoopMat);
+    hoop.rotation.x = Math.PI / 2;
+    hoop.position.set(x, FLOOR_Y + hy * scale, z);
+    hoop.scale.setScalar(scale);
+    scene.add(hoop);
+  }
+}
+addBarrel(-6.2, -7.6, 1.0);
+addBarrel(5.9, -6.4, 1.0);
+addBarrel(4.7, -7.1, 0.85);
+
+// --- Dust motes drifting in the fire- and lamp-light. One Points object;
+// positions nudged on the CPU each frame (90 points — negligible).
+function makeMoteTexture(): THREE.CanvasTexture {
+  const s = 32;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  grad.addColorStop(0, "rgba(255,220,170,1)");
+  grad.addColorStop(0.4, "rgba(255,200,140,0.45)");
+  grad.addColorStop(1, "rgba(255,190,120,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, s, s);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const MOTE_COUNT = 90;
+interface MoteSeed {
+  x: number;
+  y: number;
+  z: number;
+  amp: number;
+  rise: number;
+  sway: number; // rad/ms
+  lift: number; // units/ms
+  phase: number;
+}
+const moteSeeds: MoteSeed[] = [];
+for (let i = 0; i < MOTE_COUNT; i++) {
+  const nearFire = i < MOTE_COUNT * 0.65;
+  moteSeeds.push({
+    x: nearFire ? -7.4 + Math.random() * 4.6 : -3 + Math.random() * 5,
+    y: nearFire ? -0.9 + Math.random() * 3.0 : 0.1 + Math.random() * 1.9,
+    z: nearFire ? -6.5 + Math.random() * 5.0 : -1.6 + Math.random() * 3.4,
+    amp: 0.15 + Math.random() * 0.35,
+    rise: 1.6 + Math.random() * 1.2,
+    sway: 0.0002 + Math.random() * 0.0003,
+    lift: 0.00004 + Math.random() * 0.00005,
+    phase: Math.random() * 1000,
+  });
+}
+const motePos = new Float32Array(MOTE_COUNT * 3);
+const moteGeo = new THREE.BufferGeometry();
+moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+const motes = new THREE.Points(
+  moteGeo,
+  new THREE.PointsMaterial({
+    map: makeMoteTexture(),
+    size: 0.07,
+    transparent: true,
+    opacity: 0.55,
+    color: 0xffc07a,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  }),
+);
+motes.frustumCulled = false; // positions move every frame
+scene.add(motes);
+function updateMotes(now: number): void {
+  for (let i = 0; i < MOTE_COUNT; i++) {
+    const m = moteSeeds[i];
+    motePos[i * 3] = m.x + Math.sin(now * m.sway + m.phase) * m.amp;
+    motePos[i * 3 + 1] = m.y + ((now * m.lift + m.phase) % m.rise);
+    motePos[i * 3 + 2] = m.z + Math.cos(now * m.sway * 0.8 + m.phase * 1.7) * m.amp;
+  }
+  (moteGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+}
+updateMotes(0);
 
 const CAM_TARGET = new THREE.Vector3(-0.5, 0.15, 0.95);
 const CAM_BASE_POS = new THREE.Vector3(-0.5, 4.6, 5.0);
@@ -619,6 +957,7 @@ const fireSprite = new THREE.Sprite(
     transparent: true,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
+    fog: false, // keep the flame's current look — room fog must not dim it
   }),
 );
 fireSprite.position.set(fireCfg.x, fireCfg.y - 0.35, fireCfg.z);
@@ -3304,6 +3643,7 @@ function tick() {
   fireSprite.scale.set(fireCfg.size * fs, fireCfg.size * 0.73 * fs, 1);
   (fireSprite.material as THREE.SpriteMaterial).opacity =
     fireCfg.opacity + 0.2 * fireCfg.flicker * Math.abs(Math.sin(now * 0.013));
+  updateMotes(now);
   updateCoins(now);
   updateMugs(now);
   myMugGlow.visible = myAvailableSips() > 0;
