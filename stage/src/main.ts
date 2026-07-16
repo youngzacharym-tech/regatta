@@ -59,6 +59,9 @@ function resolveApiURL(): string {
 const API_URL = resolveApiURL();
 const GLB_URL = "/regatta.glb";
 const PIECES_URL = "/pieces.glb";
+/** Master Killer class-token sculpts — lazy-loaded only when an MK room is
+ *  seen (ensureMkPieces), never on the menu or in classic rooms. */
+const PIECES_MK_URL = "/pieces-mk.glb";
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -731,11 +734,29 @@ for (let i = 0; i < 8; i++) {
 // placement and the Red/Blue label, which stay viewer-relative).
 let sculptedTokenGeos: { red: THREE.BufferGeometry; blue: THREE.BufferGeometry } | null = null;
 
+// Master Killer class-token geometries (from pieces-mk.glb): per class, the
+// red-team and blue-team fused sculpts — same blank stone, class relief
+// (bow / crescent / shield) instead of blossom/star. Populated all-or-nothing
+// by ensureMkPieces; until then (or forever, if the fetch fails) the classic
+// sculpts stand in.
+let classTokenGeos: Partial<
+  Record<PlayerClass, { red: THREE.BufferGeometry; blue: THREE.BufferGeometry }>
+> | null = null;
+
 function applyTokenGeometries() {
-  if (!sculptedTokenGeos) return;
   markers.forEach((marker, i) => {
     const owner: PlayerId = i < 4 ? "p1" : "p2";
-    marker.mesh.geometry = owner === "p1" ? sculptedTokenGeos!.red : sculptedTokenGeos!.blue;
+    // Master Killer rooms: once a seat's class is known (class pick or the
+    // authoritative power block), its four stones wear that class's sculpt.
+    // Classic rooms, the tutorial, and the pre-pick moments keep blossom/
+    // star; a missing pieces-mk.glb also falls back there — never an
+    // invisible stone. Geometry pointer swap only: the marker's material
+    // (team tint, ward/Bulwark emissive), raycast identity, and flight
+    // state are untouched.
+    const cls =
+      myVariant === "masterKiller" ? currentPower?.classes[owner] ?? pickedClasses[owner] : null;
+    const geos = (cls ? classTokenGeos?.[cls] : null) ?? sculptedTokenGeos;
+    if (geos) marker.mesh.geometry = owner === "p1" ? geos.red : geos.blue;
   });
 }
 
@@ -1113,6 +1134,51 @@ gltfLoader.load(
   (err) => console.error("Failed to load", PIECES_URL, err),
 );
 
+// Fetch the Master Killer class tokens the FIRST time an MK room is seen
+// (join, resume, or reload — classic rooms, the tutorial, and the menu never
+// pay for it), so the sculpts are usually decoded before the class pick
+// resolves. On any failure the classic sculpts simply remain.
+let mkPiecesRequested = false;
+function ensureMkPieces() {
+  if (mkPiecesRequested) return;
+  mkPiecesRequested = true;
+  gltfLoader.load(
+    PIECES_MK_URL,
+    (gltf) => {
+      const geoOf = (name: string) =>
+        (gltf.scene.getObjectByName(name) as THREE.Mesh | undefined)?.geometry;
+      const loaded: NonNullable<typeof classTokenGeos> = {};
+      for (const cls of ["archer", "mage", "warrior"] as const) {
+        const red = geoOf(`token_${cls}_red`);
+        const blue = geoOf(`token_${cls}_blue`);
+        if (!red || !blue) {
+          console.error("pieces-mk.glb missing expected meshes", gltf.scene);
+          return; // classic sculpts remain — graceful fallback
+        }
+        // Same pivot rule as pieces.glb: local base at y = -0.08.
+        for (const geo of [red, blue]) {
+          geo.computeBoundingBox();
+          geo.translate(0, -0.08 - geo.boundingBox!.min.y, 0);
+        }
+        loaded[cls] = { red, blue };
+      }
+      classTokenGeos = loaded;
+      // Idempotent copy of the pieces.glb marker-material upgrade — needed
+      // in case this file wins the load race against pieces.glb (the class
+      // sculpts carry vertex paint too).
+      for (const marker of markers) {
+        const mat = marker.mesh.material as THREE.MeshStandardMaterial;
+        mat.vertexColors = true;
+        mat.color.setHex(STONE_TINT);
+        mat.needsUpdate = true;
+      }
+      applyTokenGeometries();
+    },
+    undefined,
+    (err) => console.error("Failed to load", PIECES_MK_URL, err),
+  );
+}
+
 function triggerCoinFlip(markedCount: number, set: CoinAnim[]) {
   const now = performance.now();
   // Pick markedCount coin indices uniformly at random to show the marked face.
@@ -1341,6 +1407,10 @@ function flashGems(container: HTMLDivElement, kind: "flare" | "spend") {
  *  comes from pickedClasses; once the match is underway, currentPower is
  *  authoritative. Classic rooms take the hide branch. */
 function updatePlates(state: GameState | null) {
+  // Stones first: every path where class knowledge appears or vanishes
+  // (class pick, replays, resyncs, seat/menu resets) already funnels through
+  // here, so this one call keeps the board's token sculpts in sync too.
+  applyTokenGeometries();
   // The Ability Dock rides the plate: any refresh that can change class or
   // charges (state replays, resyncs, class pick) re-syncs the dock too.
   updateDock();
@@ -2928,6 +2998,7 @@ function replayEvent(ev: RoomEvent) {
 function applyOverlay(v: RoomResponse) {
   const mySide: PlayerId = myRole ?? "p1";
   myVariant = v.variant;
+  if (v.variant === "masterKiller") ensureMkPieces(); // covers resume + reload
   inCpuGame = v.vsCpu;
   cpuDifficulty = v.difficulty ?? null; // covers join, resume, AND reload
 
@@ -3122,6 +3193,7 @@ function seatSelf(
   myRole = seat;
   myRoom = room;
   myVariant = variant;
+  if (variant === "masterKiller") ensureMkPieces(); // decode during class pick
   inCpuGame = vsCpu;
   cpuDifficulty = vsCpu ? (difficulty ?? "standard") : null;
   rollPending = null;
