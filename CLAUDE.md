@@ -24,12 +24,14 @@ active focus (the repo is literally named for it).
   NOT reachable from the `wetwarelabs` Vercel team this machine's CLI is
   logged into. Kasen cannot deploy there; coordinate with Zach or stand up a
   separate deployment.
-- **OUR deployment (this is where "deploy" means):** Vercel project
+- **OUR deployment (this is what "deploy" means):** Vercel project
   `regatta-mk-test` on the `wetwarelabs` team, linked via this clone's
   `.vercel/project.json` — `npm run deploy` ships to
-  https://regatta-mk-test.vercel.app (`REDIS_URL` already set in the
-  project env). Pushing to `upstream` does NOT deploy our site; only push
-  there when Kasen explicitly wants to hand work to Zach.
+  **https://masterkiller.regatta.games** (canonical; the project's
+  regatta-mk-test.vercel.app URL serves the same build, and `REDIS_URL` is
+  already set in the project env). Pushing to `upstream` does NOT deploy
+  our site; only push there when Kasen explicitly wants to hand work to
+  Zach.
 - Related but distinct: `w3t-wr3/regatta-wetware-fork` (Kasen's tavern-build
   fork, local clone at `~/regatta`) feeds the `wetwarelabs` Vercel project
   `regatta` → `regatta.games`. Don't confuse the two deploy targets.
