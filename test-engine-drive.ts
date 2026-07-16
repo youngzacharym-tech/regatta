@@ -19,6 +19,7 @@ import { getLegalMoves, type PlayerId } from "./rulebook";
 import { pickBotMove } from "./bot";
 import { pickBotPowerAction } from "./master-killer-bot";
 import type { PlayerClass } from "./master-killer";
+import type { BotDifficulty } from "./bot-difficulty";
 import {
   createRoomDoc,
   applyAction,
@@ -52,9 +53,14 @@ interface GameResult {
   steps: number;
 }
 
-function playOne(variant: "classic" | "masterKiller", p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
+function playOne(
+  variant: "classic" | "masterKiller",
+  p1Class: PlayerClass,
+  p2Class: PlayerClass,
+  difficulty: BotDifficulty = "standard",
+): GameResult {
   let now = 1_000_000;
-  let doc = createRoomDoc("TEST", true, variant, "p1tok", now);
+  let doc = createRoomDoc("TEST", true, variant, "p1tok", now, false, difficulty);
   let lastSeq = 0;
   let steps = 0;
 
@@ -96,7 +102,7 @@ function playOne(variant: "classic" | "masterKiller", p1Class: PlayerClass, p2Cl
     if (doc.phase === "play" && !doc.state.winner && doc.state.currentPlayer === "p1" && doc.currentFlip !== null) {
       if (variant === "masterKiller" && doc.mk) {
         const moves = doc.currentPowerMoves ?? [];
-        const action = pickBotPowerAction(doc.state, fromWirePower(doc.mk), moves, doc.currentFlip, Math.random);
+        const action = pickBotPowerAction(doc.state, fromWirePower(doc.mk), moves, doc.currentFlip, Math.random, difficulty);
         if (!action) return; // dead flip, no rescue — tick auto-skips
         if (action.kind === "move") {
           act({ op: "chooseMove", moveIndex: moves.indexOf(action.move) });
@@ -119,7 +125,7 @@ function playOne(variant: "classic" | "masterKiller", p1Class: PlayerClass, p2Cl
       }
       const moves = getLegalMoves(doc.state, doc.currentFlip);
       if (moves.length === 0) return; // tick auto-skips
-      act({ op: "chooseMove", moveIndex: pickBotMove(doc.state, moves) });
+      act({ op: "chooseMove", moveIndex: pickBotMove(doc.state, moves, Math.random, difficulty) });
     }
   };
 
@@ -141,21 +147,28 @@ function playOne(variant: "classic" | "masterKiller", p1Class: PlayerClass, p2Cl
   return { winner: doc.state.winner, turns: doc.turns, steps };
 }
 
-function runMatchup(label: string, variant: "classic" | "masterKiller", a: PlayerClass, b: PlayerClass) {
+function runMatchup(
+  label: string,
+  variant: "classic" | "masterKiller",
+  a: PlayerClass,
+  b: PlayerClass,
+  difficulty: BotDifficulty = "standard",
+  games = GAMES,
+) {
   let aWins = 0;
   let stale = 0;
   let turnsSum = 0;
-  for (let i = 0; i < GAMES; i++) {
+  for (let i = 0; i < games; i++) {
     // Alternate seatings so first-mover luck cancels out, like the oracle.
     const flip = i % 2 === 1;
-    const r = playOne(variant, flip ? b : a, flip ? a : b);
+    const r = playOne(variant, flip ? b : a, flip ? a : b, difficulty);
     if (r.winner === null) stale++;
     else if ((r.winner === "p1") !== flip) aWins++;
     turnsSum += r.turns;
   }
-  const aPct = ((aWins / (GAMES - stale)) * 100).toFixed(1);
+  const aPct = ((aWins / (games - stale)) * 100).toFixed(1);
   console.log(
-    `${label.padEnd(20)} ${a}=${aPct}%  turns/g=${(turnsSum / GAMES).toFixed(1)}  stalemates=${stale}`,
+    `${label.padEnd(20)} ${a}=${aPct}%  turns/g=${(turnsSum / games).toFixed(1)}  stalemates=${stale}`,
   );
 }
 
@@ -167,6 +180,16 @@ runMatchup("archer vs warrior", "masterKiller", "archer", "warrior");
 runMatchup("mage mirror", "masterKiller", "mage", "mage");
 runMatchup("mage vs warrior", "masterKiller", "mage", "warrior");
 runMatchup("warrior mirror", "masterKiller", "warrior", "warrior");
+// Difficulty smoke: small runs at easy and hard so the transport invariants
+// (seq monotonic, JSON round-trip — difficulty is a plain string, Redis-safe;
+// termination under MAX_STEPS, which also bounds hard-tier think time) cover
+// every tier. Default runs above stay standard so the oracle comparison
+// against batch-random-master-killer-games.ts is unchanged.
+const SMOKE = Math.max(20, Math.floor(GAMES / 5));
+runMatchup("classic easy", "classic" as never, "archer", "archer", "easy", SMOKE);
+runMatchup("classic hard", "classic" as never, "archer", "archer", "hard", SMOKE);
+runMatchup("mk mirror easy", "masterKiller", "warrior", "warrior", "easy", SMOKE);
+runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
 
 if (failures > 0) {
   console.error(`\n${failures} assertion failure(s).`);

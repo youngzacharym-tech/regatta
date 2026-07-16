@@ -54,6 +54,7 @@ Rulebook regression/smoke tests (no server needed):
 npx tsx play-random-game.ts               # one random classic game
 npx tsx batch-random-games.ts             # 1000 random classic games, balance stats
 npx tsx batch-random-master-killer-games.ts  # same for Master Killer (all class matchups)
+npx tsx batch-bot-difficulty.ts           # CPU tier separation gate (easy/standard/hard, both rulesets; exits 1 on failure)
 npx tsx test-master-killer.ts             # Master Killer rules unit suite
 npx tsx test-master-killer-drift.ts       # referee-vs-rulebook drift check
 ```

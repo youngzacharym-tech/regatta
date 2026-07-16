@@ -224,6 +224,14 @@
       #win-screen .subtitle {
         font-size: 13px; color: #8888a0; margin-bottom: 22px;
       }
+      /* One-line tavern flavor for CPU games ("The Champion drinks well
+         tonight.") — sits under the subtitle, hides itself in PvP where
+         main.ts leaves it empty. */
+      #win-screen .flavor {
+        font-size: 12px; font-style: italic; color: #b8a888;
+        margin: -14px 0 22px;
+      }
+      #win-screen .flavor:empty { display: none; }
       #win-screen .stats {
         display: grid; grid-template-columns: auto auto;
         gap: 10px 24px;
@@ -714,21 +722,25 @@
       /* The game-mode pick is a labeled segmented control — three obvious
          side-by-side choices with the selected one filled, so nobody has to
          guess that the mode is changeable. Selected colors keep each mode's
-         identity: gold classic, ember Master Killer, sage tutorial. */
+         identity: gold classic, ember Master Killer, sage tutorial. The CPU
+         difficulty pick (#menu-diff-seg) is the SAME control — identical
+         geometry, shared rules — with its own per-tier selected fills
+         echoing the mode colors: sage Tipsy ("gentle"), gold Barkeep (the
+         default), ember Champion ("danger"). */
       #menu .menu-eyebrow {
         font-size: 10px; letter-spacing: 0.24em; text-transform: uppercase;
         color: #8a7a63; margin-bottom: 8px;
       }
-      #menu-mode-seg { display: flex; gap: 6px; margin-bottom: 20px; }
-      #menu-mode-seg button {
+      #menu-mode-seg, #menu-diff-seg { display: flex; gap: 6px; margin-bottom: 20px; }
+      #menu-mode-seg button, #menu-diff-seg button {
         flex: 1; padding: 10px 8px; border-radius: 9px; cursor: pointer;
         border: 1px solid rgba(216, 184, 119, 0.35);
         background: rgba(246, 227, 164, 0.03);
         color: #b39a6d; font-size: 11px; font-weight: 600;
         letter-spacing: 0.07em; text-transform: uppercase; white-space: nowrap;
       }
-      #menu-mode-seg button:hover { border-color: rgba(246, 227, 164, 0.65); color: #e8d6a8; }
-      #menu-mode-seg button.on {
+      #menu-mode-seg button:hover, #menu-diff-seg button:hover { border-color: rgba(246, 227, 164, 0.65); color: #e8d6a8; }
+      #menu-mode-seg button.on, #menu-diff-seg button.on {
         background: linear-gradient(180deg, #f0d189 0%, #c9a35c 50%, #a67c33 100%);
         border-color: #f6e3a4; color: #2a1a08;
         text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
@@ -740,6 +752,14 @@
       #menu-mode-seg button[data-pick="tutorial"].on {
         background: linear-gradient(180deg, #7a925c, #4c5f36);
         border-color: #d6e8aa; color: #f0f7dd; text-shadow: none;
+      }
+      #menu-diff-seg button[data-diff="easy"].on {
+        background: linear-gradient(180deg, #7a925c, #4c5f36);
+        border-color: #d6e8aa; color: #f0f7dd; text-shadow: none;
+      }
+      #menu-diff-seg button[data-diff="hard"].on {
+        background: linear-gradient(180deg, #8a3a3a, #5a2020);
+        border-color: #ffb9a8; color: #ffd6cb; text-shadow: none;
       }
       /* --- Room browser (lobby) --- */
       #lobby {
@@ -1055,6 +1075,14 @@
           <button data-pick="masterKiller" type="button">Master Killer</button>
           <button data-pick="tutorial" type="button">Tutorial</button>
         </div>
+        <div id="menu-diff">
+          <div class="menu-eyebrow">Choose your foe</div>
+          <div id="menu-diff-seg">
+            <button data-diff="easy" type="button">Tipsy</button>
+            <button data-diff="standard" class="on" type="button">Barkeep</button>
+            <button data-diff="hard" type="button">Champion</button>
+          </div>
+        </div>
         <button class="mode gilt-btn primary" id="menu-cpu">Play vs Computer</button>
         <button class="mode gilt-btn" id="menu-create">Create Room</button>
         <button class="mode gilt-btn" id="menu-browse">Join Room</button>
@@ -1129,6 +1157,7 @@
         <button class="close" id="win-close" title="Dismiss">×</button>
         <h1 id="win-title">You won!</h1>
         <div class="subtitle" id="win-subtitle"></div>
+        <div class="flavor" id="win-flavor"></div>
         <div class="stats" id="win-stats"></div>
         <button class="play" id="win-play-again">Play Again</button>
       </div>

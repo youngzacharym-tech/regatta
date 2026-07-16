@@ -43,6 +43,11 @@ export type RoomRequest =
       variant?: "classic" | "masterKiller";
       /** Create a PRIVATE room: joinable by code, hidden from the lobby. */
       unlisted?: boolean;
+      /** CPU opponent strength for mode "cpu"; ignored otherwise. ADDITIVE:
+       *  the server whitelists it and treats absent/garbage as "standard"
+       *  (the pre-difficulty behavior). Fixed for the room's lifetime at
+       *  creation — never changeable mid-game. */
+      difficulty?: "easy" | "standard" | "hard";
     }
   | {
       /** Browse open PvP rooms (no seat required). Replies with
@@ -287,6 +292,9 @@ export type ClientMessage =
       /** Ruleset for a NEW room (mode "cpu"/"create"). Ignored for mode
        *  "join" — you play whatever the room you're joining already is. */
       variant?: "classic" | "masterKiller";
+      /** CPU strength for mode "cpu"; ignored otherwise (see RoomRequest's
+       *  join op — same additive field, same server-side whitelist). */
+      difficulty?: "easy" | "standard" | "hard";
     }
   | {
       /** Master Killer mode only: choose a class before the opening

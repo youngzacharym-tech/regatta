@@ -36,6 +36,7 @@ import {
   type RoomDoc,
   type RoomActionInput,
 } from "../room-engine";
+import { normalizeDifficulty } from "../bot-difficulty";
 
 export const config = { maxDuration: 60 };
 
@@ -162,7 +163,7 @@ async function handleJoin(msg: Extract<RoomRequest, { op: "join" }>): Promise<Re
   const token = randomUUID();
   for (let attempt = 0; attempt < 20; attempt++) {
     const code = newRoomCode();
-    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true);
+    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty));
     doc = tick(doc, now);
     const ok = await getRedis().set(roomKey(code), JSON.stringify(doc), "EX", ROOM_TTL_S, "NX");
     if (ok === "OK") {

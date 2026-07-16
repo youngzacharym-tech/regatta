@@ -35,6 +35,7 @@ import {
   type PowerMove,
   type PowerState,
 } from "../../master-killer.ts";
+import { normalizeDifficulty, type BotDifficulty } from "../../bot-difficulty.ts";
 
 const PATH_LENGTH = 15; // must match rulebook.ts PATH_LENGTH_PER_PLAYER
 
@@ -2066,6 +2067,7 @@ function showPlayAgainButton() {
 const winScreen = document.getElementById("win-screen") as HTMLDivElement;
 const winTitle = document.getElementById("win-title") as HTMLHeadingElement;
 const winSubtitle = document.getElementById("win-subtitle") as HTMLDivElement;
+const winFlavor = document.getElementById("win-flavor") as HTMLDivElement;
 const winStats = document.getElementById("win-stats") as HTMLDivElement;
 const winPlayAgainBtn = document.getElementById("win-play-again") as HTMLButtonElement;
 const winCloseBtn = document.getElementById("win-close") as HTMLButtonElement;
@@ -2081,6 +2083,13 @@ function showWinScreen(winner: PlayerId, stats: GameOverStats) {
   winTitle.textContent = iWon ? "You won!" : "You lost";
   winTitle.className = iWon ? "won" : "lost";
   winSubtitle.textContent = `${winnerColor} escaped all four tokens first`;
+  // One tavern beat for CPU games; empty in PvP (the .flavor div hides itself).
+  winFlavor.textContent =
+    inCpuGame && cpuDifficulty
+      ? iWon
+        ? { easy: "The Tipsy Patron slides off the stool.", standard: "The Barkeep tips their cap.", hard: "The Champion yields the table." }[cpuDifficulty]
+        : { easy: "Even the Tipsy Patron has their night.", standard: "The Barkeep keeps the table.", hard: "The Champion drinks well tonight." }[cpuDifficulty]
+      : "";
 
   const opponent: PlayerId = myRole === "p1" ? "p2" : "p1";
   const yourCaps = myRole ? stats.captures[myRole] : 0;
@@ -2228,12 +2237,13 @@ exitToggle.addEventListener("click", () => {
 exitRestart.addEventListener("click", () => {
   exitConfirm.classList.remove("show");
   const wasTutorial = tutorialMode;
-  const variant = myVariant; // resetToMenu wipes both — capture first
+  const variant = myVariant; // resetToMenu wipes these — capture first
+  const difficulty = cpuDifficulty ?? undefined; // keep the same foe on restart
   resetToMenu("");
   menuEl.classList.remove("show"); // straight into the fresh game, no menu flash
   tutorialMode = wasTutorial;
   coachShown.clear();
-  sendToServer({ type: "join", mode: "cpu", variant });
+  sendToServer({ type: "join", mode: "cpu", variant, difficulty });
 });
 
 // ---------------------------------------------------------------------------
@@ -2795,6 +2805,7 @@ function applyOverlay(v: RoomResponse) {
   const mySide: PlayerId = myRole ?? "p1";
   myVariant = v.variant;
   inCpuGame = v.vsCpu;
+  cpuDifficulty = v.difficulty ?? null; // covers join, resume, AND reload
 
   // Waiting room (PvP, empty seat): surface the invite code + link.
   if (!v.started) {
@@ -2976,11 +2987,18 @@ async function pollLoop() {
 }
 
 /** Reset all per-match client state and seat us in a (re)joined room. */
-function seatSelf(seat: PlayerId, room: string, vsCpu: boolean, variant: "classic" | "masterKiller") {
+function seatSelf(
+  seat: PlayerId,
+  room: string,
+  vsCpu: boolean,
+  variant: "classic" | "masterKiller",
+  difficulty: BotDifficulty | null = null,
+) {
   myRole = seat;
   myRoom = room;
   myVariant = variant;
   inCpuGame = vsCpu;
+  cpuDifficulty = vsCpu ? (difficulty ?? "standard") : null;
   rollPending = null;
   openingTapArmed = false;
   seenOpeningFlips = { p1: null, p2: null };
@@ -3007,7 +3025,9 @@ function seatSelf(seat: PlayerId, room: string, vsCpu: boolean, variant: "classi
   classpickEl.classList.remove("show");
   setChatAvailable(!vsCpu);
   hideMenu();
-  hud.textContent = vsCpu ? "You are Red — vs Computer" : "You are Red. Waiting for opponent…";
+  hud.textContent = vsCpu
+    ? `You are Red — vs ${DIFF_NAMES[cpuDifficulty ?? "standard"]}`
+    : "You are Red. Waiting for opponent…";
 }
 
 function doJoin(
@@ -3015,17 +3035,18 @@ function doJoin(
   room?: string,
   variant?: "classic" | "masterKiller",
   unlisted = false,
+  difficulty?: BotDifficulty,
 ) {
   menuError.textContent = "";
   setStatus("Joining…");
-  post({ op: "join", mode, room, variant, unlisted })
+  post({ op: "join", mode, room, variant, unlisted, difficulty })
     .then((raw) => {
       const j = raw as RoomJoinResponse;
       session = { room: j.room, seat: j.player, seatToken: j.seatToken };
       saveSession(session);
       exitToggle.classList.add("show");
       closeLobby();
-      seatSelf(j.player, j.room, j.vsCpu, j.variant);
+      seatSelf(j.player, j.room, j.vsCpu, j.variant, j.view.difficulty ?? null);
       processResponse(j.view as RoomResponse);
       void pollLoop();
     })
@@ -3075,6 +3096,19 @@ const roomLinkEl = document.getElementById("room-link") as HTMLDivElement;
 let myRoom: string | null = null;
 let inCpuGame = false;
 
+// --- CPU difficulty: tavern-named tiers over the wire's easy/standard/hard ---
+/** Display names for the wire tiers — presentation only, renameable without
+ *  protocol churn (see bot-difficulty.ts). */
+const DIFF_NAMES: Record<BotDifficulty, string> = {
+  easy: "the Tipsy Patron",
+  standard: "the Barkeep",
+  hard: "the Tavern Champion",
+};
+/** The LIVE game's tier, straight from the server's view (v.difficulty) —
+ *  covers join, resume, and reload. Null in PvP and back at the menu. Feeds
+ *  the HUD flavor, the win-screen beat, and Restart's re-join. */
+let cpuDifficulty: BotDifficulty | null = null;
+
 // --- Master Killer mode: menu toggle + class-pick overlay ---
 /** Ruleset picked in the menu, sent along with cpu/create joins. Ignored
  *  by the server for mode "join" — you play whatever room you're joining. */
@@ -3084,10 +3118,20 @@ let menuPick: "classic" | "masterKiller" | "tutorial" = "classic";
 function selectedVariant(): "classic" | "masterKiller" {
   return menuPick === "masterKiller" ? "masterKiller" : "classic";
 }
+/** CPU tier picked in the menu, persisted like regatta-volume so the choice
+ *  survives reloads. Sent with mode "cpu" joins only. */
+let menuDiff: BotDifficulty = normalizeDifficulty(localStorage.getItem("regatta-cpu-difficulty"));
+/** What actually goes on the wire — the tutorial always plays the gentle
+ *  bot (the picker is hidden there; see applyMenuPick). */
+function selectedDifficulty(): BotDifficulty {
+  return menuPick === "tutorial" ? "easy" : menuDiff;
+}
 const menuCpuBtn = document.getElementById("menu-cpu") as HTMLButtonElement;
 const menuCreateBtn = document.getElementById("menu-create") as HTMLButtonElement;
 const menuBrowseBtn = document.getElementById("menu-browse") as HTMLButtonElement;
 const menuModeSeg = document.getElementById("menu-mode-seg") as HTMLDivElement;
+const menuDiffWrap = document.getElementById("menu-diff") as HTMLDivElement;
+const menuDiffSeg = document.getElementById("menu-diff-seg") as HTMLDivElement;
 const menuTitle = document.getElementById("menu-title") as HTMLHeadingElement;
 const menuTagline = document.getElementById("menu-tagline") as HTMLDivElement;
 function applyMenuPick() {
@@ -3104,10 +3148,12 @@ function applyMenuPick() {
     : mk
       ? "a darker table · class powers"
       : "a race across the board";
-  // The tutorial is a guided solo sail — rooms make no sense there.
+  // The tutorial is a guided solo sail — rooms make no sense there, and the
+  // difficulty picker hides too (the tutorial pins the gentle bot).
   menuCpuBtn.textContent = tut ? "Begin Tutorial" : "Play vs Computer";
   menuCreateBtn.style.display = tut ? "none" : "";
   menuBrowseBtn.style.display = tut ? "none" : "";
+  menuDiffWrap.style.display = tut ? "none" : "";
 }
 menuModeSeg.addEventListener("click", (e) => {
   const b = (e.target as HTMLElement).closest("button[data-pick]") as HTMLButtonElement | null;
@@ -3116,6 +3162,23 @@ menuModeSeg.addEventListener("click", (e) => {
   applyMenuPick();
 });
 applyMenuPick();
+
+/** Reflect menuDiff in the seg — same instant class toggle as the mode seg
+ *  (also runs once at load, since localStorage may disagree with the
+ *  markup's default Barkeep). */
+function applyMenuDiff() {
+  for (const b of menuDiffSeg.querySelectorAll("button")) {
+    b.classList.toggle("on", b.dataset.diff === menuDiff);
+  }
+}
+menuDiffSeg.addEventListener("click", (e) => {
+  const b = (e.target as HTMLElement).closest("button[data-diff]") as HTMLButtonElement | null;
+  if (!b) return;
+  menuDiff = normalizeDifficulty(b.dataset.diff);
+  localStorage.setItem("regatta-cpu-difficulty", menuDiff);
+  applyMenuDiff();
+});
+applyMenuDiff();
 
 const classpickEl = document.getElementById("classpick") as HTMLDivElement;
 const classpickStatus = document.getElementById("classpick-status") as HTMLDivElement;
@@ -3161,7 +3224,7 @@ function hideRoomInfo() {
  *  so only rejections need handling here. */
 function sendToServer(msg: ClientMessage) {
   if (msg.type === "join") {
-    doJoin(msg.mode, msg.room, msg.variant);
+    doJoin(msg.mode, msg.room, msg.variant, false, msg.difficulty);
     return;
   }
   if (!session) return;
@@ -3237,6 +3300,7 @@ function resetToMenu(message: string) {
   myRole = null;
   myRoom = null;
   inCpuGame = false;
+  cpuDifficulty = null;
   clearSession();
   exitToggle.classList.remove("show");
   exitConfirm.classList.remove("show");
@@ -3251,7 +3315,7 @@ menuCpuBtn.addEventListener("click", () => {
   menuError.textContent = "";
   tutorialMode = menuPick === "tutorial";
   coachShown.clear();
-  sendToServer({ type: "join", mode: "cpu", variant: selectedVariant() });
+  sendToServer({ type: "join", mode: "cpu", variant: selectedVariant(), difficulty: selectedDifficulty() });
 });
 (document.getElementById("menu-create") as HTMLButtonElement).addEventListener("click", () => {
   menuError.textContent = "";

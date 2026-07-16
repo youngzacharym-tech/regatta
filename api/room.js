@@ -133,8 +133,27 @@ function otherPlayer(p) {
   return p === "p1" ? "p2" : "p1";
 }
 
+// bot-difficulty.ts
+var FLIP_WEIGHTS = [1, 4, 6, 4, 1];
+var FLIP_WEIGHT_TOTAL = 16;
+var EASY_HEED_P = 0.35;
+function normalizeDifficulty(d) {
+  return d === "easy" || d === "hard" ? d : "standard";
+}
+
 // bot.ts
-function pickBotMove(state, moves, rand = Math.random) {
+var EVAL_ESCAPED = 200;
+var EVAL_PER_TILE = 8;
+var EVAL_RESERVE = -20;
+var EVAL_SHIELD_TILE = 10;
+var EVAL_HOME_STRETCH = 16;
+var WIN_VALUE = 1e6;
+function pickBotMove(state, moves, rand = Math.random, difficulty = "standard") {
+  if (difficulty === "easy") return pickEasy(state, moves, rand);
+  if (difficulty === "hard") return pickHard(state, moves, rand);
+  return pickStandard(state, moves, rand);
+}
+function pickStandard(state, moves, rand) {
   let bestIndex = 0;
   let bestScore = -Infinity;
   for (let i = 0; i < moves.length; i++) {
@@ -166,6 +185,140 @@ function pickBotMove(state, moves, rand = Math.random) {
     score += rand() * 20;
     if (score > bestScore) {
       bestScore = score;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+function pickEasy(state, moves, rand) {
+  const winIdx = moves.findIndex((m) => m.causesWin);
+  if (winIdx !== -1) return winIdx;
+  if (rand() < EASY_HEED_P) return pickStandard(state, moves, rand);
+  return Math.floor(rand() * moves.length);
+}
+function evalSide(state, player) {
+  let score = 0;
+  for (const t of state.tokens) {
+    if (t.owner !== player) continue;
+    if (t.position >= PATH_LENGTH_PER_PLAYER) {
+      score += EVAL_ESCAPED;
+      continue;
+    }
+    if (t.position < 0) {
+      score += EVAL_RESERVE;
+      continue;
+    }
+    score += EVAL_PER_TILE * t.position;
+    if (t.position >= 12) score += EVAL_HOME_STRETCH;
+    if (BOARD_LAYOUT[t.position].type === "shield") score += EVAL_SHIELD_TILE;
+  }
+  return score;
+}
+function evaluateClassic(state, me) {
+  const foe = me === "p1" ? "p2" : "p1";
+  return evalSide(state, me) - evalSide(state, foe);
+}
+function myBestShallow(state, flip, me) {
+  if (flip === 0) return evaluateClassic(state, me);
+  const moves = getLegalMoves(state, flip);
+  if (moves.length === 0) return evaluateClassic(state, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin ? WIN_VALUE : evaluateClassic(applyMove(state, m), me);
+    if (v > best) best = v;
+  }
+  return best;
+}
+function myTurnExpectation(state, me) {
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    value += FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL * myBestShallow(state, f, me);
+  }
+  return value;
+}
+function oppExtraTurnExpectation(state, me) {
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    let leaf;
+    if (f === 0) {
+      leaf = evaluateClassic(state, me);
+    } else {
+      const moves = getLegalMoves(state, f);
+      if (moves.length === 0) {
+        leaf = evaluateClassic(state, me);
+      } else {
+        leaf = Infinity;
+        for (const m of moves) {
+          const v = m.causesWin ? -WIN_VALUE : evaluateClassic(applyMove(state, m), me);
+          if (v < leaf) leaf = v;
+        }
+      }
+    }
+    value += FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL * leaf;
+  }
+  return value;
+}
+function worstOppReply(state, flip, me) {
+  if (flip === 0) return evaluateClassic(state, me);
+  const moves = getLegalMoves(state, flip);
+  if (moves.length === 0) return evaluateClassic(state, me);
+  let worst = Infinity;
+  for (const m of moves) {
+    let v;
+    if (m.causesWin) {
+      v = -WIN_VALUE;
+    } else {
+      const next = applyMove(state, m);
+      v = next.currentPlayer === me ? myTurnExpectation(next, me) : oppExtraTurnExpectation(next, me);
+    }
+    if (v < worst) worst = v;
+  }
+  return worst;
+}
+function oppReplyExpectation(state, me) {
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    value += FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL * worstOppReply(state, f, me);
+  }
+  return value;
+}
+function bestOwnFollowup(state, flip, me) {
+  if (flip === 0) return evaluateClassic(state, me);
+  const moves = getLegalMoves(state, flip);
+  if (moves.length === 0) return evaluateClassic(state, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    let v;
+    if (m.causesWin) {
+      v = WIN_VALUE;
+    } else {
+      const next = applyMove(state, m);
+      v = next.currentPlayer === me ? evaluateClassic(next, me) : oppReplyExpectation(next, me);
+    }
+    if (v > best) best = v;
+  }
+  return best;
+}
+function pickHard(state, moves, rand) {
+  const me = state.currentPlayer;
+  let bestIndex = 0;
+  let bestScore = -Infinity;
+  for (let i = 0; i < moves.length; i++) {
+    const m = moves[i];
+    let value;
+    if (m.causesWin) {
+      value = WIN_VALUE;
+    } else {
+      const next = applyMove(state, m);
+      value = 0;
+      for (let f = 0; f <= 4; f++) {
+        const p = FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL;
+        value += p * (next.currentPlayer === me ? bestOwnFollowup(next, f, me) : worstOppReply(next, f, me));
+      }
+    }
+    value += rand() * 1e-3;
+    if (value > bestScore) {
+      bestScore = value;
       bestIndex = i;
     }
   }
@@ -836,7 +989,12 @@ function scoreReflip(currentMoveCount, flip, rand) {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
   return -1;
 }
-function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
+function pickBotPowerAction(state, power, moves, flip, rand = Math.random, difficulty = "standard") {
+  if (difficulty === "easy") return pickEasyPowerAction(state, power, moves, flip, rand);
+  if (difficulty === "hard") return pickHardPowerAction(state, power, moves, rand);
+  return pickStandardPowerAction(state, power, moves, flip, rand);
+}
+function pickStandardPowerAction(state, power, moves, flip, rand) {
   const mover = state.currentPlayer;
   const cls = power.classes[mover];
   const charges = power.charges[mover];
@@ -916,6 +1074,200 @@ function pickBotPowerAction(state, power, moves, flip, rand = Math.random) {
           best = { kind: "bulwark", tokenId: targetId, reinforced: true };
         }
       }
+    }
+  }
+  return best;
+}
+function enumerateCandidates(state, power, moves) {
+  const mover = state.currentPlayer;
+  const cls = power.classes[mover];
+  const charges = power.charges[mover];
+  const out = [];
+  for (const m of moves) {
+    out.push({ kind: "move", move: m });
+    if (cls === "warrior" && m.chargeAvailable && charges >= 1) {
+      out.push({ kind: "charge", move: m });
+    }
+  }
+  if (cls === "archer" && charges >= 1) {
+    for (const id of getPushTargets(state, power, mover)) out.push({ kind: "push", targetTokenId: id });
+  }
+  if (cls === "archer" && charges === CHARGE_CAP) {
+    for (const id of getChargedShotTargets(state, power, mover)) {
+      out.push({ kind: "chargedShot", targetTokenId: id });
+    }
+  }
+  if (cls === "mage" && canReflipAgain(power, mover)) out.push({ kind: "reflip" });
+  if (cls === "mage" && power.ultimateReady[mover]) {
+    for (const id of getBlinkStrikeTargets(state, power, mover)) {
+      out.push({ kind: "blinkStrike", targetTokenId: id });
+    }
+  }
+  if (cls === "warrior" && power.ultimateReady[mover]) {
+    for (const id of getWarpathTargets(state, power, mover)) out.push({ kind: "warpath", targetTokenId: id });
+  }
+  if (cls === "warrior" && charges >= 1) {
+    const bulwarkTargets = getBulwarkTargets(state, power, mover);
+    for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id });
+    if (charges === CHARGE_CAP) {
+      for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id, reinforced: true });
+    }
+  }
+  return out;
+}
+function pickEasyPowerAction(state, power, moves, flip, rand) {
+  const winMove = moves.find((m) => m.causesWin);
+  if (winMove) return { kind: "move", move: winMove };
+  if (rand() < EASY_HEED_P) return pickStandardPowerAction(state, power, moves, flip, rand);
+  const candidates = enumerateCandidates(state, power, moves);
+  if (candidates.length === 0) return null;
+  return candidates[Math.floor(rand() * candidates.length)];
+}
+var MK_EVAL_ESCAPED = 200;
+var MK_EVAL_PER_TILE = 8;
+var MK_EVAL_SHIELD_TILE = 25;
+var MK_EVAL_THREAT_BASE = 40;
+var MK_EVAL_THREAT_PER_TILE = 6;
+var MK_EVAL_CHARGE = 24;
+var MK_EVAL_ULTIMATE = 70;
+var MK_EVAL_STREAK = 12;
+var MK_EVAL_BULWARK = 12;
+var MK_WIN_VALUE = 1e6;
+var SIM_RAND = () => 0.5;
+function mkEvalSide(state, power, player) {
+  let score = 0;
+  for (const t of state.tokens) {
+    if (t.owner !== player) continue;
+    if (t.position >= PATH_LENGTH_PER_PLAYER) {
+      score += MK_EVAL_ESCAPED;
+      continue;
+    }
+    if (t.position < 0) continue;
+    score += MK_EVAL_PER_TILE * t.position;
+    const tile = BOARD_LAYOUT[t.position];
+    if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
+    if (tile.isContested && tile.type !== "shield" && !isWarded(state, power, t) && !isBulwarked(power, t) && !power.safeTokens.has(t.id)) {
+      for (const e of state.tokens) {
+        if (e.owner === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER) continue;
+        const gap = t.position - e.position;
+        if (gap >= 1 && gap <= 4) {
+          score -= (MK_EVAL_THREAT_BASE + MK_EVAL_THREAT_PER_TILE * t.position) * FLIP_WEIGHTS[gap] / FLIP_WEIGHT_TOTAL;
+        }
+      }
+    }
+    if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
+  }
+  score += MK_EVAL_CHARGE * power.charges[player];
+  if (power.ultimateReady[player]) score += MK_EVAL_ULTIMATE;
+  score += MK_EVAL_STREAK * power.shieldStreak[player];
+  return score;
+}
+function evaluateMK(state, power, me) {
+  const foe = me === "p1" ? "p2" : "p1";
+  return mkEvalSide(state, power, me) - mkEvalSide(state, power, foe);
+}
+function mkBestOwnFollowup(state, power, flip, me) {
+  if (flip === 0) return evaluateMK(state, power, me);
+  const moves = getLegalPowerMoves(state, power, flip);
+  if (moves.length === 0) return evaluateMK(state, power, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    if (m.causesWin) return MK_WIN_VALUE;
+    const r = applyPowerMove(state, power, m, me, SIM_RAND);
+    const v = evaluateMK(r.state, r.power, me);
+    if (v > best) best = v;
+  }
+  return best;
+}
+function mkWorstOppReply(state, power, flip, me) {
+  if (flip === 0) return evaluateMK(state, power, me);
+  const opp = state.currentPlayer;
+  const moves = getLegalPowerMoves(state, power, flip);
+  if (moves.length === 0) return evaluateMK(state, power, me);
+  let worst = Infinity;
+  for (const m of moves) {
+    if (m.causesWin) return -MK_WIN_VALUE;
+    const r = applyPowerMove(state, power, m, opp, SIM_RAND);
+    const v = evaluateMK(r.state, r.power, me);
+    if (v < worst) worst = v;
+  }
+  return worst;
+}
+function mkValueAfterAction(state, power, me) {
+  if (state.winner === me) return MK_WIN_VALUE;
+  if (state.winner !== null) return -MK_WIN_VALUE;
+  const ownTurn = state.currentPlayer === me;
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    const p = FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL;
+    value += p * (ownTurn ? mkBestOwnFollowup(state, power, f, me) : mkWorstOppReply(state, power, f, me));
+  }
+  return value;
+}
+function mkReflipValue(state, power, me) {
+  const powerR = applyReflip(power, me);
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    const p = FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL;
+    if (f === 0) {
+      value += p * evaluateMK(state, powerR, me);
+      continue;
+    }
+    const moves = getLegalPowerMoves(state, powerR, f);
+    if (moves.length === 0) {
+      value += p * evaluateMK(state, powerR, me);
+      continue;
+    }
+    let best = -Infinity;
+    for (const m of moves) {
+      const v = m.causesWin ? MK_WIN_VALUE : (() => {
+        const r = applyPowerMove(state, powerR, m, me, SIM_RAND);
+        return mkValueAfterAction(r.state, r.power, me);
+      })();
+      if (v > best) best = v;
+    }
+    value += p * best;
+  }
+  return value;
+}
+function mkSimulate(state, power, c, mover) {
+  switch (c.kind) {
+    case "move":
+      return applyPowerMove(state, power, c.move, mover, SIM_RAND);
+    case "charge":
+      return applyCharge(state, power, c.move, mover, SIM_RAND);
+    case "push":
+      return applyPush(state, power, c.targetTokenId, mover);
+    case "chargedShot":
+      return applyChargedShot(state, power, c.targetTokenId, mover);
+    case "blinkStrike":
+      return applyBlinkStrike(state, power, c.targetTokenId, mover);
+    case "warpath":
+      return applyWarpath(state, power, c.targetTokenId, mover);
+    case "bulwark":
+      return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
+  }
+}
+function pickHardPowerAction(state, power, moves, rand) {
+  const mover = state.currentPlayer;
+  const candidates = enumerateCandidates(state, power, moves);
+  if (candidates.length === 0) return null;
+  let best = null;
+  let bestScore = -Infinity;
+  for (const c of candidates) {
+    let value;
+    if ((c.kind === "move" || c.kind === "charge") && c.move.causesWin) {
+      value = MK_WIN_VALUE;
+    } else if (c.kind === "reflip") {
+      value = mkReflipValue(state, power, mover);
+    } else {
+      const r = mkSimulate(state, power, c, mover);
+      value = mkValueAfterAction(r.state, r.power, mover);
+    }
+    value += rand() * 1e-3;
+    if (value > bestScore) {
+      bestScore = value;
+      best = c;
     }
   }
   return best;
@@ -1052,10 +1404,12 @@ function freshMatchFields(variant) {
     rescueAttempted: false
   };
 }
-function createRoomDoc(code, vsCpu, variant, p1Token, now, unlisted = false) {
+function createRoomDoc(code, vsCpu, variant, p1Token, now, unlisted = false, difficulty = "standard") {
   const doc = {
     code,
     vsCpu,
+    // Set only for CPU rooms — PvP docs stay byte-identical (no key at all).
+    ...vsCpu ? { difficulty } : {},
     seats: { p1: p1Token, p2: vsCpu ? "BOT" : null },
     started: vsCpu,
     // cpu rooms are "full" with one human
@@ -1402,7 +1756,14 @@ function tickOnce(doc, now, rand) {
   const isBotTurn = doc.vsCpu && doc.state.currentPlayer === "p2";
   if (isBotTurn && doc.variant === "masterKiller" && doc.mk && moves.length === 0 && !doc.rescueAttempted && elapsed >= BOT_RESCUE_THINK_MS) {
     const power = fromWirePower(doc.mk);
-    const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
+    const action = pickBotPowerAction(
+      doc.state,
+      power,
+      doc.currentPowerMoves ?? [],
+      flip,
+      rand,
+      doc.difficulty ?? "standard"
+    );
     if (action) return applyBotAction(doc, "p2", action, now, rand);
     doc = { ...doc, rescueAttempted: true };
   }
@@ -1434,13 +1795,20 @@ function tickOnce(doc, now, rand) {
   if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS) {
     if (doc.variant === "masterKiller" && doc.mk) {
       const power = fromWirePower(doc.mk);
-      const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
+      const action = pickBotPowerAction(
+        doc.state,
+        power,
+        doc.currentPowerMoves ?? [],
+        flip,
+        rand,
+        doc.difficulty ?? "standard"
+      );
       if (action) return applyBotAction(doc, "p2", action, now, rand);
       return doc;
     }
     const botMoves = getLegalMoves(doc.state, flip);
     if (botMoves.length === 0) return doc;
-    const idx = pickBotMove(doc.state, botMoves, rand);
+    const idx = pickBotMove(doc.state, botMoves, rand, doc.difficulty ?? "standard");
     const move = botMoves[idx];
     let next = {
       ...doc,
@@ -1531,6 +1899,7 @@ function viewFor(doc, seat, since, now) {
     started: doc.started,
     phase: doc.phase,
     vsCpu: doc.vsCpu,
+    difficulty: doc.vsCpu ? doc.difficulty ?? "standard" : null,
     variant: doc.variant,
     state: doc.state,
     flip: doc.currentFlip,
@@ -1648,7 +2017,7 @@ async function handleJoin(msg) {
   const token = randomUUID();
   for (let attempt = 0; attempt < 20; attempt++) {
     const code = newRoomCode();
-    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true);
+    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty));
     doc = tick(doc, now);
     const ok = await getRedis().set(roomKey(code), JSON.stringify(doc), "EX", ROOM_TTL_S, "NX");
     if (ok === "OK") {

@@ -7,10 +7,29 @@
 // banked) Mage's Blink Strike / Warrior's Warpath ultimate — and takes
 // whichever scores highest. Separate file from bot.ts so classic mode's bot
 // (and anything reading it, including Kasen's audit) stays untouched.
+//
+// Three difficulty tiers, same shape as bot.ts (see bot-difficulty.ts):
+//   easy     — win short-circuit, then mostly uniform-random over EVERY
+//              legal action (including legal-but-wasteful ones, e.g. an
+//              empty-sweep Charge — the blunders are the point).
+//   standard — the original ranked heuristic above, byte-preserved as the
+//              default so every existing call site and balance baseline is
+//              untouched.
+//   hard     — charge-valued static eval (evaluateMK) + one-ply expectimax
+//              over FLIP_WEIGHTS, simulating candidates through the pure
+//              apply* functions.
 // ============================================================================
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBlinkStrike,
+  applyBulwark,
+  applyCharge,
+  applyChargedShot,
+  applyPowerMove,
+  applyPush,
+  applyReflip,
+  applyWarpath,
   canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
@@ -18,8 +37,10 @@ import {
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
+  getLegalPowerMoves,
   getPushTargets,
   getWarpathTargets,
+  isBulwarked,
   isWarded,
   PUSH_DISTANCE,
   PUSH_WARD_DISTANCE,
@@ -28,6 +49,7 @@ import {
   type PowerMove,
   type PowerState,
 } from "./master-killer.ts";
+import { EASY_HEED_P, FLIP_WEIGHTS, FLIP_WEIGHT_TOTAL, type BotDifficulty } from "./bot-difficulty.ts";
 
 /** Same shape of scoring bot.ts uses for a plain move, extended with the
  *  power-derived capture sets (bonus snipe / charge sweep) so a Master
@@ -248,6 +270,9 @@ function scoreReflip(currentMoveCount: number, flip: number, rand: () => number)
  * re-picks afterward — this function only decides WHETHER to reflip, not
  * what to do with the new flip).
  *
+ * `difficulty` selects the tier (default "standard" = the pre-difficulty
+ * behavior, byte-preserved — see pickStandardPowerAction).
+ *
  * Returns null when there is truly no legal action (no moves, and no
  * charge-funded rescue available) — the caller should treat that exactly
  * like the classic game's empty-legalMoves case and skip the turn.
@@ -258,6 +283,25 @@ export function pickBotPowerAction(
   moves: PowerMove[],
   flip: number,
   rand: () => number = Math.random,
+  difficulty: BotDifficulty = "standard",
+): PowerAction | null {
+  if (difficulty === "easy") return pickEasyPowerAction(state, power, moves, flip, rand);
+  if (difficulty === "hard") return pickHardPowerAction(state, power, moves, rand);
+  return pickStandardPowerAction(state, power, moves, flip, rand);
+}
+
+// ============================================================================
+// STANDARD — the original heuristic, extracted verbatim (same rand() call
+// order) so the default tier's behavior is byte-identical to the
+// pre-difficulty bot. Do not "improve" this one; that's what hard is for.
+// ============================================================================
+
+function pickStandardPowerAction(
+  state: GameState,
+  power: PowerState,
+  moves: PowerMove[],
+  flip: number,
+  rand: () => number,
 ): PowerAction | null {
   const mover = state.currentPlayer;
   const cls: PlayerClass = power.classes[mover];
@@ -360,5 +404,316 @@ export function pickBotPowerAction(
     }
   }
 
+  return best;
+}
+
+// ============================================================================
+// CANDIDATE ENUMERATION — shared by easy and hard. Mirrors validateUsePower's
+// gates in room-engine.ts EXACTLY (class, charge affordability, target
+// getters), so every candidate either tier emits is guaranteed to survive
+// the server's re-validation. Kept as one enumerator on purpose: three
+// per-tier copies of these gates would drift.
+// ============================================================================
+
+function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMove[]): PowerAction[] {
+  const mover = state.currentPlayer;
+  const cls: PlayerClass = power.classes[mover];
+  const charges = power.charges[mover];
+  const out: PowerAction[] = [];
+
+  for (const m of moves) {
+    out.push({ kind: "move", move: m });
+    // Deliberately validateUsePower's gate (chargeAvailable + charges >= 1),
+    // NOT standard's extra chargeSweepCaptures.length > 0 discipline — an
+    // empty-sweep Charge is legal-but-wasteful, which is exactly the blunder
+    // pool easy picks from; hard's charge-valued eval prices the wasted
+    // charge and declines it on its own.
+    if (cls === "warrior" && m.chargeAvailable && charges >= 1) {
+      out.push({ kind: "charge", move: m });
+    }
+  }
+  if (cls === "archer" && charges >= 1) {
+    for (const id of getPushTargets(state, power, mover)) out.push({ kind: "push", targetTokenId: id });
+  }
+  if (cls === "archer" && charges === CHARGE_CAP) {
+    for (const id of getChargedShotTargets(state, power, mover)) {
+      out.push({ kind: "chargedShot", targetTokenId: id });
+    }
+  }
+  if (cls === "mage" && canReflipAgain(power, mover)) out.push({ kind: "reflip" });
+  if (cls === "mage" && power.ultimateReady[mover]) {
+    for (const id of getBlinkStrikeTargets(state, power, mover)) {
+      out.push({ kind: "blinkStrike", targetTokenId: id });
+    }
+  }
+  if (cls === "warrior" && power.ultimateReady[mover]) {
+    for (const id of getWarpathTargets(state, power, mover)) out.push({ kind: "warpath", targetTokenId: id });
+  }
+  if (cls === "warrior" && charges >= 1) {
+    const bulwarkTargets = getBulwarkTargets(state, power, mover);
+    for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id });
+    if (charges === CHARGE_CAP) {
+      for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id, reinforced: true });
+    }
+  }
+  return out;
+}
+
+// ============================================================================
+// EASY — mostly random over every legal action, never suicidal about a win.
+// ============================================================================
+
+function pickEasyPowerAction(
+  state: GameState,
+  power: PowerState,
+  moves: PowerMove[],
+  flip: number,
+  rand: () => number,
+): PowerAction | null {
+  // Win short-circuit: an easy bot that declines to end the game produces
+  // unbounded, infuriating matches — take it every time.
+  const winMove = moves.find((m) => m.causesWin);
+  if (winMove) return { kind: "move", move: winMove };
+  if (rand() < EASY_HEED_P) return pickStandardPowerAction(state, power, moves, flip, rand);
+  const candidates = enumerateCandidates(state, power, moves);
+  if (candidates.length === 0) return null; // same auto-skip path as standard's null
+  return candidates[Math.floor(rand() * candidates.length)];
+}
+
+// ============================================================================
+// HARD — charge-valued static eval + one-ply expectimax over FLIP_WEIGHTS.
+//
+// Every candidate is SIMULATED through the same pure apply* functions the
+// server executes with, then valued by averaging the next actor's best
+// response over the five flip outcomes. The eval's explicit charge value is
+// what stops the bot burning the bank on marginal spends — the failure mode
+// this file has fixed three times by hand (see scoreBulwark's history note);
+// pricing the resource in the eval solves it structurally instead of
+// per-ability.
+// ============================================================================
+
+/** Hard tier eval terms — board terms match bot.ts's evaluateClassic values
+ *  (duplicated, not imported: this file deliberately never imports bot.ts),
+ *  plus the Master Killer economy. */
+const MK_EVAL_ESCAPED = 200;
+const MK_EVAL_PER_TILE = 8;
+const MK_EVAL_SHIELD_TILE = 25;
+const MK_EVAL_THREAT_BASE = 40;
+const MK_EVAL_THREAT_PER_TILE = 6;
+/** A banked charge is roughly "one Push, or one Re-flip, on demand" — worth
+ *  a few tiles of progress (3 tiles at MK_EVAL_PER_TILE) but well under a
+ *  capture's swing, so the bot spends when a spend beats holding, not
+ *  reflexively either way. */
+const MK_EVAL_CHARGE = 24;
+/** A banked ultimate is a guaranteed future capture of a token of the bot's
+ *  choosing (Blink Strike / Warpath both bypass shields and Ward) — priced
+ *  near a mid-board capture's positional swing so it isn't spent on scraps. */
+const MK_EVAL_ULTIMATE = 70;
+/** Live shield-streak progress toward that ultimate, per landing banked. */
+const MK_EVAL_STREAK = 12;
+/** An active Bulwark on an own token — insurance, real but modest (it
+ *  expires on its own; see BULWARK_TURNS). */
+const MK_EVAL_BULWARK = 12;
+/** A certain win outranks any expectation sum (max weighted contribution of
+ *  a probabilistic win is < 1 · MK_WIN_VALUE). */
+const MK_WIN_VALUE = 1_000_000;
+
+/** Fixed rand for inside-the-search simulation: only Rain of Arrows' target
+ *  pick consumes it, and search nodes must be deterministic so candidate
+ *  values are comparable. The REAL rand still governs the authoritative
+ *  apply in room-engine once an action is chosen. */
+const SIM_RAND = () => 0.5;
+
+/** One player's side of the eval: escaped >> progress + shield perch, minus
+ *  probability-weighted capture threat (skipped while Ward/Bulwark/transient
+ *  safety protects the token), plus the charge economy terms. */
+function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): number {
+  let score = 0;
+  for (const t of state.tokens) {
+    if (t.owner !== player) continue;
+    if (t.position >= PATH_LENGTH_PER_PLAYER) {
+      score += MK_EVAL_ESCAPED;
+      continue;
+    }
+    if (t.position < 0) continue; // reserve is worth exactly nothing
+    score += MK_EVAL_PER_TILE * t.position;
+    const tile = BOARD_LAYOUT[t.position];
+    if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
+    if (
+      tile.isContested &&
+      tile.type !== "shield" &&
+      !isWarded(state, power, t) &&
+      !isBulwarked(power, t) &&
+      !power.safeTokens.has(t.id)
+    ) {
+      for (const e of state.tokens) {
+        if (e.owner === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER) continue;
+        const gap = t.position - e.position;
+        if (gap >= 1 && gap <= 4) {
+          score -=
+            ((MK_EVAL_THREAT_BASE + MK_EVAL_THREAT_PER_TILE * t.position) * FLIP_WEIGHTS[gap]) /
+            FLIP_WEIGHT_TOTAL;
+        }
+      }
+    }
+    if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
+  }
+  score += MK_EVAL_CHARGE * power.charges[player];
+  if (power.ultimateReady[player]) score += MK_EVAL_ULTIMATE;
+  score += MK_EVAL_STREAK * power.shieldStreak[player];
+  return score;
+}
+
+/** Antisymmetric eval from `me`'s perspective (me minus foe). */
+function evaluateMK(state: GameState, power: PowerState, me: PlayerId): number {
+  const foe: PlayerId = me === "p1" ? "p2" : "p1";
+  return mkEvalSide(state, power, me) - mkEvalSide(state, power, foe);
+}
+
+/** Best own follow-up after keeping the turn (shield landing), one flip.
+ *  Dead flips (0 / no moves) skip — the board stands as evaluated. Replies
+ *  here are plain power moves only; deeper power actions aren't modeled —
+ *  one ply of plain replies keeps the search cheap, and the separation sim
+ *  is the judge of whether that's strong enough. */
+function mkBestOwnFollowup(state: GameState, power: PowerState, flip: number, me: PlayerId): number {
+  if (flip === 0) return evaluateMK(state, power, me);
+  const moves = getLegalPowerMoves(state, power, flip);
+  if (moves.length === 0) return evaluateMK(state, power, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    if (m.causesWin) return MK_WIN_VALUE;
+    const r = applyPowerMove(state, power, m, me, SIM_RAND);
+    const v = evaluateMK(r.state, r.power, me);
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+/** Opponent's best (our worst) plain-move reply for one flip — the min node. */
+function mkWorstOppReply(state: GameState, power: PowerState, flip: number, me: PlayerId): number {
+  if (flip === 0) return evaluateMK(state, power, me);
+  const opp = state.currentPlayer;
+  const moves = getLegalPowerMoves(state, power, flip);
+  if (moves.length === 0) return evaluateMK(state, power, me);
+  let worst = Infinity;
+  for (const m of moves) {
+    if (m.causesWin) return -MK_WIN_VALUE;
+    const r = applyPowerMove(state, power, m, opp, SIM_RAND);
+    const v = evaluateMK(r.state, r.power, me);
+    if (v < worst) worst = v;
+  }
+  return worst;
+}
+
+/** The shared post-action expectation: whoever `state.currentPlayer` is
+ *  after the candidate resolved (the mover again on a shield extra turn, the
+ *  opponent otherwise) gets a max/min node averaged over the five flips. */
+function mkValueAfterAction(state: GameState, power: PowerState, me: PlayerId): number {
+  if (state.winner === me) return MK_WIN_VALUE;
+  if (state.winner !== null) return -MK_WIN_VALUE;
+  const ownTurn = state.currentPlayer === me;
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    const p = FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL;
+    value += p * (ownTurn ? mkBestOwnFollowup(state, power, f, me) : mkWorstOppReply(state, power, f, me));
+  }
+  return value;
+}
+
+/** Value of Re-flip: average over the replacement flip of the best immediate
+ *  move's full post-apply expectation (so it's on the same scale as every
+ *  other candidate). applyReflip's charge spend is priced by the eval's
+ *  MK_EVAL_CHARGE term, so the hard Mage re-flips a capture-less 1 when
+ *  holding spare charges — strictly smarter than standard's "only on 0/no
+ *  moves" rule — and this also upgrades the zero-move rescue path (the
+ *  engine calls the bot with moves=[] before auto-skipping). */
+function mkReflipValue(state: GameState, power: PowerState, me: PlayerId): number {
+  const powerR = applyReflip(power, me);
+  let value = 0;
+  for (let f = 0; f <= 4; f++) {
+    const p = FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL;
+    if (f === 0) {
+      value += p * evaluateMK(state, powerR, me);
+      continue;
+    }
+    const moves = getLegalPowerMoves(state, powerR, f);
+    if (moves.length === 0) {
+      value += p * evaluateMK(state, powerR, me);
+      continue;
+    }
+    let best = -Infinity;
+    for (const m of moves) {
+      const v = m.causesWin
+        ? MK_WIN_VALUE
+        : (() => {
+            const r = applyPowerMove(state, powerR, m, me, SIM_RAND);
+            return mkValueAfterAction(r.state, r.power, me);
+          })();
+      if (v > best) best = v;
+    }
+    value += p * best;
+  }
+  return value;
+}
+
+/** Simulate one non-reflip candidate through the same pure apply* functions
+ *  the server executes with. */
+function mkSimulate(
+  state: GameState,
+  power: PowerState,
+  c: Exclude<PowerAction, { kind: "reflip" }>,
+  mover: PlayerId,
+): { state: GameState; power: PowerState } {
+  switch (c.kind) {
+    case "move":
+      return applyPowerMove(state, power, c.move, mover, SIM_RAND);
+    case "charge":
+      return applyCharge(state, power, c.move, mover, SIM_RAND);
+    case "push":
+      return applyPush(state, power, c.targetTokenId, mover);
+    case "chargedShot":
+      return applyChargedShot(state, power, c.targetTokenId, mover);
+    case "blinkStrike":
+      return applyBlinkStrike(state, power, c.targetTokenId, mover);
+    case "warpath":
+      return applyWarpath(state, power, c.targetTokenId, mover);
+    case "bulwark":
+      return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
+  }
+}
+
+/** Expectimax root: value every candidate, tiny rand tie-break only (hard is
+ *  deterministic-feeling on purpose — no 20-point jitter). Budget: ~25
+ *  candidates x 5 flips x ~10 replies, plus Re-flip's 5x10x(5x10) — under
+ *  10k O(8-token) evals, low single-digit ms, safe inside a server tick even
+ *  across withDoc's 4 CAS retries. */
+function pickHardPowerAction(
+  state: GameState,
+  power: PowerState,
+  moves: PowerMove[],
+  rand: () => number,
+): PowerAction | null {
+  const mover = state.currentPlayer;
+  const candidates = enumerateCandidates(state, power, moves);
+  if (candidates.length === 0) return null;
+
+  let best: PowerAction | null = null;
+  let bestScore = -Infinity;
+  for (const c of candidates) {
+    let value: number;
+    if ((c.kind === "move" || c.kind === "charge") && c.move.causesWin) {
+      value = MK_WIN_VALUE;
+    } else if (c.kind === "reflip") {
+      value = mkReflipValue(state, power, mover);
+    } else {
+      const r = mkSimulate(state, power, c, mover);
+      value = mkValueAfterAction(r.state, r.power, mover);
+    }
+    value += rand() * 1e-3;
+    if (value > bestScore) {
+      bestScore = value;
+      best = c;
+    }
+  }
   return best;
 }

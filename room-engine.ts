@@ -72,6 +72,7 @@ import {
   type PowerState,
 } from "./master-killer";
 import { pickBotPowerAction } from "./master-killer-bot";
+import type { BotDifficulty } from "./bot-difficulty";
 
 // ============================================================================
 // TUNABLES — the same rhythm constants the WS servers used, now data.
@@ -228,6 +229,12 @@ export type RoomEvent =
 export interface RoomDoc {
   code: string;
   vsCpu: boolean;
+  /** CPU strength for vsCpu rooms, fixed at creation (never mid-game — the
+   *  trust model forbids a client-steered bot). ADDITIVE: absent (PvP rooms,
+   *  and docs persisted before the field existed) reads as "standard",
+   *  exactly the pre-difficulty behavior. Not part of freshMatchFields, so
+   *  rematches keep the tier by construction. */
+  difficulty?: BotDifficulty;
   seats: { p1: string | null; p2: string | null }; // seat tokens ("BOT" for cpu p2)
   started: boolean;
   /** True = private room: joinable by code, never shown in the public
@@ -328,6 +335,10 @@ export interface RoomView {
   started: boolean;
   phase: RoomPhase;
   vsCpu: boolean;
+  /** CPU strength for vsCpu rooms, null in PvP. ADDITIVE: rides the view on
+   *  join AND on every poll (so a resumed/reloaded client recovers the tier
+   *  without any separate handshake). */
+  difficulty?: BotDifficulty | null;
   variant: Variant;
   state: GameState;
   flip: number | null;
@@ -497,10 +508,13 @@ export function createRoomDoc(
   p1Token: string,
   now: number,
   unlisted = false,
+  difficulty: BotDifficulty = "standard",
 ): RoomDoc {
   const doc: RoomDoc = {
     code,
     vsCpu,
+    // Set only for CPU rooms — PvP docs stay byte-identical (no key at all).
+    ...(vsCpu ? { difficulty } : {}),
     seats: { p1: p1Token, p2: vsCpu ? "BOT" : null },
     started: vsCpu, // cpu rooms are "full" with one human
     unlisted,
@@ -942,7 +956,14 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
     elapsed >= BOT_RESCUE_THINK_MS
   ) {
     const power = fromWirePower(doc.mk);
-    const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
+    const action = pickBotPowerAction(
+      doc.state,
+      power,
+      doc.currentPowerMoves ?? [],
+      flip,
+      rand,
+      doc.difficulty ?? "standard",
+    );
     if (action) return applyBotAction(doc, "p2", action, now, rand);
     // Latch the null attempt WITHOUT resetting the skip clock or emitting a
     // frame — the auto-skip below stays on schedule.
@@ -978,13 +999,20 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
   if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS) {
     if (doc.variant === "masterKiller" && doc.mk) {
       const power = fromWirePower(doc.mk);
-      const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
+      const action = pickBotPowerAction(
+        doc.state,
+        power,
+        doc.currentPowerMoves ?? [],
+        flip,
+        rand,
+        doc.difficulty ?? "standard",
+      );
       if (action) return applyBotAction(doc, "p2", action, now, rand);
       return doc;
     }
     const botMoves = getLegalMoves(doc.state, flip);
     if (botMoves.length === 0) return doc;
-    const idx = pickBotMove(doc.state, botMoves, rand);
+    const idx = pickBotMove(doc.state, botMoves, rand, doc.difficulty ?? "standard");
     const move = botMoves[idx];
     let next: RoomDoc = {
       ...doc,
@@ -1089,6 +1117,7 @@ export function viewFor(doc: RoomDoc, seat: PlayerId, since: number, now: number
     started: doc.started,
     phase: doc.phase,
     vsCpu: doc.vsCpu,
+    difficulty: doc.vsCpu ? (doc.difficulty ?? "standard") : null,
     variant: doc.variant,
     state: doc.state,
     flip: doc.currentFlip,

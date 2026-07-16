@@ -37,6 +37,7 @@ import {
   type RoomDoc,
   type RoomActionInput,
 } from "./room-engine.ts";
+import { normalizeDifficulty } from "./bot-difficulty.ts";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const LONG_POLL_CAP_MS = 20_000;
@@ -141,7 +142,10 @@ function handleJoin(msg: Extract<RoomRequest, { op: "join" }>, res: ServerRespon
   const variant = msg.variant === "masterKiller" ? "masterKiller" : "classic";
   const token = randomUUID();
   const code = newRoomCode();
-  const doc = tick(createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true), now);
+  const doc = tick(
+    createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty)),
+    now,
+  );
   rooms.set(code, doc);
   console.log(`[+] p1 seated in room ${code} (${variant})${vsCpu ? " (vs CPU)" : ""}`);
   const body: RoomJoinResponse = {
