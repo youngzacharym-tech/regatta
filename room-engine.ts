@@ -334,14 +334,18 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
   };
 }
 
+/** RoomEvent minus seq, distributed over the union (Omit alone collapses
+ *  a discriminated union to its common keys). */
+type UnseqEvent<T = RoomEvent> = T extends RoomEvent ? Omit<T, "seq"> : never;
+
 /** Append an event (seq assigned here) and trim the window. */
-function pushEvent(doc: RoomDoc, ev: Omit<RoomEvent, "seq">): RoomDoc {
+function pushEvent(doc: RoomDoc, ev: UnseqEvent): RoomDoc {
   const seq = doc.seq + 1;
   const events = [...doc.events, { ...ev, seq } as RoomEvent];
   return { ...doc, seq, events: events.slice(-EVENT_WINDOW) };
 }
 
-function classPickEventOf(doc: RoomDoc): Omit<RoomEvent, "seq"> {
+function classPickEventOf(doc: RoomDoc): UnseqEvent {
   return {
     kind: "classPick",
     classes: {
@@ -352,7 +356,7 @@ function classPickEventOf(doc: RoomDoc): Omit<RoomEvent, "seq"> {
   };
 }
 
-function openingEventOf(doc: RoomDoc, first: PlayerId | null): Omit<RoomEvent, "seq"> {
+function openingEventOf(doc: RoomDoc, first: PlayerId | null): UnseqEvent {
   const { p1, p2 } = doc.openingFlips;
   return {
     kind: "opening",
@@ -363,7 +367,7 @@ function openingEventOf(doc: RoomDoc, first: PlayerId | null): Omit<RoomEvent, "
 }
 
 /** Snapshot the doc's current announcement fields as a replayable frame. */
-function stateEventOf(doc: RoomDoc): Omit<RoomEvent, "seq"> {
+function stateEventOf(doc: RoomDoc): UnseqEvent {
   return {
     kind: "state",
     state: doc.state,
@@ -386,7 +390,7 @@ function stateEventOf(doc: RoomDoc): Omit<RoomEvent, "seq"> {
 
 /** Every state-advancing commit funnels through here: stamp the deadline
  *  clock, reset the one-shot rescue latch, append the frame. */
-function commitFrame(doc: RoomDoc, now: number, ev: Omit<RoomEvent, "seq">): RoomDoc {
+function commitFrame(doc: RoomDoc, now: number, ev: UnseqEvent): RoomDoc {
   return pushEvent({ ...doc, waitingSince: now, rescueAttempted: false }, ev);
 }
 
@@ -852,9 +856,11 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
     if (elapsed < delay) return doc;
     return commitTurnFlip(doc, now, rand);
   }
+  // Captured before the rescue latch reassigns `doc` (which would defeat
+  // TS's null-narrowing on the field).
+  const flip = doc.currentFlip;
 
-  const moves =
-    doc.variant === "masterKiller" ? (doc.currentPowerMoves ?? []) : getLegalMoves(doc.state, doc.currentFlip);
+  const moves = doc.variant === "masterKiller" ? (doc.currentPowerMoves ?? []) : getLegalMoves(doc.state, flip);
   const isBotTurn = doc.vsCpu && doc.state.currentPlayer === "p2";
 
   // MK bot zero-move rescue: one shot, before the auto-skip becomes due.
@@ -867,7 +873,7 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
     elapsed >= BOT_RESCUE_THINK_MS
   ) {
     const power = fromWirePower(doc.mk);
-    const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], doc.currentFlip, rand);
+    const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
     if (action) return applyBotAction(doc, "p2", action, now, rand);
     // Latch the null attempt WITHOUT resetting the skip clock or emitting a
     // frame — the auto-skip below stays on schedule.
@@ -903,11 +909,11 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
   if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS) {
     if (doc.variant === "masterKiller" && doc.mk) {
       const power = fromWirePower(doc.mk);
-      const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], doc.currentFlip, rand);
+      const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
       if (action) return applyBotAction(doc, "p2", action, now, rand);
       return doc;
     }
-    const botMoves = getLegalMoves(doc.state, doc.currentFlip);
+    const botMoves = getLegalMoves(doc.state, flip);
     if (botMoves.length === 0) return doc;
     const idx = pickBotMove(doc.state, botMoves, rand);
     const move = botMoves[idx];

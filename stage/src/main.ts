@@ -11,7 +11,8 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import type { ServerMessage, ClientMessage } from "../../protocol.ts";
+import type { ClientMessage, RoomResponse, RoomJoinResponse } from "../../protocol.ts";
+import type { RoomEvent } from "../../room-engine.ts";
 import type {
   GameState,
   Move,
@@ -43,19 +44,16 @@ const PATH_LENGTH = 15; // must match rulebook.ts PATH_LENGTH_PER_PLAYER
 //   1. ?referee=... override wins (useful for pointing dev builds at prod, etc.)
 //   2. If served from Vite dev server (port 5173) or a bare hostname, hit the
 //      referee at the same host on port 8080.
-//   3. In production (served from the referee itself), use same-origin ws(s)://
-//      with no port so it works behind Render's HTTPS proxy.
-function resolveRefereeURL(): string {
+//   3. In production, same-origin /api/room — works identically against the
+//      Vercel function and the local Node referee.
+function resolveApiURL(): string {
   const override = new URLSearchParams(location.search).get("referee");
   if (override) return override;
   const isDev = location.port === "5173" || location.hostname === "";
-  // /api/ws works against both referees: the local Node server accepts any
-  // upgrade path, and the Vercel deployment routes it to the WS function.
-  if (isDev) return `ws://${location.hostname || "localhost"}:8080/api/ws`;
-  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${scheme}//${location.host}/api/ws`;
+  if (isDev) return `http://${location.hostname || "localhost"}:8080/api/room`;
+  return `${location.origin}/api/room`;
 }
-const REFEREE_URL = resolveRefereeURL();
+const API_URL = resolveApiURL();
 const GLB_URL = "/regatta.glb";
 const PIECES_URL = "/pieces.glb";
 
@@ -1214,7 +1212,7 @@ movesEl.addEventListener("click", (e) => {
   if (!btn) return;
   // "Play Again" branch. No more per-move buttons live here.
   if (btn.dataset.newmatch) {
-    ws.send(JSON.stringify({ type: "newMatch" } satisfies ClientMessage));
+    sendToServer({ type: "newMatch" });
     movesEl.innerHTML = "";
     return;
   }
@@ -1346,9 +1344,7 @@ canvas.addEventListener("pointerdown", (e) => {
   if (tokenId === null) return;
   const moveIdx = moveIndexByToken.get(tokenId);
   if (moveIdx === undefined) return;
-  ws.send(
-    JSON.stringify({ type: "chooseMove", moveIndex: moveIdx } satisfies ClientMessage),
-  );
+  sendToServer({ type: "chooseMove", moveIndex: moveIdx });
   // Immediate feedback: clear eligibility + hover glow this frame.
   eligibleTokenIds.clear();
   moveIndexByToken.clear();
@@ -1467,7 +1463,7 @@ function hideWinScreen() {
 
 winPlayAgainBtn.addEventListener("click", () => {
   hideWinScreen();
-  ws.send(JSON.stringify({ type: "newMatch" } satisfies ClientMessage));
+  sendToServer({ type: "newMatch" });
   movesEl.innerHTML = "";
 });
 winCloseBtn.addEventListener("click", () => {
@@ -1831,18 +1827,28 @@ function announceFromState(msg: {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket
+// Transport — HTTP long-polling against /api/room (Vercel function or the
+// local referee; identical contract). There is NO held-open connection:
+// the client POSTs a long-poll that the server answers as soon as the room's
+// event seq advances (or its ~20s cap lapses), then immediately re-polls.
+// Nothing exists for the host to recycle, so the old every-5-minutes
+// WebSocket drop is gone by construction — a reload or a backgrounded tab
+// simply resumes by polling with its seat token.
+//
+// Rendering model:
+//   - EVENTS (seq-ordered frames from the server's log) drive everything
+//     transient: announcements, board animation, coin tumbles, gem flashes.
+//     Each is replayed exactly once, gated by lastSeq.
+//   - The OVERLAY (the rest of the poll response) drives everything
+//     interactive and idempotent: whose turn, legal moves, the roll gate,
+//     class pick, chat, game over.
+//   - The roll gate arms ONLY when a new my-flip event arrives (seq-gated
+//     via armedFlipSeq) — a quiet re-poll or a resume can never force the
+//     "tap to roll" ritual for a flip that was already revealed. That is the
+//     fix for the old reconnect-reroll bug.
 // ---------------------------------------------------------------------------
 
-let ws: WebSocket;
-let reconnectDelay = 500;
-/** Queued messages to flush once the socket (re)opens. */
-const pendingSends: string[] = [];
-/** True while a rejoin is in flight — an error then means our seat is gone. */
-let awaitingRejoin = false;
-
-// Seat session — survives page reloads (mobile browsers kill tabs freely)
-// and the connection recycling of hosted WebSockets.
+// Seat session — survives page reloads (mobile browsers kill tabs freely).
 interface SeatSession {
   room: string;
   seat: PlayerId;
@@ -1867,219 +1873,310 @@ function clearSession() {
   } catch {}
 }
 
-function connect() {
-  setStatus(`Connecting…`);
-  ws = new WebSocket(REFEREE_URL);
-  ws.addEventListener("open", () => {
-    reconnectDelay = 500;
-    setStatus("Connected", "ok");
-    // Mid-game? Resume the seat before anything else.
-    const session = loadSession();
-    if (session) {
-      awaitingRejoin = true;
-      ws.send(JSON.stringify({ type: "rejoin", ...session } satisfies ClientMessage));
-    }
-    for (const payload of pendingSends.splice(0)) ws.send(payload);
-  });
-  // Hosted WebSocket connections have a maximum lifetime — dropping and
-  // reconnecting (with the seat session above) is NORMAL, not an error.
-  ws.addEventListener("close", () => {
-    setStatus("Reconnecting…", "err");
-    setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
-  });
-  ws.addEventListener("error", () => setStatus("Connection error", "err"));
-  ws.addEventListener("message", (ev) => {
-    let msg: ServerMessage;
-    try {
-      msg = JSON.parse(ev.data) as ServerMessage;
-    } catch {
-      return;
-    }
-    switch (msg.type) {
-      case "role":
-        myRole = msg.player;
-        myRoom = msg.room;
-        myVariant = msg.variant;
-        rollPending = null;
-        openingTapArmed = false;
-        seenOpeningFlips = { p1: null, p2: null };
-        currentPower = null;
-        currentPowerMoves = null;
-        pushArmed = false;
-        pushTargetIds.clear();
-        chargedShotArmed = false;
-        chargedShotTargetIds.clear();
-        blinkStrikeArmed = false;
-        blinkStrikeTargetIds.clear();
-        warpathArmed = false;
-        warpathTargetIds.clear();
-        bulwarkArmed = false;
-        bulwarkTargetIds.clear();
-        pickedClasses = { p1: null, p2: null };
-        updatePlates(null); // plates reappear at class pick / first state
-        classpickEl.classList.remove("show");
-        inCpuGame = msg.vsCpu;
-        setChatAvailable(!msg.vsCpu); // chat is PvP only
-        awaitingRejoin = false;
-        saveSession({ room: msg.room, seat: msg.player, seatToken: msg.seatToken });
-        hideMenu();
-        hud.textContent = inCpuGame
-          ? "You are Red — vs Computer"
-          : "You are Red. Waiting for opponent…";
-        break;
-      case "classPick":
-        // A class-pick phase means a fresh match — any lingering power info
-        // (rematch after a game over) is stale, so pickedClasses drives the
-        // plates until the first state broadcast takes over.
-        currentPower = null;
-        currentPowerMoves = null;
-        pickedClasses = { ...msg.classes };
-        classpickEl.classList.add("show");
-        renderClassPick(msg);
-        updatePlates(null);
-        break;
-      case "waiting":
-        hud.textContent = msg.reason;
-        // PvP room with an empty seat: surface the invite code + link.
-        if (myRoom && !inCpuGame) showRoomInfo(myRoom);
-        break;
-      case "opponentLeft":
-        resetToMenu("Opponent left the game");
-        break;
-      case "chat":
-        renderChat(msg.log);
-        // If a message arrived while the panel is closed, badge the button.
-        if (!chatPanel.classList.contains("open")) chatToggle.classList.add("unread");
-        break;
-      case "opening": {
-        hideRoomInfo();
-        hideWinScreen(); // a rematch re-enters the flip-off
-        classpickEl.classList.remove("show"); // class pick (if any) is done
-        rollPending = null;
-        const mySide: PlayerId = myRole ?? "p1";
-        // Tumble any flips we haven't shown yet this round.
-        for (const seat of ["p1", "p2"] as PlayerId[]) {
-          const count = msg.flips[seat];
-          if (count !== null && seenOpeningFlips[seat] === null) {
-            triggerCoinFlip(count, seat === mySide ? myCoins : theirCoins);
-          }
-        }
-        seenOpeningFlips = { ...msg.flips };
+let session: SeatSession | null = null;
+/** Highest event seq this client has fully rendered. */
+let lastSeq = 0;
+/** Seq of the newest my-flip reveal event seen (candidate for arming). */
+let pendingFlipSeq = 0;
+/** Seq of the my-flip reveal the roll gate last armed for. */
+let armedFlipSeq = 0;
+/** Poll-loop generation — bumping it retires any in-flight loop. */
+let pollGen = 0;
+/** Winner already celebrated (dedupes the win modal across polls). */
+let shownWinner: PlayerId | null = null;
+let lastChatLen = 0;
 
-        if (msg.first !== null) {
-          // Resolved — normal turns take over from here.
-          openingTapArmed = false;
-          seenOpeningFlips = { p1: null, p2: null };
-          const isMe = msg.first === myRole;
-          showAnnouncement(isMe ? "You take first move!" : "Opponent takes first move", isMe ? "escape" : "skip");
-          break;
-        }
-        if (msg.tie) {
-          openingTapArmed = false;
-          setTimeout(() => showAnnouncement("Tie — flip again!", "shield"), 900);
-          break;
-        }
-        const iFlipped = msg.flips[mySide] !== null;
-        openingTapArmed = !iFlipped;
-        if (!iFlipped) {
-          hud.innerHTML = `<div>Flip for first move</div><div style="color:#ffd370">Tap your coins</div>`;
-          showAnnouncement("Flip for first move — tap your coins", "shield");
-        } else {
-          hud.innerHTML = `<div>Flip for first move</div><div>Waiting for opponent…</div>`;
-        }
-        break;
-      }
-      case "state":
-        hideRoomInfo(); // both seats filled — invite banner is done
-        // If a new match started while this client had the win modal open
-        // (opponent clicked Play Again first), dismiss it.
-        if (msg.state.winner === null) hideWinScreen();
-        // Show the "how did we get here" announcement BEFORE refreshing
-        // markers, so the banner appears at the same time as the animation.
-        announceFromState(msg);
-        refreshMarkers(msg.state);
-        // Master Killer: public class/charge/ward info, then re-derive the
-        // token tints. No-op (clears to no tint) in classic rooms.
-        currentPower = msg.power ?? null;
-        currentPowerMoves = msg.powerMoves ?? null;
-        updateTokenTints(msg.state);
-        pushArmed = false;
-        pushTargetIds.clear();
-        chargedShotArmed = false;
-        chargedShotTargetIds.clear();
-        blinkStrikeArmed = false;
-        blinkStrikeTargetIds.clear();
-        warpathArmed = false;
-        warpathTargetIds.clear();
-        bulwarkArmed = false;
-        bulwarkTargetIds.clear();
-        // Avatar plates: portraits, gems, turn glow. The gem flash rides the
-        // server's authoritative charge diff so it can't drift from the rules.
-        updatePlates(msg.state);
-        if (msg.lastChargeEvent) {
-          const container = viewSide(msg.lastChargeEvent.player) === "p1" ? gemsMe : gemsThem;
-          flashGems(container, msg.lastChargeEvent.delta > 0 ? "flare" : "spend");
-        }
-        {
-          const mine = msg.state.currentPlayer === (myRole ?? "p1");
-          // PowerMove is a structural superset of Move, so it drops straight
-          // into the existing tap-to-move plumbing unchanged.
-          const movesForTap: Move[] | null =
-            myVariant === "masterKiller" ? currentPowerMoves : msg.legalMoves;
-          // The player rolls their own hand: every flip of mine waits for a
-          // tap on my coin pile (the pile glows while it waits). The CPU's
-          // rolls animate on their own.
-          if (msg.flip !== null && mine) {
-            rollPending = { flip: msg.flip, legalMoves: movesForTap, state: msg.state };
-            renderHud(msg.state, null);
-            hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
-            renderMoves(null, false);
-          } else {
-            renderHud(msg.state, msg.flip);
-            renderMoves(movesForTap, mine);
-            renderPowerActions(mine);
-            // Each broadcast with flip !== null is a fresh flip; the flip
-            // belongs to the player about to move, so their coin set tumbles.
-            if (msg.flip !== null) {
-              triggerCoinFlip(msg.flip, mine ? myCoins : theirCoins);
-            }
-          }
-        }
-        break;
-      case "gameOver": {
-        setStatus(`Game over — ${playerLabel(msg.winner)} wins`, "ok");
-        // Delay the modal so the winning token's escape flourish finishes
-        // before the board dims. Also delay the bottom Play Again button so
-        // it doesn't compete with the flight visually.
-        const stats = msg.stats;
-        const winner = msg.winner;
-        setTimeout(() => {
-          showWinScreen(winner, stats);
-          showPlayAgainButton();
-        }, WIN_SCREEN_DELAY_MS + 1500); // extra beat: the winner's mug slams before the modal
-        break;
-      }
-      case "error":
-        setStatus(`Server: ${msg.message}`, "err");
-        // A failed rejoin means our old seat/room is gone — back to the menu.
-        if (awaitingRejoin) {
-          awaitingRejoin = false;
-          clearSession();
-          resetToMenu("That game has ended");
-          break;
-        }
-        // Not seated yet (bad/full room code, including via a dead ?room=
-        // link): make sure the menu is up and surface the reason there.
-        if (!myRoom) {
-          menuEl.classList.add("show");
-          menuError.textContent = msg.message;
-        }
-        break;
-    }
-  });
+class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
 }
-connect();
+
+async function post(body: unknown): Promise<unknown> {
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) throw new ApiError(data.error ?? res.statusText, res.status);
+  return data;
+}
+
+/** Replay one server event — all the TRANSIENT effects, exactly once. */
+function replayEvent(ev: RoomEvent) {
+  if (ev.kind === "chat" || ev.kind === "classPick") return; // overlay-rendered
+  if (ev.kind === "opening") {
+    hideWinScreen(); // a rematch re-enters the flip-off
+    const mySide: PlayerId = myRole ?? "p1";
+    // Tumble any flips we haven't shown yet this round.
+    for (const seat of ["p1", "p2"] as PlayerId[]) {
+      const count = ev.flips[seat];
+      if (count !== null && seenOpeningFlips[seat] === null) {
+        triggerCoinFlip(count, seat === mySide ? myCoins : theirCoins);
+      }
+    }
+    seenOpeningFlips = { ...ev.flips };
+    if (ev.first !== null) {
+      seenOpeningFlips = { p1: null, p2: null };
+      const isMe = ev.first === myRole;
+      showAnnouncement(isMe ? "You take first move!" : "Opponent takes first move", isMe ? "escape" : "skip");
+    } else if (ev.tie) {
+      setTimeout(() => showAnnouncement("Tie — flip again!", "shield"), 900);
+    } else if (ev.flips[mySide] === null) {
+      showAnnouncement("Flip for first move — tap your coins", "shield");
+    }
+    return;
+  }
+  // kind === "state"
+  if (ev.state.winner === null) hideWinScreen();
+  // Announce BEFORE refreshing markers so the banner lands with the animation.
+  announceFromState(ev);
+  refreshMarkers(ev.state);
+  currentPower = ev.power ?? null;
+  updateTokenTints(ev.state);
+  updatePlates(ev.state);
+  if (ev.lastChargeEvent) {
+    const container = viewSide(ev.lastChargeEvent.player) === "p1" ? gemsMe : gemsThem;
+    flashGems(container, ev.lastChargeEvent.delta > 0 ? "flare" : "spend");
+  }
+  if (ev.flip !== null) {
+    const mine = ev.state.currentPlayer === (myRole ?? "p1");
+    if (mine) {
+      // My fresh flip: remember its seq — the overlay arms the tap gate.
+      pendingFlipSeq = ev.seq;
+    } else {
+      triggerCoinFlip(ev.flip, theirCoins);
+    }
+  }
+}
+
+/** Apply the response's CURRENT overlay — idempotent, interactive state. */
+function applyOverlay(v: RoomResponse) {
+  const mySide: PlayerId = myRole ?? "p1";
+  myVariant = v.variant;
+  inCpuGame = v.vsCpu;
+
+  // Waiting room (PvP, empty seat): surface the invite code + link.
+  if (!v.started) {
+    hud.textContent = "Waiting for opponent…";
+    if (myRoom && !v.vsCpu) showRoomInfo(myRoom);
+    return;
+  }
+  hideRoomInfo();
+  setChatAvailable(!v.vsCpu);
+  if (v.chat.length !== lastChatLen) {
+    renderChat(v.chat);
+    if (v.chat.length > lastChatLen && !chatPanel.classList.contains("open")) {
+      chatToggle.classList.add("unread");
+    }
+    lastChatLen = v.chat.length;
+  }
+
+  // Class pick overlay.
+  if (v.phase === "classPick" && v.classPick) {
+    currentPower = null;
+    currentPowerMoves = null;
+    pickedClasses = { ...v.classPick.classes };
+    classpickEl.classList.add("show");
+    renderClassPick(v.classPick);
+    updatePlates(null);
+    hud.textContent = "Pick your class";
+    return;
+  }
+  classpickEl.classList.remove("show");
+
+  if (v.phase === "opening") {
+    rollPending = null;
+    const iFlipped = v.openingFlips[mySide] !== null;
+    openingTapArmed = !iFlipped;
+    hud.innerHTML = iFlipped
+      ? `<div>Flip for first move</div><div>Waiting for opponent…</div>`
+      : `<div>Flip for first move</div><div style="color:#ffd370">Tap your coins</div>`;
+    return;
+  }
+  openingTapArmed = false;
+
+  // ---- play ----
+  currentPower = v.power ?? null;
+  currentPowerMoves = v.powerMoves ?? null;
+  const mine = v.yourTurn;
+  const movesForTap: Move[] | null = myVariant === "masterKiller" ? v.powerMoves : v.legalMoves;
+  updatePlates(v.state);
+
+  if (v.flip !== null && mine) {
+    if (pendingFlipSeq > armedFlipSeq) {
+      // A flip reveal we haven't shown: arm the tap gate (once per flip).
+      armedFlipSeq = pendingFlipSeq;
+      rollPending = { flip: v.flip, legalMoves: movesForTap, state: v.state };
+      renderHud(v.state, null);
+      hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
+      renderMoves(null, false);
+      renderPowerActions(false);
+    } else if (!rollPending) {
+      // Already revealed (tapped) — keep the interactive surfaces fresh.
+      renderHud(v.state, v.flip);
+      renderMoves(movesForTap, true);
+      renderPowerActions(true);
+    }
+    // else: gate armed, waiting on the tap — leave it alone.
+  } else {
+    rollPending = null;
+    renderHud(v.state, v.flip);
+    renderMoves(v.flip !== null && mine ? movesForTap : null, mine && v.flip !== null);
+    renderPowerActions(mine && v.flip !== null);
+  }
+
+  // Game over — celebrate once per winner.
+  if (v.gameOver && shownWinner !== v.gameOver.winner) {
+    shownWinner = v.gameOver.winner;
+    setStatus(`Game over — ${playerLabel(v.gameOver.winner)} wins`, "ok");
+    const { winner, stats } = v.gameOver;
+    setTimeout(() => {
+      showWinScreen(winner, stats);
+      showPlayAgainButton();
+    }, WIN_SCREEN_DELAY_MS + 1500); // extra beat: the winner's mug slams first
+  }
+  if (!v.gameOver) shownWinner = null;
+}
+
+/** Process a poll response: resync-snap or replay, then apply the overlay. */
+function processResponse(v: RoomResponse) {
+  if (v.opponentLeft) {
+    resetToMenu("Opponent left the game");
+    return;
+  }
+  if (v.resync) {
+    // Too far behind for replay: snap silently (no banners, no tumbles).
+    seenOpeningFlips = { ...v.openingFlips };
+    currentPower = v.power ?? null;
+    refreshMarkers(v.state);
+    updateTokenTints(v.state);
+    updatePlates(v.state);
+    if (v.flip !== null && v.yourTurn) pendingFlipSeq = v.latestSeq;
+  } else {
+    for (const ev of v.events) {
+      if (ev.seq > lastSeq) replayEvent(ev);
+    }
+  }
+  lastSeq = Math.max(lastSeq, v.latestSeq);
+  applyOverlay(v);
+  setStatus(v.opponentAway ? "Opponent reconnecting…" : "Connected", v.opponentAway ? "err" : "ok");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function pollLoop() {
+  const gen = ++pollGen;
+  let backoff = 1000;
+  while (session && gen === pollGen) {
+    const hidden = document.hidden;
+    try {
+      // Backgrounded tabs drop to a slow, non-holding heartbeat: the room
+      // keeps advancing and the opponent never sees a false "away", but we
+      // stop burning long-poll holds. Foreground resumes long-polling.
+      const v = (await post({ ...session, op: "poll", since: lastSeq, wait: !hidden })) as RoomResponse;
+      if (gen !== pollGen) return;
+      backoff = 1000;
+      processResponse(v);
+      if (hidden) {
+        // Heartbeat cadence while hidden; wake instantly on refocus.
+        await Promise.race([
+          sleep(10_000),
+          new Promise<void>((r) => {
+            const onVis = () => {
+              if (!document.hidden) {
+                document.removeEventListener("visibilitychange", onVis);
+                r();
+              }
+            };
+            document.addEventListener("visibilitychange", onVis);
+          }),
+        ]);
+      }
+    } catch (err) {
+      if (gen !== pollGen) return;
+      if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
+        clearSession();
+        resetToMenu("That game has ended");
+        return;
+      }
+      setStatus("Reconnecting…", "err");
+      await sleep(backoff);
+      backoff = Math.min(backoff * 2, 8000);
+    }
+  }
+}
+
+/** Reset all per-match client state and seat us in a (re)joined room. */
+function seatSelf(seat: PlayerId, room: string, vsCpu: boolean, variant: "classic" | "masterKiller") {
+  myRole = seat;
+  myRoom = room;
+  myVariant = variant;
+  inCpuGame = vsCpu;
+  rollPending = null;
+  openingTapArmed = false;
+  seenOpeningFlips = { p1: null, p2: null };
+  currentPower = null;
+  currentPowerMoves = null;
+  pushArmed = false;
+  pushTargetIds.clear();
+  chargedShotArmed = false;
+  chargedShotTargetIds.clear();
+  blinkStrikeArmed = false;
+  blinkStrikeTargetIds.clear();
+  warpathArmed = false;
+  warpathTargetIds.clear();
+  bulwarkArmed = false;
+  bulwarkTargetIds.clear();
+  pickedClasses = { p1: null, p2: null };
+  lastSeq = 0;
+  pendingFlipSeq = 0;
+  armedFlipSeq = 0;
+  shownWinner = null;
+  lastChatLen = 0;
+  updatePlates(null);
+  classpickEl.classList.remove("show");
+  setChatAvailable(!vsCpu);
+  hideMenu();
+  hud.textContent = vsCpu ? "You are Red — vs Computer" : "You are Red. Waiting for opponent…";
+}
+
+function doJoin(mode: "cpu" | "create" | "join", room?: string, variant?: "classic" | "masterKiller") {
+  menuError.textContent = "";
+  setStatus("Joining…");
+  post({ op: "join", mode, room, variant })
+    .then((raw) => {
+      const j = raw as RoomJoinResponse;
+      session = { room: j.room, seat: j.player, seatToken: j.seatToken };
+      saveSession(session);
+      seatSelf(j.player, j.room, j.vsCpu, j.variant);
+      processResponse(j.view as RoomResponse);
+      void pollLoop();
+    })
+    .catch((err) => {
+      menuEl.classList.add("show");
+      menuError.textContent = err instanceof Error ? err.message : "Could not join";
+    });
+}
+
+/** Resume a live seat after a reload: poll with the saved token; the first
+ *  response resyncs the board and the loop takes over. A dead room 404s and
+ *  drops us back at the menu. */
+function resumeSession(s: SeatSession) {
+  session = s;
+  myRole = s.seat;
+  myRoom = s.room;
+  lastSeq = 0;
+  pendingFlipSeq = 0;
+  armedFlipSeq = 0;
+  hud.textContent = "Reconnecting to your game…";
+  void pollLoop();
+}
 
 // ---------------------------------------------------------------------------
 // Mode menu — vs CPU / create room / join room
@@ -2148,15 +2245,45 @@ function hideRoomInfo() {
   roomInfoEl.classList.remove("show");
 }
 
-/** Send now, or as soon as the socket (re)opens. */
+/** Send a game action. Kept as the old ClientMessage shape so every call
+ *  site is untouched: type names map 1:1 onto /api/room ops. Joins route to
+ *  doJoin (they mint the session); everything else POSTs against it. Action
+ *  replies carry no replay — the poll loop delivers the resulting events —
+ *  so only rejections need handling here. */
 function sendToServer(msg: ClientMessage) {
-  const payload = JSON.stringify(msg);
-  if (ws.readyState === WebSocket.OPEN) ws.send(payload);
-  else pendingSends.push(payload); // flushed by connect()'s open handler
+  if (msg.type === "join") {
+    doJoin(msg.mode, msg.room, msg.variant);
+    return;
+  }
+  if (!session) return;
+  const { type, ...rest } = msg as { type: string } & Record<string, unknown>;
+  post({ ...session, op: type, ...rest })
+    .then((raw) => {
+      const v = raw as RoomResponse;
+      if (v.error) {
+        setStatus(`Server: ${v.error}`, "err");
+        applyOverlay(v); // re-sync interactive state to the server's truth
+      }
+    })
+    .catch((err) => {
+      if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
+        clearSession();
+        resetToMenu("That game has ended");
+        return;
+      }
+      setStatus(`Server: ${err instanceof Error ? err.message : "error"}`, "err");
+    });
 }
 
 /** Back to the lobby: clear all match-local state and reopen the menu. */
 function resetToMenu(message: string) {
+  pollGen++; // retire any in-flight poll loop
+  session = null;
+  lastSeq = 0;
+  pendingFlipSeq = 0;
+  armedFlipSeq = 0;
+  shownWinner = null;
+  lastChatLen = 0;
   rollPending = null;
   openingTapArmed = false;
   seenOpeningFlips = { p1: null, p2: null };
@@ -2490,10 +2617,11 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // follow a ?room=CODE deep link, else show the mode menu.
 {
   const linkedRoom = new URLSearchParams(location.search).get("room");
-  if (loadSession()) {
-    hud.textContent = "Reconnecting to your game…"; // rejoin sent on socket open
+  const saved = loadSession();
+  if (saved) {
+    resumeSession(saved); // first poll resyncs the board; 404 → menu
   } else if (linkedRoom) {
-    sendToServer({ type: "join", mode: "join", room: linkedRoom.toUpperCase() });
+    doJoin("join", linkedRoom.toUpperCase());
     hud.textContent = "Joining room…";
   } else {
     menuEl.classList.add("show");
