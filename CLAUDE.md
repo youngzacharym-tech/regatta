@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Regatta: a fan-made, browser-based 2-player race-and-capture board game (a
 digital take on a *Soulframe* minigame), played with coin flips instead of
-dice. Three.js/Vite client + authoritative Node WebSocket server sharing a
+dice. Three.js/Vite client + authoritative server (HTTP long-polling) sharing a
 pure TypeScript rulebook. Live at https://regatta-one.vercel.app, installable
 as a PWA. **Master Killer** is the class-powers variant (Archer / Mage /
 Warrior, charge economy) selectable from the menu — this is the project's
@@ -50,37 +50,32 @@ npx tsx test-master-killer.ts             # Master Killer rules unit suite
 npx tsx test-master-killer-drift.ts       # referee-vs-rulebook drift check
 ```
 
-Local dev server (WebSocket referee + static host in one process):
+Local dev server (polling referee + static host in one process):
 ```bash
 npm run referee             # or: npm start — port 8080 (PORT env overrides)
 cd stage && npm run dev     # Vite dev on :5173 with HMR, talks to :8080
 ```
 GOTCHA on Kasen's Mac: Docker squats on port 8080 — run `PORT=8090 npm run
-referee` and browse http://localhost:8090 instead. Client WS URL resolution
-is `resolveRefereeURL()` in `stage/src/main.ts` (`?referee=ws://...`
-overrides).
+referee` and browse http://localhost:8090 instead. Client API URL resolution
+is `resolveApiURL()` in `stage/src/main.ts` (`?referee=<url>` overrides).
 
-Integration tests against a running referee:
+Engine/transport tests:
 ```bash
-npm run test-referee                 # 2 dummy WS clients vs ws://localhost:8080 (REFEREE_URL overrides)
-PORT=8092 npm run referee            # test-lobby*.cjs are hardcoded to :8092
-node test-lobby.cjs                  # classic lobby: CPU game, concurrent rooms, disconnects
-node test-lobby-master-killer.cjs    # Master Killer lobby: class pick, powers, charges
-node test-lobby-prod.cjs             # against live Vercel deploy (rejoin flow)
-node test-lobby-master-killer-prod.cjs
+npm run test-engine                  # full games through room-engine's applyAction/tick (invariants + balance)
 ```
+The old WS lobby tests were deleted with the WebSocket transport; transport
+smoke-testing is now curl against POST /api/room (see referee.ts's contract).
 
 Build & deploy:
 ```bash
 npm run build:stage   # vite build → stage/dist (+ sw.js cache stamp)
-npm run build:api     # esbuild-bundles api/ws.ts → api/ws.js (COMMITTED, pre-bundled)
+npm run build:api     # esbuild-bundles api/room.ts → api/room.js (COMMITTED, pre-bundled)
 npm run deploy        # build:api + `npx vercel deploy --prod` — never bare `vercel deploy`
 ```
-`api/ws.js` is committed on purpose (git-based Vercel deploys need the
+`api/room.js` is committed on purpose (git-based Vercel deploys need the
 pre-bundle; Vercel's per-file compiler can't resolve the shared root-level
-imports — see `.vercelignore`). Regenerate it whenever `api/ws.ts`,
-`rulebook.ts`, `master-killer.ts`, `bot.ts`, or `master-killer-bot.ts`
-change.
+imports — see `.vercelignore`). Regenerate it whenever `api/room.ts`,
+`room-engine.ts`, `rulebook.ts`, `master-killer.ts`, or the bots change.
 
 There is no lint config; correctness rides on the test scripts above.
 
@@ -109,10 +104,16 @@ never disagree about legality.
   `classPick` phase, `powerMoves`/`power`/`lastPush`/`lastChargeEvent` on
   state broadcasts. `lastChargeEvent` is the server-computed charge diff —
   clients display it, never re-derive it.
-- **`referee.ts`** — local/Render server; rooms in process memory.
-- **`api/ws.ts`** — same referee re-architected for Vercel: room docs in
-  Upstash Redis (compare-and-set via Lua), pub/sub broadcasts, seat-token
-  rejoin. Ships pre-bundled as `api/ws.js` (see above).
+- **`room-engine.ts`** — THE turn engine, pure over a `RoomDoc` value:
+  `applyAction` (player did something), `tick` (fire due absolute deadlines
+  — replaces every setTimeout), `viewFor` (seat-gated view + replayable
+  event log). Both transports share it verbatim, so they cannot drift.
+- **`referee.ts`** — local server: static files + POST /api/room over an
+  in-memory Map. **`api/room.ts`** — the identical endpoint on Vercel over
+  Upstash Redis (version CAS via Lua), long-poll holds (~20s) instead of a
+  held-open socket — this is what killed the every-5-minutes WS recycle.
+  Ships pre-bundled as `api/room.js` (see above). Clients resume by polling
+  with their seat token; there is no rejoin handshake.
 - **`stage/`** — Three.js + Vite client. `src/main.ts` (~2100 lines) covers
   scene, board/token rendering, tap-to-move raycasting, coin-flip and mug
   animations, PWA install, app mode, and the **avatar plates**: Hearthstone

@@ -1311,11 +1311,12 @@ function tickOnce(doc, now, rand) {
     if (elapsed < delay) return doc;
     return commitTurnFlip(doc, now, rand);
   }
-  const moves = doc.variant === "masterKiller" ? doc.currentPowerMoves ?? [] : getLegalMoves(doc.state, doc.currentFlip);
+  const flip = doc.currentFlip;
+  const moves = doc.variant === "masterKiller" ? doc.currentPowerMoves ?? [] : getLegalMoves(doc.state, flip);
   const isBotTurn = doc.vsCpu && doc.state.currentPlayer === "p2";
   if (isBotTurn && doc.variant === "masterKiller" && doc.mk && moves.length === 0 && !doc.rescueAttempted && elapsed >= BOT_RESCUE_THINK_MS) {
     const power = fromWirePower(doc.mk);
-    const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], doc.currentFlip, rand);
+    const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
     if (action) return applyBotAction(doc, "p2", action, now, rand);
     doc = { ...doc, rescueAttempted: true };
   }
@@ -1347,11 +1348,11 @@ function tickOnce(doc, now, rand) {
   if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS) {
     if (doc.variant === "masterKiller" && doc.mk) {
       const power = fromWirePower(doc.mk);
-      const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], doc.currentFlip, rand);
+      const action = pickBotPowerAction(doc.state, power, doc.currentPowerMoves ?? [], flip, rand);
       if (action) return applyBotAction(doc, "p2", action, now, rand);
       return doc;
     }
-    const botMoves = getLegalMoves(doc.state, doc.currentFlip);
+    const botMoves = getLegalMoves(doc.state, flip);
     if (botMoves.length === 0) return doc;
     const idx = pickBotMove(doc.state, botMoves, rand);
     const move = botMoves[idx];
@@ -1607,7 +1608,8 @@ async function POST(request) {
     const now = Date.now();
     const action = msg;
     const r = await withDoc(room, (doc) => {
-      const stepped = applyAction(touchSeat(doc, seat, now), seat, action, now);
+      const pre = tick(touchSeat(doc, seat, now), now);
+      const stepped = applyAction(pre, seat, action, now);
       return { doc: tick(stepped.doc, now), error: stepped.error };
     });
     if (!r) return json({ error: "Room not found" }, 404);

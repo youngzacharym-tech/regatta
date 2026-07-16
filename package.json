@@ -15,17 +15,14 @@
     "build:api": "esbuild api/room.ts --bundle --platform=node --format=esm --target=node20 --external:ioredis --outfile=api/room.js",
     "build": "npm run build:stage",
     "deploy": "npm run build:api && npx vercel deploy --prod",
-    "test-referee": "tsx test-two-random-clients.ts"
+    "test-engine": "tsx test-engine-drive.ts"
   },
   "dependencies": {
-    "@vercel/functions": "^3.7.5",
     "ioredis": "^5.11.1",
-    "tsx": "^4.19.2",
-    "ws": "^8.18.0"
+    "tsx": "^4.19.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/ws": "^8.5.13",
     "esbuild": "^0.28.1"
   }
 }

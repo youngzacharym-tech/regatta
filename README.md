@@ -33,12 +33,18 @@ Home Screen" on a phone)*
 - **`rulebook.ts`** — pure game logic, no I/O. Both client and server import
   it so they can never disagree on legality. The locked-in rules are
   documented at the top of the file.
-- **`referee.ts`** — the local/dev server: WebSocket referee + static file
-  host in one Node process. Owns coin flips and validates every move.
-- **`api/ws.ts`** — the same referee re-architected for Vercel: rooms live
-  in Redis (Upstash), broadcasts go through pub/sub, clients auto-reconnect
-  with seat tokens. Deployed as a pre-bundled function (`npm run build:api`).
-- **`bot.ts`** — the CPU opponent (ranked heuristic, shared by both servers).
+- **`master-killer.ts`** — the class-powers variant's rulebook (Archer /
+  Mage / Warrior, charges, ultimates), same purity rules.
+- **`room-engine.ts`** — the ONE turn engine every transport shares: a room
+  is a pure `RoomDoc` value, timed transitions are absolute deadlines fired
+  by `tick()`, and every commit appends a replayable event. No I/O.
+- **`referee.ts`** — the local/dev server: static files + the `/api/room`
+  polling endpoint over an in-memory Map.
+- **`api/room.ts`** — the same endpoint on Vercel: rooms live in Redis
+  (Upstash) behind a version CAS; clients long-poll, so nothing holds a
+  connection open and nothing gets recycled. Deployed as a pre-bundled
+  function (`npm run build:api`).
+- **`bot.ts` / `master-killer-bot.ts`** — the CPU opponent (shared brain).
 - **`stage/`** — the Three.js client (Vite). `stage/src/layout.ts` maps the
   abstract 15-tile path onto measured positions on the sculpted board.
 
@@ -46,7 +52,7 @@ Home Screen" on a phone)*
 
 ```bash
 npm install
-npm start          # builds nothing — serves stage/dist + WebSocket on :8080
+npm start          # builds nothing — serves stage/dist + /api/room on :8080
 ```
 
 If you've changed client code, rebuild the stage first:
@@ -62,15 +68,16 @@ Useful scripts:
 
 - `npm run batch` — 1,000 random games through the rulebook (rules
   regression: terminations, win split, no stalemates).
-- `node test-lobby.cjs` — lobby integration test against a local server
-  (rooms, CPU game to completion, disconnect handling).
+- `npm run test-engine` — full games driven through the room engine the way
+  the polling transport drives it (invariants + balance stats).
+- `npx tsx test-master-killer.ts` — the Master Killer scenario suite.
 
 ## Deploy
 
-Production runs on Vercel (WebSocket function + Upstash Redis + static PWA):
+Production runs on Vercel (polling function + Upstash Redis + static PWA):
 
 ```bash
-npm run deploy     # bundles api/ws.ts, then `vercel deploy --prod`
+npm run deploy     # bundles api/room.ts, then `vercel deploy --prod`
 ```
 
 Requires the Vercel CLI to be authenticated and an Upstash Redis integration
