@@ -150,10 +150,26 @@ window.addEventListener("resize", resize);
 // Re-frame on every return to visible, bfcache restore, and (belt and
 // braces — iOS reports post-rotation dimensions late) orientation change.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) resize();
+  if (document.hidden) return;
+  resize();
+  // iOS also reclaims WebGL contexts from backgrounded pages. When that
+  // happens the canvas freezes on its LAST rendered frame while the DOM and
+  // polling stay alive — the game looks wedged (old board behind the menu,
+  // mug stuck mid-drink) but is actually still running. If the context is
+  // still dead after the restore event has had a beat, reload: the seat
+  // token in sessionStorage resumes the match seamlessly.
+  if (renderer.getContext().isContextLost()) {
+    setTimeout(() => {
+      if (renderer.getContext().isContextLost()) location.reload();
+    }, 1500);
+  }
 });
 window.addEventListener("pageshow", resize);
 window.addEventListener("orientationchange", () => setTimeout(resize, 250));
+// Without preventDefault on contextlost, the browser never even ATTEMPTS a
+// restore — this pair is what lets the reload above almost never be needed.
+canvas.addEventListener("webglcontextlost", (e) => e.preventDefault());
+canvas.addEventListener("webglcontextrestored", () => resize());
 resize();
 
 // ---------------------------------------------------------------------------
@@ -1735,16 +1751,32 @@ canvas.addEventListener("pointerdown", () => {
 
 // The door out — back to the main menu, with a "you sure?" beat first so a
 // stray tap can't abandon a live match. Leaving clears the saved seat, so
-// the next load doesn't auto-resume a table we walked away from.
+// the next load doesn't auto-resume a table we walked away from. Solo games
+// (CPU and tutorial) also offer Restart: fresh game, same mode — a tutorial
+// restarts its coaching from the very top.
 const exitToggle = document.getElementById("exit-toggle") as HTMLButtonElement;
 const exitConfirm = document.getElementById("exit-confirm") as HTMLDivElement;
-exitToggle.addEventListener("click", () => exitConfirm.classList.toggle("show"));
+const exitRestart = document.getElementById("exit-restart") as HTMLButtonElement;
+exitToggle.addEventListener("click", () => {
+  exitRestart.style.display = inCpuGame ? "" : "none"; // no restarting an opponent
+  exitConfirm.classList.toggle("show");
+});
 (document.getElementById("exit-no") as HTMLButtonElement).addEventListener("click", () => {
   exitConfirm.classList.remove("show");
 });
 (document.getElementById("exit-yes") as HTMLButtonElement).addEventListener("click", () => {
   exitConfirm.classList.remove("show");
   resetToMenu("");
+});
+exitRestart.addEventListener("click", () => {
+  exitConfirm.classList.remove("show");
+  const wasTutorial = tutorialMode;
+  const variant = myVariant; // resetToMenu wipes both — capture first
+  resetToMenu("");
+  menuEl.classList.remove("show"); // straight into the fresh game, no menu flash
+  tutorialMode = wasTutorial;
+  coachShown.clear();
+  sendToServer({ type: "join", mode: "cpu", variant });
 });
 
 // ---------------------------------------------------------------------------
@@ -2505,7 +2537,6 @@ function resumeSession(s: SeatSession) {
 const menuEl = document.getElementById("menu") as HTMLDivElement;
 const menuError = document.getElementById("menu-error") as HTMLDivElement;
 const menuCodeInput = document.getElementById("menu-code") as HTMLInputElement;
-const menuVariantToggle = document.getElementById("menu-variant-toggle") as HTMLButtonElement;
 const roomInfoEl = document.getElementById("room-info") as HTMLDivElement;
 const roomCodeEl = document.getElementById("room-code") as HTMLDivElement;
 const roomLinkEl = document.getElementById("room-link") as HTMLDivElement;
@@ -2525,23 +2556,21 @@ function selectedVariant(): "classic" | "masterKiller" {
 const menuCpuBtn = document.getElementById("menu-cpu") as HTMLButtonElement;
 const menuCreateBtn = document.getElementById("menu-create") as HTMLButtonElement;
 const menuBrowseBtn = document.getElementById("menu-browse") as HTMLButtonElement;
+const menuModeSeg = document.getElementById("menu-mode-seg") as HTMLDivElement;
 function applyMenuPick() {
-  const mk = menuPick === "masterKiller";
   const tut = menuPick === "tutorial";
-  menuVariantToggle.textContent = tut
-    ? "✎ Regatta Tutorial"
-    : mk
-      ? "⚔︎ Ruleset · Master Killer"
-      : "Ruleset · Classic";
-  menuVariantToggle.classList.toggle("variant-mk", mk);
-  menuVariantToggle.classList.toggle("variant-tut", tut);
+  for (const b of menuModeSeg.querySelectorAll("button")) {
+    b.classList.toggle("on", b.dataset.pick === menuPick);
+  }
   // The tutorial is a guided solo sail — rooms make no sense there.
   menuCpuBtn.textContent = tut ? "Begin Tutorial" : "Play vs Computer";
   menuCreateBtn.style.display = tut ? "none" : "";
   menuBrowseBtn.style.display = tut ? "none" : "";
 }
-menuVariantToggle.addEventListener("click", () => {
-  menuPick = menuPick === "classic" ? "masterKiller" : menuPick === "masterKiller" ? "tutorial" : "classic";
+menuModeSeg.addEventListener("click", (e) => {
+  const b = (e.target as HTMLElement).closest("button[data-pick]") as HTMLButtonElement | null;
+  if (!b) return;
+  menuPick = b.dataset.pick as typeof menuPick;
   applyMenuPick();
 });
 applyMenuPick();

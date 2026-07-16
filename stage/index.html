@@ -671,20 +671,35 @@
         padding: 14px 20px; font-size: 15px; letter-spacing: 0.02em;
         margin-bottom: 11px;
       }
-      /* The ruleset pick is a quiet pill, not a fourth loud action —
-         hierarchy: what you PLAY is louder than what rules you play by. */
-      #menu button.mode.variant-toggle {
-        width: auto; margin: 0 auto 20px;
-        background: rgba(246, 227, 164, 0.03);
-        border: 1px solid rgba(216, 184, 119, 0.4); border-radius: 999px;
-        color: #cdb68a; box-shadow: none;
-        font-size: 11px; font-weight: 600;
-        letter-spacing: 0.18em; text-transform: uppercase;
-        padding: 9px 18px;
+      /* The game-mode pick is a labeled segmented control — three obvious
+         side-by-side choices with the selected one filled, so nobody has to
+         guess that the mode is changeable. Selected colors keep each mode's
+         identity: gold classic, ember Master Killer, sage tutorial. */
+      #menu .menu-eyebrow {
+        font-size: 10px; letter-spacing: 0.24em; text-transform: uppercase;
+        color: #8a7a63; margin-bottom: 8px;
       }
-      #menu button.mode.variant-toggle:hover {
-        border-color: rgba(246, 227, 164, 0.75); color: #f0dfae;
-        background: rgba(246, 227, 164, 0.07); filter: none;
+      #menu-mode-seg { display: flex; gap: 6px; margin-bottom: 20px; }
+      #menu-mode-seg button {
+        flex: 1; padding: 10px 8px; border-radius: 9px; cursor: pointer;
+        border: 1px solid rgba(216, 184, 119, 0.35);
+        background: rgba(246, 227, 164, 0.03);
+        color: #b39a6d; font-size: 11px; font-weight: 600;
+        letter-spacing: 0.07em; text-transform: uppercase; white-space: nowrap;
+      }
+      #menu-mode-seg button:hover { border-color: rgba(246, 227, 164, 0.65); color: #e8d6a8; }
+      #menu-mode-seg button.on {
+        background: linear-gradient(180deg, #f0d189 0%, #c9a35c 50%, #a67c33 100%);
+        border-color: #f6e3a4; color: #2a1a08;
+        text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
+      }
+      #menu-mode-seg button[data-pick="masterKiller"].on {
+        background: linear-gradient(180deg, #8a3a3a, #5a2020);
+        border-color: #ffb9a8; color: #ffd6cb; text-shadow: none;
+      }
+      #menu-mode-seg button[data-pick="tutorial"].on {
+        background: linear-gradient(180deg, #7a925c, #4c5f36);
+        border-color: #d6e8aa; color: #f0f7dd; text-shadow: none;
       }
       /* --- Room browser (lobby) --- */
       #lobby {
@@ -897,26 +912,6 @@
         #classpick button.class .class-desc { font-size: 11px; }
       }
 
-      /* --- Menu's Master Killer mode toggle --- */
-      #menu button.mode.variant-toggle.variant-mk {
-        background: rgba(122, 45, 45, 0.28);
-        border-color: rgba(255, 154, 138, 0.55);
-        color: #ffb9a8;
-      }
-      #menu button.mode.variant-toggle.variant-mk:hover {
-        border-color: rgba(255, 185, 168, 0.8); color: #ffd6cb;
-        background: rgba(122, 45, 45, 0.4);
-      }
-      #menu button.mode.variant-toggle.variant-tut {
-        background: rgba(94, 118, 66, 0.24);
-        border-color: rgba(190, 214, 140, 0.5);
-        color: #d5e4ae;
-      }
-      #menu button.mode.variant-toggle.variant-tut:hover {
-        border-color: rgba(214, 232, 170, 0.8); color: #e9f2cf;
-        background: rgba(94, 118, 66, 0.36);
-      }
-
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
         position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
@@ -965,6 +960,7 @@
       <div class="msg">Leave the table?</div>
       <div class="row">
         <button id="exit-yes">Leave</button>
+        <button id="exit-restart">Restart</button>
         <button id="exit-no">Stay</button>
       </div>
     </div>
@@ -1014,7 +1010,12 @@
         <h1 class="gilt-title">MASTER KILLER</h1>
         <div class="tagline">a race across the board</div>
         <div class="menu-rule"></div>
-        <button class="mode variant-toggle gilt-btn" id="menu-variant-toggle" type="button">Ruleset · Classic</button>
+        <div class="menu-eyebrow">Choose your game</div>
+        <div id="menu-mode-seg">
+          <button data-pick="classic" class="on" type="button">Classic</button>
+          <button data-pick="masterKiller" type="button">Master Killer</button>
+          <button data-pick="tutorial" type="button">Tutorial</button>
+        </div>
         <button class="mode gilt-btn primary" id="menu-cpu">Play vs Computer</button>
         <button class="mode gilt-btn" id="menu-create">Create Room</button>
         <button class="mode gilt-btn" id="menu-browse">Join Room</button>
