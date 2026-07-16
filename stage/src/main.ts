@@ -1488,6 +1488,11 @@ canvas.addEventListener("pointerdown", (e) => {
       renderHud(pending.state, pending.flip);
       renderMoves(pending.legalMoves, true);
       renderPowerActions(true);
+      if (pending.legalMoves && pending.legalMoves.length > 0)
+        coach(
+          "move",
+          "Now tap a glowing stone to sail it that many paces. Your route: down your shore, up the shared middle, then back home to the dock.",
+        );
     }
     return;
   }
@@ -1847,6 +1852,30 @@ function showProc(klass: PlayerClass, text: string, glyphs?: [string, string]) {
   procEl.classList.add("show");
 }
 
+// --- Tutorial coach ---------------------------------------------------------
+// "Regatta Tutorial" from the menu is a REAL classic game vs the CPU with a
+// coach riding along: each first (flip-off, roll, move, shield, capture,
+// exact-roll home, the swig) gets one plain-words card, then never repeats.
+// Pure presentation — the server doesn't know tutorials exist, and a reload
+// mid-tutorial simply resumes as a normal CPU game.
+let tutorialMode = false;
+const coachShown = new Set<string>();
+const coachEl = document.getElementById("coach") as HTMLDivElement;
+const coachTextEl = coachEl.querySelector(".coach-text") as HTMLDivElement;
+
+function coach(step: string, text: string) {
+  if (!tutorialMode || coachShown.has(step)) return;
+  coachShown.add(step);
+  coachTextEl.textContent = text;
+  coachEl.classList.remove("show");
+  void coachEl.offsetWidth; // restart the slide-in
+  coachEl.classList.add("show");
+}
+function hideCoach() {
+  coachEl.classList.remove("show");
+}
+coachEl.addEventListener("click", hideCoach);
+
 function playerLabel(p: PlayerId): string {
   // Seat-relative: the viewer is always "Red", the opponent always "Blue".
   return p === (myRole ?? "p1") ? "Red" : "Blue";
@@ -1899,6 +1928,10 @@ function announceFromState(msg: {
       msg.skipReason === "flip-zero"
         ? "flipped 0 — skip"
         : "no legal move — skip";
+    coach(
+      "skip",
+      "A zero — the turn passes. So does having no legal move. It happens to every sailor; the coins owe you nothing.",
+    );
     showAnnouncement(`${label} turn: ${reason}${chargeFor(msg.skippedPlayer)}`, "skip");
     return;
   }
@@ -2006,6 +2039,10 @@ function announceFromState(msg: {
       return;
     }
     if (m.landsOnShield) {
+      coach(
+        "shield",
+        "A shield tile! Landing on one grants an extra turn, and the stone standing there cannot be captured.",
+      );
       showAnnouncement(`${subject} landed on shield (${tileDisplay(m.to)}) — extra turn${suffix}`, "shield");
       return;
     }
@@ -2020,6 +2057,10 @@ function announceFromState(msg: {
     const totalCaptures = m.captures.length + bonusCaptures + sweepCaptures;
     if (totalCaptures > 0) {
       const target = isMe ? "opponent's" : "your";
+      coach(
+        "capture",
+        "A capture! Land on an enemy stone in shared water and it's sent home to start its journey over. Stones on your own shore are always safe.",
+      );
       showAnnouncement(
         `${subject} captured ${target} token${totalCaptures > 1 ? "s" : ""} on ${tileDisplay(m.to)}${suffix}`,
         "capture",
@@ -2027,6 +2068,10 @@ function announceFromState(msg: {
       return;
     }
     if (m.to >= PATH_LENGTH) {
+      coach(
+        "escape",
+        "A stone made it home! The dock demands an exact roll — overshoot and the stone must wait for another turn.",
+      );
       showAnnouncement(`${subject} escaped a token`, "escape");
       return;
     }
@@ -2223,6 +2268,11 @@ function applyOverlay(v: RoomResponse) {
     updatePlates(null);
     const iFlipped = v.openingFlips[mySide] !== null;
     openingTapArmed = !iFlipped;
+    if (!iFlipped)
+      coach(
+        "welcome",
+        "Welcome aboard! The goal: sail all four of your stones down your shore, through shared water, and home to the far dock. First, the flip-off — tap your silver coins.",
+      );
     hud.innerHTML = iFlipped
       ? `<div>Flip for first move</div><div>Waiting for opponent…</div>`
       : `<div>Flip for first move</div><div style="color:#ffd370">Tap your coins</div>`;
@@ -2242,6 +2292,10 @@ function applyOverlay(v: RoomResponse) {
       // A flip reveal we haven't shown: arm the tap gate (once per flip).
       armedFlipSeq = pendingFlipSeq;
       rollPending = { flip: v.flip, legalMoves: movesForTap, state: v.state };
+      coach(
+        "roll",
+        "Your turn. Tap your glowing coins to roll — every coin that lands design-up is one pace, zero to four.",
+      );
       renderHud(v.state, null);
       hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
       renderMoves(null, false);
@@ -2263,6 +2317,10 @@ function applyOverlay(v: RoomResponse) {
   // Game over — celebrate once per winner.
   if (v.gameOver && shownWinner !== v.gameOver.winner) {
     shownWinner = v.gameOver.winner;
+    coach(
+      "end",
+      "That's Regatta! When you're ready for class powers, pick Master Killer from the menu — every class keeps a chapter in the book.",
+    );
     setStatus(`Game over — ${playerLabel(v.gameOver.winner)} wins`, "ok");
     const { winner, stats } = v.gameOver;
     setTimeout(() => {
@@ -2450,17 +2508,35 @@ let inCpuGame = false;
 // --- Master Killer mode: menu toggle + class-pick overlay ---
 /** Ruleset picked in the menu, sent along with cpu/create joins. Ignored
  *  by the server for mode "join" — you play whatever room you're joining. */
-let selectedVariant: "classic" | "masterKiller" = "classic";
-function updateVariantToggleLabel() {
-  const mk = selectedVariant === "masterKiller";
-  menuVariantToggle.textContent = mk ? "⚔︎ Ruleset · Master Killer" : "Ruleset · Classic";
+let menuPick: "classic" | "masterKiller" | "tutorial" = "classic";
+/** What actually goes on the wire — the tutorial IS classic regatta; the
+ *  coach layer is client-side only. */
+function selectedVariant(): "classic" | "masterKiller" {
+  return menuPick === "masterKiller" ? "masterKiller" : "classic";
+}
+const menuCpuBtn = document.getElementById("menu-cpu") as HTMLButtonElement;
+const menuCreateBtn = document.getElementById("menu-create") as HTMLButtonElement;
+const menuBrowseBtn = document.getElementById("menu-browse") as HTMLButtonElement;
+function applyMenuPick() {
+  const mk = menuPick === "masterKiller";
+  const tut = menuPick === "tutorial";
+  menuVariantToggle.textContent = tut
+    ? "✎ Regatta Tutorial"
+    : mk
+      ? "⚔︎ Ruleset · Master Killer"
+      : "Ruleset · Classic";
   menuVariantToggle.classList.toggle("variant-mk", mk);
+  menuVariantToggle.classList.toggle("variant-tut", tut);
+  // The tutorial is a guided solo sail — rooms make no sense there.
+  menuCpuBtn.textContent = tut ? "Begin Tutorial" : "Play vs Computer";
+  menuCreateBtn.style.display = tut ? "none" : "";
+  menuBrowseBtn.style.display = tut ? "none" : "";
 }
 menuVariantToggle.addEventListener("click", () => {
-  selectedVariant = selectedVariant === "masterKiller" ? "classic" : "masterKiller";
-  updateVariantToggleLabel();
+  menuPick = menuPick === "classic" ? "masterKiller" : menuPick === "masterKiller" ? "tutorial" : "classic";
+  applyMenuPick();
 });
-updateVariantToggleLabel();
+applyMenuPick();
 
 const classpickEl = document.getElementById("classpick") as HTMLDivElement;
 const classpickStatus = document.getElementById("classpick-status") as HTMLDivElement;
@@ -2581,17 +2657,22 @@ function resetToMenu(message: string) {
   clearSession();
   exitToggle.classList.remove("show");
   exitConfirm.classList.remove("show");
+  tutorialMode = false;
+  coachShown.clear();
+  hideCoach();
   hud.textContent = message;
   menuEl.classList.add("show");
 }
 
-(document.getElementById("menu-cpu") as HTMLButtonElement).addEventListener("click", () => {
+menuCpuBtn.addEventListener("click", () => {
   menuError.textContent = "";
-  sendToServer({ type: "join", mode: "cpu", variant: selectedVariant });
+  tutorialMode = menuPick === "tutorial";
+  coachShown.clear();
+  sendToServer({ type: "join", mode: "cpu", variant: selectedVariant() });
 });
 (document.getElementById("menu-create") as HTMLButtonElement).addEventListener("click", () => {
   menuError.textContent = "";
-  sendToServer({ type: "join", mode: "create", variant: selectedVariant });
+  sendToServer({ type: "join", mode: "create", variant: selectedVariant() });
 });
 function submitJoinCode() {
   const code = menuCodeInput.value.trim().toUpperCase();
@@ -2678,7 +2759,7 @@ lobbyEl.addEventListener("click", (e) => {
   if (e.target === lobbyEl) closeLobby();
 });
 (document.getElementById("lobby-private") as HTMLButtonElement).addEventListener("click", () => {
-  doJoin("create", undefined, selectedVariant, true);
+  doJoin("create", undefined, selectedVariant(), true);
 });
 
 
@@ -3081,6 +3162,12 @@ function tick() {
   updateCoins(now);
   updateMugs(now);
   myMugGlow.visible = myAvailableSips() > 0;
+  if (myMugGlow.visible)
+    coach(
+      "swig",
+      "Your mug glows — every stone brought home earns a swig. Tap the mug and drink to the crossing.",
+    );
   renderer.render(scene, camera);
 }
 tick();
+

@@ -158,6 +158,31 @@
         color: #b8a888; margin-bottom: 7px;
       }
       #ability-tip .tip-desc { font-size: 13px; line-height: 1.5; color: var(--parchment); }
+      /* --- Tutorial coach card — bottom center, one lesson at a time --- */
+      #coach {
+        position: fixed; left: 50%; bottom: 78px; transform: translateX(-50%);
+        z-index: 120; max-width: min(470px, 88vw);
+        border: 2px solid transparent; border-radius: 14px;
+        background: linear-gradient(165deg, rgba(40, 27, 16, 0.96), rgba(24, 16, 12, 0.96)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 12px 36px rgba(0, 0, 0, 0.6);
+        padding: 13px 18px 10px; text-align: center; cursor: pointer;
+        display: none;
+      }
+      #coach.show { display: block; animation: coach-in 0.3s ease-out; }
+      @keyframes coach-in {
+        from { opacity: 0; transform: translate(-50%, 10px); }
+        to { opacity: 1; transform: translate(-50%, 0); }
+      }
+      #coach .coach-eyebrow {
+        font-size: 10px; letter-spacing: 0.24em; text-transform: uppercase;
+        color: #d8b877; margin-bottom: 5px;
+      }
+      #coach .coach-text { font-size: 14px; line-height: 1.5; color: var(--parchment); }
+      #coach .coach-hint { font-size: 10px; color: #8a7a63; margin-top: 7px; }
+      @media (max-width: 740px), (max-height: 480px) {
+        #coach { bottom: 62px; padding: 10px 14px 8px; }
+        #coach .coach-text { font-size: 13px; }
+      }
       #status {
         position: fixed; top: 10px; right: 10px;
         border: 2px solid transparent;
@@ -882,6 +907,15 @@
         border-color: rgba(255, 185, 168, 0.8); color: #ffd6cb;
         background: rgba(122, 45, 45, 0.4);
       }
+      #menu button.mode.variant-toggle.variant-tut {
+        background: rgba(94, 118, 66, 0.24);
+        border-color: rgba(190, 214, 140, 0.5);
+        color: #d5e4ae;
+      }
+      #menu button.mode.variant-toggle.variant-tut:hover {
+        border-color: rgba(214, 232, 170, 0.8); color: #e9f2cf;
+        background: rgba(94, 118, 66, 0.36);
+      }
 
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
@@ -967,6 +1001,11 @@
       <div class="tip-name"></div>
       <div class="tip-cost"></div>
       <div class="tip-desc"></div>
+    </div>
+    <div id="coach">
+      <div class="coach-eyebrow">Tutorial</div>
+      <div class="coach-text"></div>
+      <div class="coach-hint">tap to dismiss</div>
     </div>
     <div id="announce"></div>
     <div id="menu">
