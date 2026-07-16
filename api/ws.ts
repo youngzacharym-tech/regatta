@@ -37,7 +37,7 @@ import {
   type PlayerId,
 } from "../rulebook";
 import { pickBotMove } from "../bot";
-import type { ServerMessage, ClientMessage } from "../protocol";
+import type { ServerMessage, ClientMessage, ChatMsg } from "../protocol";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (variant === "classic" guards every branch that touches it).
 import {
@@ -157,6 +157,18 @@ interface RoomDoc {
 
 const roomKey = (code: string) => `room:${code}`;
 const roomChannel = (code: string) => `room:${code}:ch`;
+// Chat lives in its OWN Redis list + pub/sub channel, deliberately separate
+// from the versioned room doc: a chat message must not bump the doc version
+// (it would cancel scheduled auto-skip/bot timers) nor ride the state
+// broadcast (which would re-arm the client's "tap to roll" gate mid-turn).
+const chatKey = (code: string) => `room:${code}:chat`;
+const chatChannel = (code: string) => `room:${code}:chat:ch`;
+const CHAT_MAX = 40; // keep the last N chat lines
+const CHAT_TEXT_MAX = 200; // per-message character cap
+/** Trim, collapse whitespace, cap length. Returns "" for empty/whitespace. */
+function sanitizeChat(text: unknown): string {
+  return String(text ?? "").replace(/\s+/g, " ").trim().slice(0, CHAT_TEXT_MAX);
+}
 
 // Compare-and-set: write only if the stored version matches what we read.
 const CAS_LUA = `
@@ -1149,14 +1161,26 @@ export function GET(request: Request) {
     };
 
     const subscribeToRoom = async (code: string) => {
-      await sub.subscribe(roomChannel(code));
-      sub.on("message", async (_channel, payload) => {
+      await sub.subscribe(roomChannel(code), chatChannel(code));
+      sub.on("message", async (channel, payload) => {
+        // Chat rides its own channel — deliver it and stop, never touching
+        // the game-state driving logic below.
+        if (channel === chatChannel(code)) {
+          send({ type: "chat", log: JSON.parse(payload) as ChatMsg[] });
+          return;
+        }
         const doc = JSON.parse(payload) as RoomDoc;
         sendStateView(doc);
         await maybeDriveClassPick(doc);
         await maybeDriveOpening(doc);
         await maybeDrive(doc);
       });
+    };
+
+    /** Read the room's recent chat history from its Redis list. */
+    const loadChat = async (code: string): Promise<ChatMsg[]> => {
+      const raw = await redis.lrange(chatKey(code), 0, -1);
+      return raw.map((r) => JSON.parse(r) as ChatMsg);
     };
 
     const seatIn = async (doc: RoomDoc, seat: PlayerId, token: string) => {
@@ -1171,6 +1195,9 @@ export function GET(request: Request) {
         variant: doc.variant,
         seatToken: token,
       });
+      // Reconnect / late-join: hand over the recent chat history.
+      const history = await loadChat(doc.code);
+      if (history.length) send({ type: "chat", log: history });
     };
 
     const handleJoin = async (msg: Extract<ClientMessage, { type: "join" }>) => {
@@ -1336,6 +1363,19 @@ export function GET(request: Request) {
             await maybeDriveClassPick(next);
             await maybeDriveOpening(next);
           }
+        } else if (msg.type === "chat") {
+          // Atomic append to the chat list (no CAS needed — it's not the
+          // versioned doc), trim to the cap, refresh its TTL, then publish the
+          // whole bounded log on the chat channel. Concurrent chats can't lose
+          // updates because RPUSH is atomic.
+          const text = sanitizeChat(msg.text);
+          if (!text) return;
+          const entry: ChatMsg = { seat: mySeat, text };
+          await redis.rpush(chatKey(myRoom), JSON.stringify(entry));
+          await redis.ltrim(chatKey(myRoom), -CHAT_MAX, -1);
+          await redis.expire(chatKey(myRoom), ROOM_TTL_S);
+          const log = await loadChat(myRoom);
+          await redis.publish(chatChannel(myRoom), JSON.stringify(log));
         }
       } catch (err) {
         console.error("ws message error", err);

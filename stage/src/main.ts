@@ -1571,6 +1571,69 @@ updateAudioIcon();
 canvas.addEventListener("pointerdown", () => railEl.classList.remove("audio-open"));
 
 // ---------------------------------------------------------------------------
+// In-match chat (PvP only). The chat button lives in the rail; it's shown
+// only in PvP rooms (no one to talk to vs the CPU). Rendering is textContent-
+// only — never innerHTML — so a chat line can never inject markup.
+// ---------------------------------------------------------------------------
+const chatToggle = document.getElementById("chat-toggle") as HTMLButtonElement;
+const chatPanel = document.getElementById("chat-panel") as HTMLDivElement;
+const chatLog = document.getElementById("chat-log") as HTMLDivElement;
+const chatForm = document.getElementById("chat-form") as HTMLFormElement;
+const chatInput = document.getElementById("chat-input") as HTMLInputElement;
+
+function renderChat(log: { seat: PlayerId; text: string }[]) {
+  chatLog.innerHTML = "";
+  if (log.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Say hello…";
+    chatLog.appendChild(empty);
+    return;
+  }
+  for (const m of log) {
+    const mine = m.seat === myRole;
+    const line = document.createElement("div");
+    line.className = `line ${mine ? "me" : "them"}`;
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = mine ? "You:" : "Opponent:";
+    const body = document.createElement("span");
+    body.textContent = m.text; // textContent → no HTML injection
+    line.append(who, body);
+    chatLog.appendChild(line);
+  }
+  chatLog.scrollTop = chatLog.scrollHeight; // stick to newest
+}
+
+function openChat() {
+  chatPanel.classList.add("open");
+  chatToggle.classList.remove("unread");
+  chatInput.focus();
+}
+chatToggle.addEventListener("click", () => {
+  if (chatPanel.classList.contains("open")) chatPanel.classList.remove("open");
+  else openChat();
+});
+chatForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  sendToServer({ type: "chat", text });
+  chatInput.value = "";
+});
+
+/** Show the chat affordance only in PvP; reset its state between matches. */
+function setChatAvailable(pvp: boolean) {
+  chatToggle.classList.toggle("show", pvp);
+  if (!pvp) {
+    chatPanel.classList.remove("open");
+    chatToggle.classList.remove("unread");
+    chatLog.innerHTML = "";
+    chatInput.value = "";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Announcement banner
 //
 // Renders a short, high-contrast message in the center of the screen after
@@ -1857,6 +1920,7 @@ function connect() {
         updatePlates(null); // plates reappear at class pick / first state
         classpickEl.classList.remove("show");
         inCpuGame = msg.vsCpu;
+        setChatAvailable(!msg.vsCpu); // chat is PvP only
         awaitingRejoin = false;
         saveSession({ room: msg.room, seat: msg.player, seatToken: msg.seatToken });
         hideMenu();
@@ -1882,6 +1946,11 @@ function connect() {
         break;
       case "opponentLeft":
         resetToMenu("Opponent left the game");
+        break;
+      case "chat":
+        renderChat(msg.log);
+        // If a message arrived while the panel is closed, badge the button.
+        if (!chatPanel.classList.contains("open")) chatToggle.classList.add("unread");
         break;
       case "opening": {
         hideRoomInfo();
@@ -2116,6 +2185,7 @@ function resetToMenu(message: string) {
   bulwarkTargetIds.clear();
   pickedClasses = { p1: null, p2: null };
   myVariant = "classic";
+  setChatAvailable(false); // hide + clear chat back at the menu
   updatePlates(null);
   for (const marker of markers) {
     marker.mesh.visible = false;

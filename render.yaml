@@ -1,17 +1,25 @@
-# Render deployment config for Regatta.
+# Render deployment config for Regatta / Master Killer.
+#
+# WHY Render (and not Vercel) for this: Vercel functions time-box a held-open
+# WebSocket at maxDuration (~300s), which forced the every-5-minute reconnect.
+# Render runs one long-lived Node process, so the socket stays open — the
+# reconnect goes away by construction.
 #
 # One "web service" that:
-#   1. Installs dependencies (referee: ws, tsx / stage: three, vite, ...)
-#   2. Runs `npm run build` to build the Vite bundle into stage/dist/
-#   3. Starts the referee, which serves both the WebSocket AND the static build
-#      from the same port (Render picks the port and sets $PORT).
+#   1. Installs deps (root: ws, tsx, ioredis / stage: three, vite via build).
+#   2. Runs `npm run build` -> builds the Vite client into stage/dist/.
+#   3. Starts referee.ts, which serves BOTH the static build AND the WebSocket
+#      from the same port (Render sets $PORT). Same-origin, so the client's
+#      production URL resolution (wss://<host>/api/ws) works with no changes.
+#      No Redis needed here — referee.ts holds rooms in memory.
 #
-# Free plan: sleeps after 15 min of inactivity. Cold start ~30 sec on first
-# request. Warm after a client connects. Fine for a friends-list demo.
+# Free plan sleeps after 15 min idle (~30s cold start on the first request
+# after a quiet spell). Switch to the Starter plan in the Render dashboard to
+# keep it warm 24/7 if the cold start is annoying.
 
 services:
   - type: web
-    name: regatta
+    name: regatta-masterkiller
     runtime: node
     plan: free
     autoDeploy: true

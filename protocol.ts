@@ -10,6 +10,15 @@ import type { GameState, Move, PlayerId } from "./rulebook";
 // masterKiller rooms. Classic-mode broadcasts are byte-identical to before.
 import type { PlayerClass, PowerMove } from "./master-killer";
 
+/** One line of in-match chat. `seat` is the sender's protocol seat (the
+ *  client maps it to "You"/"Opponent"); `text` is already trimmed and
+ *  length-capped server-side. Chat is delivered on its own channel, fully
+ *  decoupled from game-state broadcasts. */
+export interface ChatMsg {
+  seat: PlayerId;
+  text: string;
+}
+
 /** Server -> Client */
 export type ServerMessage =
   | {
@@ -167,6 +176,14 @@ export type ServerMessage =
       };
     }
   | {
+      /** In-match text chat (PvP only). The server always sends the full
+       *  bounded log (most recent last), so the client just re-renders it —
+       *  idempotent, and a reconnecting player gets the recent history for
+       *  free. Never rendered as HTML (client uses textContent). */
+      type: "chat";
+      log: ChatMsg[];
+    }
+  | {
       type: "error";
       message: string;
     };
@@ -233,4 +250,10 @@ export type ClientMessage =
       /** Request a fresh match. Only honored when the current match has ended
        *  (state.winner !== null). Either player can trigger; both see the reset. */
       type: "newMatch";
+    }
+  | {
+      /** Send a line of chat (PvP only). Server trims + length-caps it and
+       *  rebroadcasts the whole log to both seats. Empty/whitespace ignored. */
+      type: "chat";
+      text: string;
     };

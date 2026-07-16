@@ -35,7 +35,7 @@ import {
   type Move,
   type PlayerId,
 } from "./rulebook.ts";
-import type { ServerMessage, ClientMessage } from "./protocol.ts";
+import type { ServerMessage, ClientMessage, ChatMsg } from "./protocol.ts";
 import { pickBotMove } from "./bot.ts";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (variant === "classic" guards every branch that touches it).
@@ -68,6 +68,12 @@ import {
 import { pickBotPowerAction } from "./master-killer-bot.ts";
 
 const PORT = Number(process.env.PORT ?? 8080);
+const CHAT_MAX = 40; // keep the last N chat lines
+const CHAT_TEXT_MAX = 200; // per-message character cap
+/** Trim, collapse whitespace, cap length. Returns "" for empty/whitespace. */
+function sanitizeChat(text: unknown): string {
+  return String(text ?? "").replace(/\s+/g, " ").trim().slice(0, CHAT_TEXT_MAX);
+}
 const AUTO_SKIP_DELAY_MS = 500; // gives clients time to render the flip=0/no-move outcome
 const BOT_THINK_MS = 900; // human-feeling pause before the CPU moves
 const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior"];
@@ -165,6 +171,10 @@ class Match {
    *  lastMovePlayer (see protocol.ts's lastBulwarkBlock doc). */
   lastBulwarkBlock: { tokenIds: number[] } | null = null;
 
+  /** In-match text chat (PvP). Bounded to the last CHAT_MAX lines; survives a
+   *  rematch (the Match instance persists through handleNewMatch). */
+  chatLog: ChatMsg[] = [];
+
   constructor(code: string, vsCpu: boolean, variant: "classic" | "masterKiller" = "classic") {
     this.code = code;
     this.vsCpu = vsCpu;
@@ -216,6 +226,16 @@ class Match {
   broadcast(msg: ServerMessage): void {
     this.send("p1", msg);
     this.send("p2", msg);
+  }
+
+  /** Append a chat line and broadcast the whole bounded log. Text is already
+   *  sanitized by the caller; empty is ignored. */
+  handleChat(seat: PlayerId, text: string): void {
+    const clean = sanitizeChat(text);
+    if (!clean) return;
+    this.chatLog.push({ seat, text: clean });
+    if (this.chatLog.length > CHAT_MAX) this.chatLog = this.chatLog.slice(-CHAT_MAX);
+    this.broadcast({ type: "chat", log: this.chatLog });
   }
 
   private broadcastState(): void {
@@ -1046,6 +1066,9 @@ wss.on("connection", (ws) => {
       seatToken: Math.random().toString(36).slice(2),
     });
 
+    // A late joiner (or a rematch) sees any chat that already happened.
+    if (room.chatLog.length) sendMsg({ type: "chat", log: room.chatLog });
+
     if (room.isFull()) {
       console.log(`[${room.code}] match starting`);
       room.beginMatch();
@@ -1087,6 +1110,8 @@ wss.on("connection", (ws) => {
       room.handleChooseMove(role, msg.moveIndex);
     } else if (msg.type === "newMatch") {
       room.handleNewMatch(role);
+    } else if (msg.type === "chat") {
+      room.handleChat(role, msg.text);
     } else {
       sendMsg({
         type: "error",

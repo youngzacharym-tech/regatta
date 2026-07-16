@@ -877,6 +877,13 @@ function fromWirePower(w) {
 }
 var roomKey = (code) => `room:${code}`;
 var roomChannel = (code) => `room:${code}:ch`;
+var chatKey = (code) => `room:${code}:chat`;
+var chatChannel = (code) => `room:${code}:chat:ch`;
+var CHAT_MAX = 40;
+var CHAT_TEXT_MAX = 200;
+function sanitizeChat(text) {
+  return String(text ?? "").replace(/\s+/g, " ").trim().slice(0, CHAT_TEXT_MAX);
+}
 var CAS_LUA = `
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
@@ -1664,14 +1671,22 @@ function GET(request) {
       await applyMasterKillerCharge(doc, seat, move);
     };
     const subscribeToRoom = async (code) => {
-      await sub.subscribe(roomChannel(code));
-      sub.on("message", async (_channel, payload) => {
+      await sub.subscribe(roomChannel(code), chatChannel(code));
+      sub.on("message", async (channel, payload) => {
+        if (channel === chatChannel(code)) {
+          send({ type: "chat", log: JSON.parse(payload) });
+          return;
+        }
         const doc = JSON.parse(payload);
         sendStateView(doc);
         await maybeDriveClassPick(doc);
         await maybeDriveOpening(doc);
         await maybeDrive(doc);
       });
+    };
+    const loadChat = async (code) => {
+      const raw = await redis.lrange(chatKey(code), 0, -1);
+      return raw.map((r) => JSON.parse(r));
     };
     const seatIn = async (doc, seat, token) => {
       mySeat = seat;
@@ -1685,6 +1700,8 @@ function GET(request) {
         variant: doc.variant,
         seatToken: token
       });
+      const history = await loadChat(doc.code);
+      if (history.length) send({ type: "chat", log: history });
     };
     const handleJoin = async (msg) => {
       if (myRoom) {
@@ -1835,6 +1852,15 @@ function GET(request) {
             await maybeDriveClassPick(next);
             await maybeDriveOpening(next);
           }
+        } else if (msg.type === "chat") {
+          const text = sanitizeChat(msg.text);
+          if (!text) return;
+          const entry = { seat: mySeat, text };
+          await redis.rpush(chatKey(myRoom), JSON.stringify(entry));
+          await redis.ltrim(chatKey(myRoom), -CHAT_MAX, -1);
+          await redis.expire(chatKey(myRoom), ROOM_TTL_S);
+          const log = await loadChat(myRoom);
+          await redis.publish(chatChannel(myRoom), JSON.stringify(log));
         }
       } catch (err) {
         console.error("ws message error", err);

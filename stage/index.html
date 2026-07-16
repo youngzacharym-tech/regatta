@@ -222,6 +222,48 @@
       }
       #rail.audio-open #volume { display: block; }
 
+      /* --- In-match chat (PvP only) --- */
+      #chat-toggle { display: none; position: relative; }
+      #chat-toggle.show { display: block; }
+      /* Unread dot when a message arrives while the panel is closed. */
+      #chat-toggle.unread::after {
+        content: ""; position: absolute; top: 6px; right: 6px;
+        width: 11px; height: 11px; border-radius: 50%;
+        background: #ff6a4a; border: 2px solid #17100a;
+      }
+      #chat-panel {
+        position: fixed; right: 14px; bottom: 72px; z-index: 61;
+        width: min(320px, 78vw); height: min(360px, 52vh);
+        display: none; flex-direction: column;
+        background: rgba(20, 12, 6, 0.92);
+        border: 2px solid #7a5c2e; border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+        overflow: hidden;
+      }
+      #chat-panel.open { display: flex; }
+      #chat-log {
+        flex: 1; overflow-y: auto; padding: 10px 12px;
+        font-size: 14px; line-height: 1.4; color: #e8d8c0;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      #chat-log .line { word-wrap: break-word; overflow-wrap: anywhere; }
+      #chat-log .line .who { font-weight: 700; margin-right: 5px; }
+      #chat-log .line.me .who { color: #ffd370; }
+      #chat-log .line.them .who { color: #80b8ff; }
+      #chat-log .empty { color: #8a7a63; font-style: italic; }
+      #chat-form {
+        display: flex; border-top: 1px solid rgba(122, 92, 46, 0.6);
+      }
+      #chat-input {
+        flex: 1; min-width: 0; background: transparent; color: #fff;
+        border: none; padding: 11px 12px; font-size: 14px; font-family: inherit;
+      }
+      #chat-input:focus { outline: none; }
+      #chat-input::placeholder { color: #8a7a63; }
+      @media (max-width: 740px), (max-height: 480px) {
+        #chat-panel { bottom: 64px; height: min(300px, 60vh); }
+      }
+
       @media (max-width: 740px), (max-height: 480px) {
         .plate-ring { width: 128px; height: 128px; }
         #plate-them .plate-ring { width: 96px; height: 96px; }
@@ -503,10 +545,17 @@
       </div>
     </div>
     <div id="rail">
+      <button id="chat-toggle" title="Chat">💬</button>
       <button id="guide-toggle" title="How to play">📖</button>
       <button id="install-toggle" title="Install Regatta">⬇</button>
       <button id="mute-toggle" title="Sound">🔊</button>
       <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
+    </div>
+    <div id="chat-panel">
+      <div id="chat-log"></div>
+      <form id="chat-form">
+        <input id="chat-input" type="text" maxlength="200" placeholder="Message your opponent…" autocomplete="off" />
+      </form>
     </div>
     <div id="plate-them" class="plate">
       <div class="plate-ring">
