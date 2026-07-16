@@ -854,6 +854,34 @@ function makeTightGlowTexture(): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
+// Movable-stone cue: a crisp ring with a soft pool of light inside it,
+// stamped on the ground under each stone the current flip lets you move.
+// Drawn in white — the gold lives on the material's color — so retinting
+// (say, per class) stays a one-line change.
+function makeEligibleRingTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  // Soft inner pool — the familiar "light on wood" language of the table.
+  const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  grad.addColorStop(0.0, "rgba(255, 255, 255, 0.4)");
+  grad.addColorStop(0.55, "rgba(255, 255, 255, 0.1)");
+  grad.addColorStop(0.95, "rgba(255, 255, 255, 0.0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, s, s);
+  // Crisp ring, feathered a couple of px by shadow blur so it never aliases.
+  g.strokeStyle = "rgba(255, 255, 255, 0.95)";
+  g.lineWidth = 7;
+  g.shadowBlur = 6;
+  g.shadowColor = "rgba(255, 255, 255, 0.9)";
+  g.beginPath();
+  g.arc(s / 2, s / 2, 93, 0, Math.PI * 2);
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 const myCoinGlow = new THREE.Mesh(
   new THREE.PlaneGeometry(1.05, 1.05),
   new THREE.MeshBasicMaterial({
@@ -965,12 +993,46 @@ fireSprite.scale.set(fireCfg.size, fireCfg.size * 0.73, 1);
 scene.add(fireSprite);
 
 // ---------------------------------------------------------------------------
+// Movable-stone rings — the "tap here" affordance. One additive ground quad
+// per stone (crisp gold ring + soft underglow), shown only under stones the
+// current flip lets you move, breathing in sync through the shared material
+// (see tick()). Living on the ground keeps the stone's emissive channel free
+// for the ward/bulwark/safe status tints.
+// ---------------------------------------------------------------------------
+
+/** Ring height: 8 mm above the tile stamp (stone base is target.y - 0.08). */
+const ELIGIBLE_RING_Y_OFFSET = -0.072;
+/** Tap-confirm pulse length — the "selection" flash on a committed move. */
+const CONFIRM_PULSE_MS = 240;
+const eligibleRingGeo = new THREE.PlaneGeometry(0.66, 0.66);
+const eligibleRingMat = new THREE.MeshBasicMaterial({
+  map: makeEligibleRingTexture(),
+  color: 0xffc36a, // same gold family as the coin/mug cues — "tap here"
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false, // depthTest stays ON: the stone occludes its far arc
+});
+const ringMeshes: THREE.Mesh[] = markers.map(() => {
+  const m = new THREE.Mesh(eligibleRingGeo, eligibleRingMat);
+  m.rotation.x = -Math.PI / 2;
+  m.renderOrder = 1;
+  m.visible = false;
+  scene.add(m);
+  return m;
+});
+// The confirm pulse animates opacity alone, so it needs its own material.
+const confirmRing = new THREE.Mesh(eligibleRingGeo, eligibleRingMat.clone());
+confirmRing.rotation.x = -Math.PI / 2;
+confirmRing.renderOrder = 1;
+confirmRing.visible = false;
+scene.add(confirmRing);
+/** Start stamp of the running confirm pulse, or 0 when idle. */
+let confirmStart = 0;
+
+// ---------------------------------------------------------------------------
 // Capture-hover glow — hovering an enemy token that one of your legal moves
 // can take bathes it in a warm halo.
 // ---------------------------------------------------------------------------
-
-/** Marker indexes pulsed as movable last frame (see the render loop). */
-const pulsedEligible = new Set<number>();
 
 const hoverGlow = new THREE.Mesh(
   new THREE.PlaneGeometry(0.66, 0.66),
@@ -1102,7 +1164,8 @@ function refreshMarkers(state: GameState) {
     marker.mesh.visible = true;
     // Ownership shows through the sculpt's relief design (and, before the
     // sculpts load, the placeholder's flat color) — nothing to recolor here.
-    // (Emissive is applied per-frame in the render loop — see tick().)
+    // (Emissive belongs to the status tints alone — see updateTokenTints();
+    // move eligibility renders as ground rings in tick(), off the material.)
 
     // Slot counters stay keyed by the true owner; only the rendered side is
     // remapped so my tokens take the near red row on every client.
@@ -1190,12 +1253,7 @@ function refreshMarkers(state: GameState) {
  *  (currentPower === null) always take the clear-everything branch — a
  *  no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
-/** Last state handed to updateTokenTints — the eligible-stone pulse in the
- *  render loop re-applies these tints when a stone stops being movable. */
-let lastTintedState: GameState | null = null;
-
 function updateTokenTints(state: GameState) {
-  lastTintedState = state;
   const safe = currentPower ? new Set(currentPower.safeTokens) : null;
   const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
   const fakePower: PowerState | null = currentPower
@@ -1912,6 +1970,17 @@ canvas.addEventListener("pointerdown", (e) => {
   const moveIdx = moveIndexByToken.get(tokenId);
   if (moveIdx === undefined) return;
   sendToServer({ type: "chooseMove", moveIndex: moveIdx });
+  // Confirm flash: the tapped stone's ring pops outward as the move commits.
+  const cm = markers[tokenId];
+  confirmRing.position.set(
+    cm.mesh.position.x,
+    cm.target.y + ELIGIBLE_RING_Y_OFFSET,
+    cm.mesh.position.z,
+  );
+  confirmRing.scale.setScalar(1);
+  (confirmRing.material as THREE.MeshBasicMaterial).opacity = 0.85;
+  confirmRing.visible = true;
+  confirmStart = performance.now();
   // Immediate feedback: clear eligibility + hover glow this frame.
   eligibleTokenIds.clear();
   moveIndexByToken.clear();
@@ -3073,6 +3142,8 @@ function resetToMenu(message: string) {
   eligibleTokenIds.clear();
   capturableIds.clear();
   hideHoverGlow();
+  confirmRing.visible = false;
+  confirmStart = 0;
   currentPower = null;
   currentPowerMoves = null;
   pushArmed = false;
@@ -3603,29 +3674,38 @@ function tick() {
       marker.mesh.position.lerp(marker.target, lerp);
     }
   }
-  // Movable stones breathe gold — "stones you may move light up", as the
-  // guide and tutorial promise. The pulse rides OVER the status tints
-  // (ward/bulwark/safe) while it's your turn; the moment a stone stops
-  // being movable, the plain tints are re-applied from the last state.
-  if (pulsedEligible.size > 0) {
-    let stale = false;
-    for (const i of pulsedEligible)
-      if (!eligibleTokenIds.has(i)) {
-        stale = true;
-        break;
-      }
-    if (stale) {
-      pulsedEligible.clear();
-      if (lastTintedState) updateTokenTints(lastTintedState);
-    }
+  // Movable stones wear a breathing gold ring on the ground — "stones you
+  // may move light up", as the guide and tutorial promise. The affordance
+  // lives entirely OFF the stone material, so the ward/bulwark/safe status
+  // tints stay visible on a movable stone. Ring visibility is recomputed
+  // from eligibleTokenIds every frame — no restore bookkeeping to go stale.
+  const breath = 0.5 + 0.5 * Math.sin(now * 0.0035); // ~1.8 s calm period
+  const eased = breath * breath * (3 - 2 * breath); // smoothstep: linger, glide
+  eligibleRingMat.opacity = 0.5 + 0.38 * eased;
+  const ringScale = 0.97 + 0.06 * eased; // ring Ø 0.466–0.494, < tile pitch
+  for (let i = 0; i < markers.length; i++) {
+    const marker = markers[i];
+    const ring = ringMeshes[i];
+    ring.visible =
+      marker.mesh.visible && !marker.flying && eligibleTokenIds.has(i);
+    if (!ring.visible) continue;
+    ring.position.set(
+      marker.mesh.position.x,
+      marker.target.y + ELIGIBLE_RING_Y_OFFSET,
+      marker.mesh.position.z,
+    );
+    ring.scale.setScalar(ringScale);
   }
-  if (eligibleTokenIds.size > 0) {
-    const glow = 0.4 + 0.35 * Math.abs(Math.sin(now * 0.004));
-    for (const i of eligibleTokenIds) {
-      const mat = markers[i].mesh.material as THREE.MeshStandardMaterial;
-      mat.emissive.setHex(0xffc36a);
-      mat.emissiveIntensity = glow;
-      pulsedEligible.add(i);
+  // Tap-confirm pulse: the committed stone's ring pops out and fades.
+  if (confirmStart > 0) {
+    const t = (now - confirmStart) / CONFIRM_PULSE_MS;
+    if (t >= 1) {
+      confirmStart = 0;
+      confirmRing.visible = false;
+    } else {
+      const out = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      confirmRing.scale.setScalar(1 + 0.32 * out);
+      (confirmRing.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - out);
     }
   }
   // Gentle breathing on the capture-hover glow.
