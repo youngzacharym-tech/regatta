@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-    <title>Regatta</title>
-    <meta name="description" content="Regatta — a two-player race across the board. Play a friend or the computer." />
+    <title>Master Killer</title>
+    <meta name="description" content="Master Killer — a two-player race across the board with class powers. Play a friend or the computer." />
     <meta name="theme-color" content="#16161e" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/icon-192.png" type="image/png" />
@@ -15,10 +15,77 @@
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #111; color: #eee; font-family: system-ui, sans-serif; }
       #canvas { display: block; width: 100%; height: 100%; }
+
+      /* ================= Gilded UI system =================
+         Derived from the class-portrait frames: dark carved wood, polished
+         gold bevels, and inset marquise gems. Panels use the gradient-border
+         technique (leather padding-box + gold border-box). */
+      :root {
+        --wood-dark: #221409;
+        --gold-hi: #f6e3a4;
+        --gold: #c9a35c;
+        --gold-mid: #a07c3c;
+        --gold-dark: #6d5122;
+        --gold-text: #e8c87e;
+        --parchment: #e8d8c0;
+        --gem-amber: #ffb347;
+        --leather-grad: linear-gradient(165deg, #2a1c12 0%, #191110 45%, #211712 100%);
+        --gold-rim: linear-gradient(160deg, var(--gold-hi) 0%, var(--gold) 20%, var(--gold-dark) 45%, var(--gold-hi) 65%, var(--gold-mid) 82%, var(--gold-dark) 100%);
+      }
+      .gilt-card {
+        position: relative;
+        border: 3px solid transparent;
+        border-radius: 18px;
+        background: var(--leather-grad) padding-box, var(--gold-rim) border-box;
+        box-shadow:
+          0 0 0 3px var(--wood-dark),
+          0 0 0 4px rgba(246, 227, 164, 0.22),
+          0 24px 70px rgba(0, 0, 0, 0.78),
+          inset 0 0 44px rgba(12, 6, 2, 0.55);
+      }
+      .frame-gem {
+        position: absolute; width: 15px; height: 15px;
+        transform: rotate(45deg);
+        background: radial-gradient(circle at 35% 30%, #fff5d0 0%, var(--gem-amber) 45%, #a05e10 100%);
+        border: 2px solid var(--gold-dark); border-radius: 3px;
+        box-shadow: 0 0 9px 2px rgba(255, 179, 71, 0.5), inset 0 0 4px rgba(255, 255, 255, 0.55);
+        pointer-events: none; z-index: 1;
+      }
+      .frame-gem.top { top: -10px; left: 50%; margin-left: -8px; }
+      .frame-gem.bottom { bottom: -10px; left: 50%; margin-left: -8px; }
+      .gilt-title {
+        background: linear-gradient(180deg, #f8ecc0 0%, var(--gold-text) 42%, #9a7433 75%, #e2bf72 100%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+        letter-spacing: 2px;
+        filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.8));
+      }
+      .gilt-btn {
+        border: 2px solid transparent;
+        border-radius: 10px;
+        background: linear-gradient(180deg, #32241a, #1e1510) padding-box, var(--gold-rim) border-box;
+        color: var(--gold-text);
+        font-weight: 600; cursor: pointer;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      }
+      .gilt-btn:hover {
+        background: linear-gradient(180deg, #3e2c1e, #241a12) padding-box, var(--gold-rim) border-box;
+        filter: brightness(1.12);
+      }
+      .gilt-btn.primary {
+        background:
+          linear-gradient(180deg, #f0d189 0%, #c9a35c 45%, #a67c33 55%, #dcb96a 100%) padding-box,
+          linear-gradient(160deg, #fff3c8, #7a5c2e) border-box;
+        color: #2a1a08; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+      }
+      .gilt-btn.primary:hover { filter: brightness(1.07); }
       #hud {
         position: fixed; top: 10px; left: 10px;
-        background: rgba(0,0,0,0.6); padding: 10px 14px; border-radius: 8px;
+        border: 2px solid transparent;
+        background: linear-gradient(165deg, rgba(38, 26, 16, 0.92), rgba(22, 15, 12, 0.92)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 8px 24px rgba(0, 0, 0, 0.55);
+        padding: 10px 14px; border-radius: 12px;
         font-size: 14px; line-height: 1.5; min-width: 180px;
+        color: var(--parchment);
       }
       #hud b { color: #fff; }
       #moves {
@@ -26,16 +93,40 @@
         display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
       }
       #moves button {
-        background: #4a5; color: white; border: none; padding: 10px 14px;
-        border-radius: 6px; font-size: 14px; cursor: pointer;
-        font-family: monospace;
+        border: 2px solid transparent; padding: 10px 16px;
+        border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer;
+        background: linear-gradient(180deg, #32241a, #1e1510) padding-box, var(--gold-rim) border-box;
+        color: var(--gold-text); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45);
       }
-      #moves button:hover { background: #5b6; }
+      #moves button:hover { filter: brightness(1.15); }
       #moves button:active { transform: translateY(1px); }
+      /* Active abilities read as jewel-set gold: amethyst for actives,
+         radiant for ultimates, gold-hot while aiming. */
+      #moves button.ability {
+        background: linear-gradient(180deg, #4b3070, #2c1a45) padding-box, var(--gold-rim) border-box;
+        color: #efe2ff;
+      }
+      #moves button.ability.ultimate {
+        background: linear-gradient(180deg, #7a2d8c, #451a52) padding-box, linear-gradient(160deg, #ffe9b0, #b06ee0 55%, #ffd370) border-box;
+        color: #ffedff;
+      }
+      #moves button.ability.armed,
+      #moves button.armed {
+        background: linear-gradient(180deg, #b57a1e, #7c4d0c) padding-box, linear-gradient(160deg, #fff3c8, #a06010) border-box;
+        color: #fff6dd;
+      }
+      #moves button.play-again {
+        background: linear-gradient(180deg, #f0d189 0%, #c9a35c 45%, #a67c33 55%, #dcb96a 100%) padding-box, linear-gradient(160deg, #fff3c8, #7a5c2e) border-box;
+        color: #2a1a08; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+      }
       #status {
         position: fixed; top: 10px; right: 10px;
-        background: rgba(0,0,0,0.6); padding: 6px 10px; border-radius: 6px;
-        font-size: 12px;
+        border: 2px solid transparent;
+        background: linear-gradient(165deg, rgba(38, 26, 16, 0.9), rgba(22, 15, 12, 0.9)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark);
+        padding: 6px 12px; border-radius: 999px;
+        font-size: 12px; color: var(--parchment);
       }
       #status.ok { color: #6f6; }
       #status.err { color: #f66; }
@@ -49,14 +140,9 @@
       }
       #win-screen.show { display: flex; }
       #win-screen .card {
-        position: relative;
-        background: linear-gradient(160deg, #262636, #16161e);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 16px;
         padding: 32px 44px;
         min-width: 300px;
         text-align: center;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
         animation: winPop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
       }
       @keyframes winPop {
@@ -66,7 +152,11 @@
       #win-screen h1 {
         font-size: 32px; letter-spacing: 0.5px; margin-bottom: 4px;
       }
-      #win-screen h1.won  { color: #ffd370; }
+      #win-screen h1.won {
+        background: linear-gradient(180deg, #f8ecc0 0%, #e8c87e 42%, #9a7433 75%, #e2bf72 100%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+        filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.8));
+      }
       #win-screen h1.lost { color: #b0b0bc; }
       #win-screen .subtitle {
         font-size: 13px; color: #8888a0; margin-bottom: 22px;
@@ -77,17 +167,21 @@
         text-align: left; font-size: 15px;
         margin: 8px 0 24px;
         padding: 16px 20px;
-        background: rgba(255, 255, 255, 0.03);
+        background: rgba(246, 227, 164, 0.05);
+        border: 1px solid rgba(201, 163, 92, 0.35);
         border-radius: 10px;
       }
-      #win-screen .stats .label { color: #a0a0b0; }
+      #win-screen .stats .label { color: #b8a888; }
       #win-screen .stats .value { color: #fff; font-weight: 600; text-align: right; }
       #win-screen button.play {
-        background: #c73; color: white; border: none;
-        padding: 12px 28px; border-radius: 8px; font-size: 15px;
-        font-weight: 600; cursor: pointer;
+        border: 2px solid transparent; border-radius: 10px;
+        padding: 12px 28px; font-size: 15px; font-weight: 600; cursor: pointer;
+        background:
+          linear-gradient(180deg, #f0d189 0%, #c9a35c 45%, #a67c33 55%, #dcb96a 100%) padding-box,
+          linear-gradient(160deg, #fff3c8, #7a5c2e) border-box;
+        color: #2a1a08; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
       }
-      #win-screen button.play:hover { background: #d84; }
+      #win-screen button.play:hover { filter: brightness(1.07); }
       #win-screen button.close {
         position: absolute; top: 10px; right: 12px;
         background: transparent; border: none; color: #6a6a80;
@@ -203,11 +297,13 @@
       }
       #rail button {
         width: 48px; height: 48px; border-radius: 24px;
-        background: rgba(20, 12, 6, 0.78); color: #e8d8c0;
-        border: 2px solid #7a5c2e;
+        border: 2px solid transparent;
+        background: radial-gradient(circle at 35% 30%, #33241a, #1a110c) padding-box, var(--gold-rim) border-box;
+        color: var(--parchment);
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 4px 12px rgba(0, 0, 0, 0.5);
         font-size: 20px; line-height: 1; cursor: pointer;
       }
-      #rail button:hover { background: rgba(46, 30, 14, 0.92); }
+      #rail button:hover { filter: brightness(1.2); }
       #install-toggle { display: none; color: #ffc98a; }
       #install-toggle.show { display: block; }
       /* Volume slider pops out to the LEFT of the audio button. */
@@ -235,9 +331,10 @@
         position: fixed; right: 14px; bottom: 72px; z-index: 61;
         width: min(320px, 78vw); height: min(360px, 52vh);
         display: none; flex-direction: column;
-        background: rgba(20, 12, 6, 0.92);
-        border: 2px solid #7a5c2e; border-radius: 12px;
-        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+        border: 2px solid transparent;
+        background: linear-gradient(165deg, rgba(34, 23, 14, 0.95), rgba(20, 13, 10, 0.95)) padding-box, var(--gold-rim) border-box;
+        border-radius: 12px;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 12px 40px rgba(0, 0, 0, 0.6);
         overflow: hidden;
       }
       #chat-panel.open { display: flex; }
@@ -265,12 +362,22 @@
       }
 
       @media (max-width: 740px), (max-height: 480px) {
-        .plate-ring { width: 128px; height: 128px; }
-        #plate-them .plate-ring { width: 96px; height: 96px; }
-        .gem { width: 17px; height: 17px; }
-        #rail button { width: 42px; height: 42px; }
-        #volume { right: 52px; }
-        .plate-name { font-size: 12px; margin-top: 13px; }
+        .plate-ring { width: 92px; height: 92px; }
+        #plate-them { top: 44px; right: 10px; }
+        #plate-them .plate-ring { width: 66px; height: 66px; }
+        #plate-them .plate-gems { bottom: -8px; gap: 8px; }
+        .gem { width: 13px; height: 13px; }
+        #plate-cluster { left: 10px; bottom: 10px; }
+        #rail { right: 10px; bottom: 10px; gap: 6px; }
+        #rail button { width: 38px; height: 38px; font-size: 16px; }
+        #volume { right: 46px; width: 110px; }
+        .plate-name { font-size: 10px; margin-top: 10px; letter-spacing: 0.12em; }
+        #hud { padding: 7px 10px; font-size: 12px; min-width: 0; line-height: 1.4; border-radius: 10px; }
+        #status { font-size: 10px; padding: 4px 9px; top: 8px; right: 8px; }
+        #announce { font-size: 14px; padding: 8px 16px; }
+        #moves { bottom: 8px; gap: 4px; }
+        #moves button { font-size: 12px; padding: 7px 11px; border-radius: 8px; }
+        #chat-panel { bottom: 56px; }
       }
       #guide-overlay {
         position: fixed; inset: 0; z-index: 150;
@@ -337,10 +444,11 @@
         position: fixed;
         top: 16%; left: 50%;
         transform: translate(-50%, -50%);
-        padding: 12px 22px; border-radius: 10px;
-        font-size: 18px; font-weight: 600; letter-spacing: 0.3px;
-        background: rgba(20, 20, 30, 0.9);
-        border: 1px solid rgba(255, 255, 255, 0.15);
+        padding: 12px 26px; border-radius: 12px;
+        font-size: 18px; font-weight: 600; letter-spacing: 0.4px;
+        border: 2px solid transparent;
+        background: linear-gradient(165deg, rgba(40, 27, 16, 0.94), rgba(24, 16, 12, 0.94)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 10px 30px rgba(0, 0, 0, 0.6);
         color: #ffd370;
         pointer-events: none;
         opacity: 0;
@@ -366,25 +474,17 @@
       }
       #menu.show { display: flex; }
       #menu .card {
-        background: linear-gradient(160deg, #262636, #16161e);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 16px;
-        padding: 30px 38px;
-        min-width: 290px;
+        padding: 32px 38px;
+        min-width: 300px;
         text-align: center;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
       }
-      #menu h1 { font-size: 28px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
-      #menu .tagline { font-size: 12px; color: #8888a0; margin-bottom: 22px; }
+      #menu h1 { font-size: 28px; margin-bottom: 4px; white-space: nowrap; }
+      #menu .tagline { font-size: 12px; color: #b8a888; margin-bottom: 22px; letter-spacing: 1px; }
       #menu button.mode {
         display: block; width: 100%;
-        background: #c73; color: white; border: none;
-        padding: 13px 20px; border-radius: 8px; font-size: 15px;
-        font-weight: 600; cursor: pointer; margin-bottom: 10px;
+        padding: 13px 20px; font-size: 15px;
+        margin-bottom: 10px;
       }
-      #menu button.mode:hover { background: #d84; }
-      #menu button.mode.alt { background: #35506e; }
-      #menu button.mode.alt:hover { background: #416085; }
       /* --- Room browser (lobby) --- */
       #lobby {
         position: fixed; inset: 0; z-index: 252;
@@ -394,23 +494,18 @@
       }
       #lobby.show { display: flex; }
       #lobby .card {
-        position: relative;
-        background: linear-gradient(160deg, #262636, #16161e);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 16px;
         padding: 28px 34px;
         width: min(400px, 92vw);
         text-align: center;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
       }
-      #lobby h1 { font-size: 24px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
-      #lobby .tagline { font-size: 12px; color: #8888a0; margin-bottom: 16px; }
+      #lobby h1 { font-size: 26px; margin-bottom: 4px; }
+      #lobby .tagline { font-size: 12px; color: #b8a888; margin-bottom: 16px; }
       #lobby .close {
         position: absolute; top: 8px; right: 12px;
-        background: transparent; border: none; color: #6a6a80;
-        font-size: 24px; line-height: 1; cursor: pointer;
+        background: transparent; border: none; color: #8a7a63;
+        font-size: 24px; line-height: 1; cursor: pointer; z-index: 2;
       }
-      #lobby .close:hover { color: #ccc; }
+      #lobby .close:hover { color: var(--gold-text); }
       #lobby-list {
         max-height: min(300px, 40vh); overflow-y: auto;
         display: flex; flex-direction: column; gap: 8px;
@@ -419,46 +514,51 @@
       #lobby-list .room-row {
         display: flex; align-items: center; gap: 10px;
         width: 100%;
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.12);
+        border: 2px solid transparent;
+        background: linear-gradient(180deg, #2c2016, #1d1410) padding-box, linear-gradient(160deg, rgba(201,163,92,0.7), rgba(109,81,34,0.7)) border-box;
         border-radius: 10px; padding: 11px 14px;
         color: #fff; cursor: pointer; text-align: left;
       }
-      #lobby-list .room-row:hover { background: rgba(255, 255, 255, 0.1); }
+      #lobby-list .room-row:hover { filter: brightness(1.18); }
       #lobby-list .room-row .code {
-        font-family: monospace; font-size: 17px; letter-spacing: 3px; color: #ffd370;
+        font-family: monospace; font-size: 17px; letter-spacing: 3px; color: var(--gold-text);
       }
-      #lobby-list .room-row .meta { flex: 1; font-size: 12px; color: #a0a0b0; }
-      #lobby-list .room-row .meta .mk { color: #ffcaca; }
+      #lobby-list .room-row .meta { flex: 1; font-size: 12px; color: #b8a888; }
+      #lobby-list .room-row .meta .mk { color: #ffb9a8; }
       #lobby-list .room-row .go {
-        background: #c73; color: #fff; border: none; border-radius: 7px;
-        padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+        background: linear-gradient(180deg, #f0d189, #a67c33); color: #2a1a08;
+        border: none; border-radius: 7px;
+        padding: 7px 14px; font-size: 13px; font-weight: 700; cursor: pointer;
       }
-      #lobby-list .lobby-empty { font-size: 13px; color: #8888a0; padding: 18px 0; font-style: italic; }
+      #lobby-list .lobby-empty { font-size: 13px; color: #8a7a63; padding: 18px 0; font-style: italic; }
       #lobby .lobby-divider {
-        height: 1px; background: rgba(255, 255, 255, 0.12); margin: 4px 0 12px;
+        height: 2px; margin: 4px 0 12px;
+        background: linear-gradient(90deg, transparent, rgba(201, 163, 92, 0.6), transparent);
       }
       #lobby-private {
         width: 100%; margin-top: 10px;
-        background: transparent; color: #8fb8d8;
-        border: 1px solid rgba(143, 184, 216, 0.35); border-radius: 8px;
+        background: transparent; color: var(--gold-text);
+        border: 1px solid rgba(201, 163, 92, 0.4); border-radius: 8px;
         padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
       }
-      #lobby-private:hover { background: rgba(143, 184, 216, 0.1); }
+      #lobby-private:hover { background: rgba(246, 227, 164, 0.08); }
       #lobby .join-row { display: flex; gap: 8px; }
       #lobby .join-row input {
         flex: 1; min-width: 0;
-        background: rgba(255,255,255,0.06); color: #fff;
-        border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
+        background: rgba(20, 12, 6, 0.7); color: var(--parchment);
+        border: 1px solid rgba(201, 163, 92, 0.45); border-radius: 8px;
         padding: 12px; font-size: 15px; text-transform: uppercase;
         text-align: center; letter-spacing: 4px; font-family: monospace;
       }
+      #lobby .join-row input::placeholder { color: #8a7a63; }
       #lobby .join-row button {
-        background: #35506e; color: white; border: none;
+        border: 2px solid transparent;
+        background: linear-gradient(180deg, #32241a, #1e1510) padding-box, var(--gold-rim) border-box;
+        color: var(--gold-text);
         padding: 12px 18px; border-radius: 8px; font-size: 15px;
         font-weight: 600; cursor: pointer;
       }
-      #lobby .join-row button:hover { background: #416085; }
+      #lobby .join-row button:hover { filter: brightness(1.15); }
 
       #menu .join-row { display: flex; gap: 8px; margin-top: 4px; }
       #menu .join-row input {
@@ -474,16 +574,16 @@
         font-weight: 600; cursor: pointer;
       }
       #menu .join-row button:hover { background: #416085; }
-      #menu .menu-error { color: #ff8080; font-size: 13px; margin-top: 12px; min-height: 16px; }
+      #menu .menu-error { color: #ff9080; font-size: 13px; margin-top: 12px; min-height: 16px; }
       #menu #menu-install {
         display: none; width: 100%; margin-top: 12px;
-        background: transparent; color: #ffc98a;
-        border: 1px solid rgba(255, 201, 138, 0.4); border-radius: 8px;
+        background: transparent; color: var(--gold-text);
+        border: 1px solid rgba(201, 163, 92, 0.45); border-radius: 8px;
         padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
       }
-      #menu #menu-install:hover { background: rgba(255, 201, 138, 0.12); }
+      #menu #menu-install:hover { background: rgba(246, 227, 164, 0.1); }
       #menu #menu-install.show { display: block; }
-      #menu .credit { font-size: 11px; color: #6a6a80; margin-top: 14px; }
+      #menu .credit { font-size: 11px; color: #8a7a63; margin-top: 14px; }
 
       /* --- iOS Add-to-Home-Screen instructions --- */
       #ios-install {
@@ -514,7 +614,7 @@
         font-size: 24px; line-height: 1; cursor: pointer;
       }
       #ios-install .close:hover { color: #ccc; }
-      #menu .credit a { color: #80b8ff; text-decoration: none; }
+      #menu .credit a { color: #d8b877; text-decoration: none; }
       #menu .credit a:hover { text-decoration: underline; }
 
       /* --- Master Killer mode: class-pick overlay ---
@@ -528,20 +628,16 @@
       }
       #classpick.show { display: flex; }
       #classpick .card {
-        background: linear-gradient(160deg, #262636, #16161e);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 16px;
         padding: 30px 38px;
         min-width: 300px;
         text-align: center;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
       }
-      #classpick h1 { font-size: 24px; letter-spacing: 1px; color: #ffd370; margin-bottom: 4px; }
-      #classpick .tagline { font-size: 12px; color: #8888a0; margin-bottom: 20px; min-height: 16px; }
+      #classpick h1 { font-size: 28px; margin-bottom: 4px; }
+      #classpick .tagline { font-size: 12px; color: #b8a888; margin-bottom: 20px; min-height: 16px; }
       #classpick .classes { display: flex; gap: 18px; justify-content: center; }
       #classpick button.class {
         width: 158px;
-        background: transparent; color: #e8e8f0; border: none;
+        background: transparent; color: var(--parchment); border: none;
         padding: 6px 4px 10px; border-radius: 12px;
         font-size: 16px; font-weight: 600; cursor: pointer;
         text-align: center;
@@ -576,27 +672,26 @@
         #classpick button.class img { width: 76px; height: 76px; margin-bottom: 6px; }
       }
 
-      /* --- Menu's Master Killer mode toggle (additive) --- */
-      #menu button.mode.variant-toggle { background: transparent; border: 1px solid rgba(255,255,255,0.18); }
-      #menu button.mode.variant-toggle:hover { background: rgba(255,255,255,0.08); }
+      /* --- Menu's Master Killer mode toggle --- */
       #menu button.mode.variant-toggle.variant-mk {
-        background: rgba(122, 47, 47, 0.5); border-color: rgba(255,150,150,0.35); color: #ffcaca;
+        background: linear-gradient(180deg, #5a2020, #341010) padding-box, linear-gradient(160deg, #ffb9a8, #7c2d2d 55%, #e8c87e) border-box;
+        color: #ffcfc2;
       }
-      #menu button.mode.variant-toggle.variant-mk:hover { background: rgba(143, 58, 58, 0.6); }
 
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
         position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
         z-index: 90;
-        background: rgba(20, 20, 30, 0.92);
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        border-radius: 10px; padding: 14px 22px;
+        border: 2px solid transparent;
+        background: linear-gradient(165deg, rgba(40, 27, 16, 0.95), rgba(24, 16, 12, 0.95)) padding-box, var(--gold-rim) border-box;
+        box-shadow: 0 0 0 2px var(--wood-dark), 0 12px 36px rgba(0, 0, 0, 0.6);
+        border-radius: 12px; padding: 14px 22px;
         text-align: center; display: none;
       }
       #room-info.show { display: block; }
       #room-info .code { font-size: 30px; letter-spacing: 8px; font-family: monospace; color: #ffd370; }
-      #room-info .hint { font-size: 12px; color: #a0a0b0; margin-top: 6px; }
-      #room-info .link { font-size: 12px; color: #80b8ff; margin-top: 4px; user-select: all; word-break: break-all; }
+      #room-info .hint { font-size: 12px; color: #b8a888; margin-top: 6px; }
+      #room-info .link { font-size: 12px; color: #d8b877; margin-top: 4px; user-select: all; word-break: break-all; }
     </style>
   </head>
   <body>
@@ -652,15 +747,16 @@
     </div>
     <div id="announce"></div>
     <div id="menu">
-      <div class="card">
-        <h1>REGATTA</h1>
+      <div class="card gilt-card">
+        <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
+        <h1 class="gilt-title">MASTER KILLER</h1>
         <div class="tagline">a race across the board</div>
-        <button class="mode variant-toggle" id="menu-variant-toggle" type="button">Mode: Classic</button>
-        <button class="mode" id="menu-cpu">Play vs Computer</button>
-        <button class="mode alt" id="menu-create">Create Room</button>
-        <button class="mode alt" id="menu-browse">Join Room</button>
+        <button class="mode variant-toggle gilt-btn" id="menu-variant-toggle" type="button">Mode: Classic</button>
+        <button class="mode gilt-btn primary" id="menu-cpu">Play vs Computer</button>
+        <button class="mode gilt-btn" id="menu-create">Create Room</button>
+        <button class="mode gilt-btn" id="menu-browse">Join Room</button>
         <div class="menu-error" id="menu-error"></div>
-        <button id="menu-install">⬇  Install Regatta</button>
+        <button id="menu-install">⬇  Install Master Killer</button>
         <div class="credit">
           Board &amp; pieces sculpted by
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
@@ -669,9 +765,10 @@
       </div>
     </div>
     <div id="lobby">
-      <div class="card">
+      <div class="card gilt-card">
+        <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
         <button class="close" id="lobby-close" title="Back">×</button>
-        <h1>OPEN TABLES</h1>
+        <h1 class="gilt-title">OPEN TABLES</h1>
         <div class="tagline">tap a room to sit down</div>
         <div id="lobby-list"><div class="lobby-empty">Looking for open tables…</div></div>
         <div class="lobby-divider"></div>
@@ -683,8 +780,9 @@
       </div>
     </div>
     <div id="classpick">
-      <div class="card">
-        <h1>MASTER KILLER</h1>
+      <div class="card gilt-card">
+        <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
+        <h1 class="gilt-title">MASTER KILLER</h1>
         <div class="tagline" id="classpick-status">Pick your class</div>
         <div class="classes">
           <button class="class" data-class="archer">
@@ -713,17 +811,18 @@
     <div id="ios-install">
       <div class="card">
         <button class="close" id="ios-install-close" title="Close">×</button>
-        <h2>Install Regatta</h2>
+        <h2>Install Master Killer</h2>
         <p>Add it to your Home Screen to play fullscreen like an app:</p>
         <ol>
           <li>Tap the <b>Share</b> button <span class="ios-share">⎙</span> in the toolbar</li>
           <li>Scroll and tap <b>Add to Home Screen</b></li>
-          <li>Tap <b>Add</b> — Regatta lands next to your other apps</li>
+          <li>Tap <b>Add</b> — Master Killer lands next to your other apps</li>
         </ol>
       </div>
     </div>
     <div id="win-screen">
-      <div class="card">
+      <div class="card gilt-card">
+        <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
         <button class="close" id="win-close" title="Dismiss">×</button>
         <h1 id="win-title">You won!</h1>
         <div class="subtitle" id="win-subtitle"></div>

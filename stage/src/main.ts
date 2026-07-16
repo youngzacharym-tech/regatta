@@ -127,8 +127,19 @@ table.position.y = TABLE_Y;
 table.receiveShadow = true;
 scene.add(table);
 
+const CAM_TARGET = new THREE.Vector3(-0.5, 0.15, 0.95);
+const CAM_BASE_POS = new THREE.Vector3(-0.5, 4.6, 5.0);
+const CAM_BASE_DIST = CAM_BASE_POS.distanceTo(CAM_TARGET);
 function resize() {
   camera.aspect = window.innerWidth / window.innerHeight;
+  // Short screens (phone landscape) pull the camera back along its own view
+  // ray — up to ~+22% — so the board keeps clear margins for the HUD, the
+  // plates, and the rail instead of running edge to edge underneath them.
+  const h = window.innerHeight;
+  const pullback = 1 + Math.min(0.22, Math.max(0, (540 - h) / 540) * 0.65);
+  const dir = CAM_BASE_POS.clone().sub(CAM_TARGET).normalize();
+  camera.position.copy(CAM_TARGET).addScaledVector(dir, CAM_BASE_DIST * pullback);
+  camera.lookAt(CAM_TARGET);
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight, false);
 }
@@ -1095,7 +1106,7 @@ function renderPowerActions(isMyTurn: boolean) {
     const btn = document.createElement("button");
     const setLabel = () => {
       btn.textContent = blinkStrikeArmed ? "Blink Strike: tap a target…" : "Blink Strike ✦";
-      btn.style.background = blinkStrikeArmed ? "#a06010" : "#c04fd0";
+      btn.className = blinkStrikeArmed ? "ability ultimate armed" : "ability ultimate";
     };
     setLabel();
     btn.addEventListener("click", () => {
@@ -1111,7 +1122,7 @@ function renderPowerActions(isMyTurn: boolean) {
     const btn = document.createElement("button");
     const setLabel = () => {
       btn.textContent = warpathArmed ? "Warpath: tap a target…" : "Warpath ✦";
-      btn.style.background = warpathArmed ? "#a06010" : "#c04fd0";
+      btn.className = warpathArmed ? "ability ultimate armed" : "ability ultimate";
     };
     setLabel();
     btn.addEventListener("click", () => {
@@ -1129,7 +1140,7 @@ function renderPowerActions(isMyTurn: boolean) {
   if (cls === "mage") {
     const btn = document.createElement("button");
     btn.textContent = `Re-flip (1⚡)`;
-    btn.style.background = "#6a4fb0";
+    btn.className = "ability";
     btn.addEventListener("click", () => {
       sendToServer({ type: "usePower", action: { kind: "reflip" } });
     });
@@ -1139,7 +1150,7 @@ function renderPowerActions(isMyTurn: boolean) {
       const btn = document.createElement("button");
       const setLabel = () => {
         btn.textContent = pushArmed ? "Push: tap a target…" : `Push (1⚡)`;
-        btn.style.background = pushArmed ? "#a06010" : "#6a4fb0";
+        btn.className = pushArmed ? "ability armed" : "ability";
       };
       setLabel();
       btn.addEventListener("click", () => {
@@ -1158,7 +1169,7 @@ function renderPowerActions(isMyTurn: boolean) {
       const btn = document.createElement("button");
       const setLabel = () => {
         btn.textContent = chargedShotArmed ? "Charged Shot: tap a target…" : `Charged Shot (${CHARGE_CAP}⚡)`;
-        btn.style.background = chargedShotArmed ? "#a06010" : "#c04fd0";
+        btn.className = chargedShotArmed ? "ability ultimate armed" : "ability ultimate";
       };
       setLabel();
       btn.addEventListener("click", () => {
@@ -1178,7 +1189,7 @@ function renderPowerActions(isMyTurn: boolean) {
       const btn = document.createElement("button");
       const setLabel = () => {
         btn.textContent = bulwarkArmed ? "Bulwark: tap your token…" : `Bulwark (1⚡)`;
-        btn.style.background = bulwarkArmed ? "#a06010" : "#6a4fb0";
+        btn.className = bulwarkArmed ? "ability armed" : "ability";
       };
       setLabel();
       btn.addEventListener("click", () => {
@@ -1196,7 +1207,7 @@ function renderPowerActions(isMyTurn: boolean) {
         if (!m.chargeAvailable) continue;
         const btn = document.createElement("button");
         btn.textContent = `Charge: ${tokenLabel(m.tokenId)} ${tileLabel(m.from)}→${tileLabel(m.to)}`;
-        btn.style.background = "#6a4fb0";
+        btn.className = "ability";
         const moveIndex = i;
         btn.addEventListener("click", () => {
           sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
@@ -1419,8 +1430,7 @@ canvas.addEventListener("pointermove", (e) => {
 });
 
 function showPlayAgainButton() {
-  movesEl.innerHTML =
-    `<button data-newmatch="1" style="background:#c73;">Play Again</button>`;
+  movesEl.innerHTML = `<button data-newmatch="1" class="play-again">Play Again</button>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1990,6 +2000,11 @@ function applyOverlay(v: RoomResponse) {
 
   if (v.phase === "opening") {
     rollPending = null;
+    // Both plates stay up through the flip-off — classes are decided by now,
+    // and the public power block carries them even if the classPick overlay
+    // resolved too fast for pickedClasses to have caught our own pick.
+    currentPower = v.power ?? null;
+    updatePlates(null);
     const iFlipped = v.openingFlips[mySide] !== null;
     openingTapArmed = !iFlipped;
     hud.innerHTML = iFlipped
