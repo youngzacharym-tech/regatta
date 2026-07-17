@@ -40,7 +40,6 @@ const MAX_TURNS_PER_GAME = 1000;
 const NEUTRAL_POWER: PowerState = {
   classes: { p1: "warrior", p2: "warrior" },
   charges: { p1: 0, p2: 0 },
-  safeTokens: new Set(),
   reflipsUsedThisTurn: 0,
   // Rain of Arrows is Archer-only (this fixture is Warrior-vs-Warrior, gated
   // out entirely) and getLegalPowerMoves itself never reads these fields —

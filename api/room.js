@@ -347,7 +347,6 @@ function initialPowerState() {
     classes: { p1: "archer", p2: "archer" },
     // placeholder until picked
     charges: { p1: 0, p2: 0 },
-    safeTokens: /* @__PURE__ */ new Set(),
     reflipsUsedThisTurn: 0,
     shieldStreak: { p1: 0, p2: 0 },
     ultimateReady: { p1: false, p2: false },
@@ -394,14 +393,14 @@ function onShieldTile(token) {
   if (token.position < 0 || token.position >= PATH_LENGTH_PER_PLAYER) return false;
   return BOARD_LAYOUT[token.position].type === "shield";
 }
-function hasTransientSafety(power, token) {
-  return power.safeTokens.has(token.id);
-}
 function isBulwarked(power, token) {
   return power.bulwarked[token.id] !== void 0;
 }
+function isBulwarkReinforced(power, token) {
+  return power.bulwarkSaves[token.id] !== void 0;
+}
 function isProtected(state, power, token) {
-  return onShieldTile(token) || hasTransientSafety(power, token) || isWarded(state, power, token) || isBulwarked(power, token);
+  return onShieldTile(token) || isWarded(state, power, token) || isBulwarked(power, token);
 }
 function pushCost(state, power, target) {
   return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
@@ -457,7 +456,7 @@ function getLegalPowerMoves(state, power, flip) {
     let captures = [];
     let breaksWard = false;
     if (enemy) {
-      if (onShieldTile(enemy) || hasTransientSafety(power, enemy) || isBulwarked(power, enemy)) continue;
+      if (onShieldTile(enemy) || isBulwarked(power, enemy)) continue;
       if (isWarded(state, power, enemy)) {
         if (cls !== "warrior") continue;
         breaksWard = true;
@@ -488,7 +487,7 @@ function getLegalPowerMoves(state, power, flip) {
           break;
         }
         const foe = occ.find((t) => t.owner !== player);
-        if (foe && chargeSweepCaptures.length < CHARGE_SWEEP_CAP && !onShieldTile(foe) && !hasTransientSafety(power, foe) && !isBulwarked(power, foe)) {
+        if (foe && chargeSweepCaptures.length < CHARGE_SWEEP_CAP && !onShieldTile(foe) && !isBulwarked(power, foe)) {
           chargeSweepCaptures.push(foe.id);
         }
       }
@@ -511,7 +510,7 @@ function getLegalPowerMoves(state, power, flip) {
 }
 function getRainOfArrowsTargets(state, power, mover) {
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !hasTransientSafety(power, t)).map((t) => t.id);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).map((t) => t.id);
 }
 function breakShieldStreak(power, player) {
   if (power.shieldStreak[player] === 0) return power;
@@ -533,7 +532,7 @@ function resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, ra
   const picked = pool[Math.floor(rand() * pool.length)];
   return { power: reset, rainOfArrows: { targetTokenId: picked } };
 }
-function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, grantsSafety, rand = Math.random) {
+function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, rand = Math.random) {
   const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
   power = streakResult.power;
   const rainOfArrows = streakResult.rainOfArrows;
@@ -543,16 +542,6 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     if (finalCaptures.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(tokenId) || finalCaptures.some((id) => safeTokens.has(id))) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(tokenId);
-    for (const id of finalCaptures) safeTokens.delete(id);
-  }
-  if (grantsSafety) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.add(tokenId);
-  }
   let bulwarked = power.bulwarked;
   let bulwarkSaves = power.bulwarkSaves;
   if (finalCaptures.some((id) => bulwarked[id] !== void 0)) {
@@ -563,7 +552,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
       delete bulwarkSaves[id];
     }
   }
-  let nextPower = { ...power, safeTokens, bulwarked, bulwarkSaves };
+  let nextPower = { ...power, bulwarked, bulwarkSaves };
   if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
@@ -588,7 +577,6 @@ function applyPowerMove(state, power, move, mover, rand = Math.random) {
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard,
     rand
   );
 }
@@ -607,7 +595,6 @@ function applyCharge(state, power, move, mover, rand = Math.random) {
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard,
     rand
   );
 }
@@ -628,7 +615,7 @@ function computeChargedShotLanding(state, power, target) {
 }
 function getPushTargets(state, power, mover) {
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1).map((t) => t.id);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).filter((t) => !isBulwarkReinforced(power, t)).filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1).map((t) => t.id);
 }
 function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
@@ -636,15 +623,9 @@ function applyPush(state, power, targetTokenId, mover) {
   const landing = computePushLanding(state, power, target);
   const sendsHome = landing === -1;
   const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(targetTokenId)) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(targetTokenId);
-  }
   let spentPower = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
-    safeTokens
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost }
   };
   if (sendsHome) spentPower = addCharge(spentPower, mover);
   spentPower = breakShieldStreak(spentPower, mover);
@@ -660,22 +641,16 @@ function applyPush(state, power, targetTokenId, mover) {
 function getChargedShotTargets(state, power, mover) {
   if (power.charges[mover] !== CHARGE_CAP) return [];
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t)).filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1).map((t) => t.id);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t)).filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1).map((t) => t.id);
 }
 function applyChargedShot(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
   const landing = computeChargedShotLanding(state, power, target);
   const sendsHome = landing === -1;
   const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(targetTokenId)) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(targetTokenId);
-  }
   let spentPower = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
-    safeTokens
+    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP }
   };
   if (sendsHome) spentPower = addCharge(spentPower, mover);
   spentPower = breakShieldStreak(spentPower, mover);
@@ -695,19 +670,23 @@ function applyReflip(power, mover) {
     reflipsUsedThisTurn: power.reflipsUsedThisTurn + 1
   };
 }
-function excludeBulwarked(state, power, ids) {
-  return ids.filter((id) => {
-    const t = state.tokens.find((tok) => tok.id === id);
-    return !isBulwarked(power, t);
-  });
-}
 function getBlinkStrikeTargets(state, power, mover) {
   if (!findMostAdvancedToken(state, mover)) return [];
-  return excludeBulwarked(state, power, getRainOfArrowsTargets(state, power, mover));
+  return getRainOfArrowsTargets(state, power, mover);
 }
 function getWarpathTargets(state, power, mover) {
   if (!findLeastAdvancedToken(state, mover)) return [];
-  return excludeBulwarked(state, power, getRainOfArrowsTargets(state, power, mover));
+  return getRainOfArrowsTargets(state, power, mover);
+}
+function clearCapturedBulwarks(power, capturedIds) {
+  if (!capturedIds.some((id) => power.bulwarked[id] !== void 0)) return power;
+  const bulwarked = { ...power.bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
+  for (const id of capturedIds) {
+    delete bulwarked[id];
+    delete bulwarkSaves[id];
+  }
+  return { ...power, bulwarked, bulwarkSaves };
 }
 function applyBlinkStrike(state, power, targetTokenId, mover) {
   const mine = findMostAdvancedToken(state, mover);
@@ -717,17 +696,13 @@ function applyBlinkStrike(state, power, targetTokenId, mover) {
     if (t.id === targetTokenId) return { ...t, position: -1 };
     return t;
   });
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(mine.id) || safeTokens.has(targetTokenId)) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(mine.id);
-    safeTokens.delete(targetTokenId);
-  }
-  let nextPower = {
-    ...power,
-    safeTokens,
-    ultimateReady: { ...power.ultimateReady, [mover]: false }
-  };
+  let nextPower = clearCapturedBulwarks(
+    {
+      ...power,
+      ultimateReady: { ...power.ultimateReady, [mover]: false }
+    },
+    [targetTokenId]
+  );
   nextPower = addCharge(nextPower, mover);
   const nextState = {
     tokens,
@@ -746,15 +721,13 @@ function applyWarpath(state, power, targetTokenId, mover) {
   const lo = Math.min(from, to);
   const hi = Math.max(from, to);
   const sweepCaptures = [];
-  let brokeWard = isWarded(state, power, target);
   for (let i = lo + 1; i < hi; i++) {
     if (!BOARD_LAYOUT[i].isContested) continue;
     const foe = state.tokens.find(
       (t) => t.position === i && t.owner !== mover && t.id !== mine.id && t.id !== targetTokenId
     );
-    if (foe && !hasTransientSafety(power, foe) && !isBulwarked(power, foe)) {
+    if (foe) {
       sweepCaptures.push(foe.id);
-      if (isWarded(state, power, foe)) brokeWard = true;
     }
   }
   const allCaptures = [targetTokenId, ...sweepCaptures];
@@ -763,21 +736,13 @@ function applyWarpath(state, power, targetTokenId, mover) {
     if (allCaptures.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(mine.id) || allCaptures.some((id) => safeTokens.has(id))) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(mine.id);
-    for (const id of allCaptures) safeTokens.delete(id);
-  }
-  if (brokeWard) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.add(mine.id);
-  }
-  let nextPower = {
-    ...power,
-    safeTokens,
-    ultimateReady: { ...power.ultimateReady, [mover]: false }
-  };
+  let nextPower = clearCapturedBulwarks(
+    {
+      ...power,
+      ultimateReady: { ...power.ultimateReady, [mover]: false }
+    },
+    allCaptures
+  );
   nextPower = addCharge(nextPower, mover);
   const nextState = {
     tokens,
@@ -849,16 +814,6 @@ function getBulwarkBlockedIds(state, power, flip) {
     const realCaptures = rm ? [...rm.captures, ...rm.bonusCaptures, ...canCharge ? rm.chargeSweepCaptures : []] : [];
     for (const id of openCaptures) {
       if (power.bulwarked[id] !== void 0 && !realCaptures.includes(id)) blocked.add(id);
-    }
-  }
-  if (power.classes[mover] === "mage" && power.ultimateReady[mover]) {
-    for (const id of getBlinkStrikeTargets(state, unbulwarked, mover)) {
-      if (power.bulwarked[id] !== void 0) blocked.add(id);
-    }
-  }
-  if (power.classes[mover] === "warrior" && power.ultimateReady[mover]) {
-    for (const id of getWarpathTargets(state, unbulwarked, mover)) {
-      if (power.bulwarked[id] !== void 0) blocked.add(id);
     }
   }
   if (power.classes[mover] === "archer" && power.charges[mover] >= 1) {
@@ -1146,7 +1101,7 @@ function mkEvalSide(state, power, player) {
     score += MK_EVAL_PER_TILE * t.position;
     const tile = BOARD_LAYOUT[t.position];
     if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
-    if (tile.isContested && tile.type !== "shield" && !isWarded(state, power, t) && !isBulwarked(power, t) && !power.safeTokens.has(t.id)) {
+    if (tile.isContested && tile.type !== "shield" && !isWarded(state, power, t) && !isBulwarked(power, t)) {
       for (const e of state.tokens) {
         if (e.owner === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER) continue;
         const gap = t.position - e.position;
@@ -1287,19 +1242,19 @@ var OPPONENT_AWAY_MS = 2e4;
 var OPPONENT_LEFT_MS = 12e4;
 var MK_CLASSES = ["archer", "mage", "warrior"];
 function toWirePower(p) {
-  return { ...p, safeTokens: [...p.safeTokens] };
+  return { ...p };
 }
 function fromWirePower(w) {
   return {
     ...w,
-    safeTokens: new Set(w.safeTokens),
     // Docs persisted before the once-per-turn boolean (reflipUsedThisTurn)
     // became a counter read as undefined here — treat the old true as "one
     // re-flip already used" so a mid-deploy live room can't double-dip.
     reflipsUsedThisTurn: typeof w.reflipsUsedThisTurn === "number" ? w.reflipsUsedThisTurn : w.reflipUsedThisTurn ? 1 : 0,
     // Same live-room back-compat: docs persisted before reinforced Bulwark
     // existed have no bulwarkSaves — every live Bulwark in them is a plain
-    // 1-block cast, which an empty map means exactly.
+    // 1-block cast, which an empty map means exactly. (A doc persisted with
+    // the retired safeTokens array just carries a harmless extra key.)
     bulwarkSaves: w.bulwarkSaves ?? {}
   };
 }
@@ -1316,7 +1271,6 @@ function publicPower(doc) {
   return {
     classes: { ...doc.mk.classes },
     charges: { ...doc.mk.charges },
-    safeTokens: [...doc.mk.safeTokens],
     pushTargets: doc.mk.classes[mover] === "archer" ? getPushTargets(doc.state, p, mover) : [],
     chargedShotTargets: doc.mk.classes[mover] === "archer" ? getChargedShotTargets(doc.state, p, mover) : [],
     ultimateReady: { ...doc.mk.ultimateReady },

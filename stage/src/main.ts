@@ -1020,7 +1020,7 @@ scene.add(fireSprite);
 // per stone (crisp gold ring + soft underglow), shown only under stones the
 // current flip lets you move, breathing in sync through the shared material
 // (see tick()). Living on the ground keeps the stone's emissive channel free
-// for the ward/bulwark/safe status tints.
+// for the ward/bulwark status tints.
 // ---------------------------------------------------------------------------
 
 /** Ring height: 8 mm above the tile stamp (stone base is target.y - 0.08). */
@@ -1312,7 +1312,7 @@ function refreshMarkers(state: GameState) {
   handleEscapeChanges(nowEscaped);
 }
 
-/** Master Killer only: tint warded / Ward Breaker-safe / Bulwarked tokens.
+/** Master Killer only: tint warded / Bulwarked tokens.
  *  Reuses the real isWarded() from master-killer.ts against a minimal
  *  PowerState built from the public `power` field, so the client can never
  *  drift from the server's own definition of "warded". Bulwark's own
@@ -1322,13 +1322,11 @@ function refreshMarkers(state: GameState) {
  *  no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
 function updateTokenTints(state: GameState) {
-  const safe = currentPower ? new Set(currentPower.safeTokens) : null;
   const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
   const fakePower: PowerState | null = currentPower
     ? {
         classes: currentPower.classes,
         charges: currentPower.charges,
-        safeTokens: new Set(),
         reflipsUsedThisTurn: 0,
         shieldStreak: { p1: 0, p2: 0 },
         ultimateReady: { p1: false, p2: false },
@@ -1344,9 +1342,6 @@ function updateTokenTints(state: GameState) {
     } else if (bulwarked && bulwarked.has(token.id)) {
       mat.emissive.setHex(0x2fd0c0); // cool teal — Warrior Bulwark
       mat.emissiveIntensity = 0.5;
-    } else if (safe && safe.has(token.id)) {
-      mat.emissive.setHex(0xffa332); // warm gold — Ward Breaker-safe
-      mat.emissiveIntensity = 0.45;
     } else {
       mat.emissive.setHex(0x000000);
       mat.emissiveIntensity = 0;
@@ -1459,7 +1454,6 @@ let myVariant: "classic" | "masterKiller" = "classic";
 let currentPower: {
   classes: Record<PlayerId, PlayerClass>;
   charges: Record<PlayerId, number>;
-  safeTokens: number[];
   pushTargets: number[];
   chargedShotTargets: number[];
   ultimateReady: Record<PlayerId, boolean>;
@@ -1607,25 +1601,25 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bulwark",
     cost: "1 charge",
     klass: "warrior",
-    desc: "Shield one of your own stones: it can't be captured, swept by a Charge, or taken by an ultimate. Fades after a few turns, or the moment it saves the stone.",
+    desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate still punches through. Fades after a few turns, or the moment it saves the stone.",
   },
   bulwarkReinforced: {
     name: "Reinforced Bulwark",
     cost: `${CHARGE_CAP} charges`,
     klass: "warrior",
-    desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down.",
+    desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down. A plain Push can't budge it; only a Charged Shot moves it.",
   },
   blinkStrike: {
     name: "Blink Strike",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "mage",
-    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields and Wards.",
+    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields, Wards, and Bulwarks.",
   },
   warpath: {
     name: "Warpath",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "warrior",
-    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every unprotected enemy stone along the way.",
+    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and Bulwarks.",
   },
 };
 
@@ -3762,7 +3756,9 @@ const GUIDE_SPREADS: [string, string][] = [
        the board, and it is sent all the way home to their hand — and your
        charge comes right back, since that's really a capture.</li>
        <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
-       Push entirely — the charge is spent, but the stone doesn't move.</li>
+       Push entirely — the charge is spent, but the stone doesn't move. A
+       <span class="gold">Reinforced Bulwark</span> can't be Pushed at all —
+       only a Charged Shot still moves it.</li>
      </ul>`,
     `<div class="runner">The Archer &middot; continued</div>
      <ul>
@@ -3801,16 +3797,15 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight
-       onto any enemy in shared water — capturing it even through a shield
-       or a Ward.</li>
+       onto any enemy in shared water — capturing it even through a shield,
+       a Ward, or a Bulwark.</li>
      </ul>`,
   ],
   [
     `<h2>The Warrior</h2>
      <ul>
        <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
-       stone and the Ward breaks — captured all the same, and your stone
-       stands safe from capture until it next moves.</li>
+       stone and the Ward breaks — captured all the same.</li>
        <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
        enemy stone in shared water between where you started and where you
        land is captured too, Warded or not.</li>
@@ -3820,20 +3815,20 @@ const GUIDE_SPREADS: [string, string][] = [
     `<div class="runner">The Warrior &middot; continued</div>
      <ul>
        <li><b>Bulwark</b> (active, 1 charge): raise a shield over one of
-       YOUR OWN stones — it cannot be captured, swept by Charge, or taken by
-       an enemy ultimate, and a Push can only shove it, never send it home.
-       It fades after a few of your turns unused, or the instant it saves
-       the stone.</li>
+       YOUR OWN stones — it cannot be captured or swept by Charge, and a
+       Push can only shove it, never send it home. An enemy ultimate still
+       punches through. It fades after a few of your turns unused, or the
+       instant it saves the stone.</li>
        <li><b>Reinforced Bulwark</b> (active, spends both charges): the
        same shield with everything doubled — it lasts twice as many turns,
-       and it shrugs off the first save instead of fading. Only the second
-       save, or time, brings it down.</li>
+       and it shrugs off the first save instead of fading. A plain Push
+       can't budge it at all; only a Charged Shot still moves it. Only the
+       second save, or time, brings it down.</li>
        <li><b>Warpath</b> (active, spends your ultimate): land on a shield
        tile three times running, then teleport your least-advanced stone
-       onto any enemy in shared water — capturing it plus every unprotected
+       onto any enemy in shared water — capturing it plus every
        enemy stone caught between where it started and where it lands,
-       Warded or not. Break a Ward along the way and the landing stone
-       stands safe from capture until it next moves.</li>
+       through shields, Wards, and Bulwarks alike.</li>
      </ul>`,
   ],
 ];
@@ -4045,7 +4040,7 @@ function tick() {
   }
   // Movable stones wear a breathing gold ring on the ground — "stones you
   // may move light up", as the guide and tutorial promise. The affordance
-  // lives entirely OFF the stone material, so the ward/bulwark/safe status
+  // lives entirely OFF the stone material, so the ward/bulwark status
   // tints stay visible on a movable stone. Ring visibility is recomputed
   // from eligibleTokenIds every frame — no restore bookkeeping to go stale.
   const breath = 0.5 + 0.5 * Math.sin(now * 0.0035); // ~1.8 s calm period
@@ -4176,7 +4171,6 @@ if (dockDemoParam !== null) {
     currentPower = {
       classes: { p1: cls, p2: "archer" },
       charges: { p1: d.charges, p2: 1 },
-      safeTokens: [],
       pushTargets: [4, 5],
       chargedShotTargets: [4],
       ultimateReady: { p1: d.ult, p2: false },
