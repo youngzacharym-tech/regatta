@@ -1312,14 +1312,106 @@ function refreshMarkers(state: GameState) {
   handleEscapeChanges(nowEscaped);
 }
 
-/** Master Killer only: tint warded / Ward Breaker-safe / Bulwarked tokens.
- *  Reuses the real isWarded() from master-killer.ts against a minimal
- *  PowerState built from the public `power` field, so the client can never
- *  drift from the server's own definition of "warded". Bulwark's own
- *  protected-ness is simpler — the server already hands over the exact
- *  token id list (bulwarkedTokenIds), no derivation needed. Classic rooms
- *  (currentPower === null) always take the clear-everything branch — a
- *  no-op against the materials' own black-emissive default, so classic
+// ---------------------------------------------------------------------------
+// Protection VFX — emissive tint alone stopped reading the moment the class
+// sculpts took over the stones (teal emissive on a blue Warrior sculpt is
+// invisible; Kasen's exact complaint on the 2026-07-17 iPad pass). Protected
+// stones now wear a dedicated rig in the OWNING CLASS's canon color — the
+// same hexes as the plate gems and targeting rings, so color = author:
+//   Ward (Mage passive)        -> mage purple spinning rune-ring
+//   Bulwark (Warrior cast)     -> warrior blue rune-ring + translucent dome
+//   Ward Breaker safety        -> table-gold rune-ring
+//   Sheltering on a shield tile -> faint still steel ring (information, not
+//                                  spectacle — the tile art carries the rest)
+// Pool of 8 rigs assigned per broadcast in updateTokenTints, animated and
+// stone-tracked in tick(). Classic rooms never assign any. Pure radial
+// decals — no surface materials touched (the 2026-07-18 moiré revert was
+// the tiled wood textures, not these).
+// ---------------------------------------------------------------------------
+type StatusKind = "ward" | "bulwark" | "safe" | "shieldTile";
+const STATUS_TINTS: Record<StatusKind, number> = {
+  ward: 0xb45cff,
+  bulwark: 0x3f83ff,
+  safe: 0xffc36a,
+  shieldTile: 0xcfdcec,
+};
+/** Dashed rune-ring, drawn white so the material color carries the class —
+ *  deliberately a different visual language from the solid "movable" ring. */
+function makeStatusRingTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  const dashes = 12;
+  g.strokeStyle = "rgba(255,255,255,0.95)";
+  g.lineWidth = 9;
+  g.shadowBlur = 7;
+  g.shadowColor = "rgba(255,255,255,0.9)";
+  for (let i = 0; i < dashes; i++) {
+    const a0 = (i / dashes) * Math.PI * 2;
+    g.beginPath();
+    g.arc(s / 2, s / 2, 90, a0, a0 + (Math.PI * 2 / dashes) * 0.55);
+    g.stroke();
+  }
+  g.shadowBlur = 0;
+  g.strokeStyle = "rgba(255,255,255,0.35)";
+  g.lineWidth = 2;
+  g.beginPath();
+  g.arc(s / 2, s / 2, 74, 0, Math.PI * 2);
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+// Sized so the dash ring (radius 90/256 of the plane) clearly CIRCLES a
+// stone (Ø ~0.44) instead of hiding under it, yet stays inside one tile
+// (pitch ~0.7) so a protected stone never smears onto its neighbors.
+const statusRingGeo = new THREE.PlaneGeometry(0.94, 0.94);
+const statusRingTex = makeStatusRingTexture();
+const statusDomeGeo = new THREE.SphereGeometry(0.27, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+interface StatusRig {
+  ring: THREE.Mesh;
+  ringMat: THREE.MeshBasicMaterial;
+  dome: THREE.Mesh;
+  domeMat: THREE.MeshBasicMaterial;
+}
+const STATUS_RIG_COUNT = 8;
+const statusRigs: StatusRig[] = [];
+for (let i = 0; i < STATUS_RIG_COUNT; i++) {
+  const ringMat = new THREE.MeshBasicMaterial({
+    map: statusRingTex,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const ring = new THREE.Mesh(statusRingGeo, ringMat);
+  ring.rotation.x = -Math.PI / 2;
+  ring.renderOrder = 1;
+  ring.visible = false;
+  const domeMat = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.12,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const dome = new THREE.Mesh(statusDomeGeo, domeMat);
+  dome.renderOrder = 2;
+  dome.visible = false;
+  scene.add(ring, dome);
+  statusRigs.push({ ring, ringMat, dome, domeMat });
+}
+/** Which stones currently wear which protection — rebuilt per broadcast. */
+const statusMarks: { idx: number; kind: StatusKind }[] = [];
+
+/** Master Killer only: mark warded / Bulwarked / Ward Breaker-safe /
+ *  shield-tile-sheltered tokens for the protection rigs, plus a matching
+ *  emissive lift on the sculpt itself. Reuses the real isWarded() from
+ *  master-killer.ts against a minimal PowerState built from the public
+ *  `power` field, so the client can never drift from the server's own
+ *  definition of "warded". Bulwark's protected-ness is simpler — the server
+ *  already hands over the exact token id list (bulwarkedTokenIds). Classic
+ *  rooms (currentPower === null) always take the clear-everything branch —
+ *  a no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
 function updateTokenTints(state: GameState) {
   const safe = currentPower ? new Set(currentPower.safeTokens) : null;
@@ -1336,21 +1428,35 @@ function updateTokenTints(state: GameState) {
         bulwarkSaves: {},
       }
     : null;
+  statusMarks.length = 0;
   state.tokens.forEach((token, idx) => {
     const mat = markers[idx].mesh.material as THREE.MeshStandardMaterial;
+    let kind: StatusKind | null = null;
     if (fakePower && isWarded(state, fakePower, token)) {
+      kind = "ward";
       mat.emissive.setHex(0x8040ff); // violet — Mage ward
       mat.emissiveIntensity = 0.55;
     } else if (bulwarked && bulwarked.has(token.id)) {
-      mat.emissive.setHex(0x2fd0c0); // cool teal — Warrior Bulwark
+      kind = "bulwark";
+      mat.emissive.setHex(0x2f6bff); // warrior blue — Bulwark is his cast
       mat.emissiveIntensity = 0.5;
     } else if (safe && safe.has(token.id)) {
+      kind = "safe";
       mat.emissive.setHex(0xffa332); // warm gold — Ward Breaker-safe
       mat.emissiveIntensity = 0.45;
     } else {
+      if (
+        currentPower &&
+        token.position >= 0 &&
+        token.position < PATH_LENGTH &&
+        BOARD_LAYOUT[token.position].type === "shield"
+      ) {
+        kind = "shieldTile"; // rig only — no emissive, it's the quiet one
+      }
       mat.emissive.setHex(0x000000);
       mat.emissiveIntensity = 0;
     }
+    if (kind && statusMarks.length < STATUS_RIG_COUNT) statusMarks.push({ idx, kind });
   });
 }
 
@@ -3060,6 +3166,7 @@ function applyOverlay(v: RoomResponse) {
     // and the public power block carries them even if the classPick overlay
     // resolved too fast for pickedClasses to have caught our own pick.
     currentPower = v.power ?? null;
+    updateTokenTints(v.state);
     updatePlates(null);
     updateDock(false); // visible but dormant through the flip-off
     const iFlipped = v.openingFlips[mySide] !== null;
@@ -3079,6 +3186,10 @@ function applyOverlay(v: RoomResponse) {
   // ---- play ----
   currentPower = v.power ?? null;
   currentPowerMoves = v.powerMoves ?? null;
+  // Recompute protection tints/rigs from every applied view, not only from
+  // event replays — event-less applies (opening, action echoes, reconnect
+  // edges) must never leave a stale ward/Bulwark rig on the board.
+  updateTokenTints(v.state);
   const mine = v.yourTurn;
   const movesForTap: Move[] | null = myVariant === "masterKiller" ? v.powerMoves : v.legalMoves;
   updatePlates(v.state);
@@ -4083,6 +4194,49 @@ function tick() {
       (confirmRing.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - out);
     }
   }
+  // Protection rigs ride their stones: class-colored rune-ring decal on the
+  // ground, translucent dome (Bulwark) over the stone itself. Hidden while
+  // the stone is mid-flight, same as the movable rings.
+  for (let i = 0; i < statusRigs.length; i++) {
+    const rig = statusRigs[i];
+    const mark = statusMarks[i];
+    const marker = mark ? markers[mark.idx] : null;
+    if (!mark || !marker || !marker.mesh.visible || marker.flying) {
+      rig.ring.visible = rig.dome.visible = false;
+      continue;
+    }
+    rig.ringMat.color.setHex(STATUS_TINTS[mark.kind]);
+    rig.ring.visible = true;
+    rig.ring.position.set(
+      marker.mesh.position.x,
+      marker.target.y + ELIGIBLE_RING_Y_OFFSET + 0.004,
+      marker.mesh.position.z,
+    );
+    if (mark.kind === "shieldTile") {
+      // Quiet shelter: smaller, faint, still — information, not spectacle.
+      rig.ring.rotation.z = 0;
+      rig.ringMat.opacity = 0.2 + 0.06 * Math.sin(now * 0.0011 + i);
+      rig.ring.scale.setScalar(0.88);
+    } else {
+      // Ward spins with intent; Bulwark turns slow and heavy.
+      rig.ring.rotation.z = now * (mark.kind === "bulwark" ? 0.00035 : 0.0009) + i * 1.3;
+      rig.ringMat.opacity = 0.5 + 0.22 * Math.sin(now * 0.0026 + i * 2.1);
+      rig.ring.scale.setScalar(1);
+    }
+    const domed = mark.kind === "bulwark";
+    rig.dome.visible = domed;
+    if (domed) {
+      rig.domeMat.color.setHex(STATUS_TINTS.bulwark);
+      rig.dome.position.set(
+        marker.mesh.position.x,
+        marker.mesh.position.y - 0.08, // token base — hemisphere wraps the coin
+        marker.mesh.position.z,
+      );
+      const swell = 1 + 0.035 * Math.sin(now * 0.0032 + i);
+      rig.dome.scale.set(swell, swell * 0.85, swell);
+      rig.domeMat.opacity = 0.11 + 0.05 * Math.sin(now * 0.004 + i * 1.7);
+    }
+  }
   // Gentle breathing on the capture-hover glow.
   if (hoverGlow.visible) {
     (hoverGlow.material as THREE.MeshBasicMaterial).opacity =
@@ -4214,5 +4368,52 @@ if (dockDemoParam !== null) {
   setInterval(() => {
     if (!armed) applyDemo();
   }, 3000);
+}
+
+// ---------------------------------------------------------------------------
+// Dev-only protection-VFX harness (localhost, ?vfx — same gate family as
+// ?sips / ?dockdemo): parks the menu and poses one deterministic mid-game
+// tableau exercising every protection rig — Mage warded on a sword tile,
+// stones sheltering on shield tiles, a Bulwarked Warrior stone, a Ward
+// Breaker-safe stone — through the REAL refreshMarkers/updateTokenTints
+// path, so what it shows is exactly what a live game shows. Display-only;
+// no session exists.
+// ---------------------------------------------------------------------------
+if (location.hostname === "localhost" && new URLSearchParams(location.search).has("vfx")) {
+  menuEl.classList.remove("show");
+  myVariant = "masterKiller";
+  hud.textContent = "vfx demo";
+  ensureMkPieces();
+  const demoState: GameState = {
+    tokens: [
+      { id: 0, owner: "p1", position: 5 }, // most advanced mage stone → Warded
+      { id: 1, owner: "p1", position: 3 }, // own-row shield tile → sheltering
+      { id: 2, owner: "p1", position: 0 },
+      { id: 3, owner: "p1", position: -1 },
+      { id: 4, owner: "p2", position: 7 }, // middle shield tile → sheltering
+      { id: 5, owner: "p2", position: 9 }, // Bulwarked
+      { id: 6, owner: "p2", position: 4 }, // Ward Breaker-safe
+      { id: 7, owner: "p2", position: -1 },
+    ],
+    currentPlayer: "p1",
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  currentPower = {
+    classes: { p1: "mage", p2: "warrior" },
+    charges: { p1: CHARGE_CAP, p2: 1 }, // full bank → the Mage ward is up
+    safeTokens: [6],
+    pushTargets: [],
+    chargedShotTargets: [],
+    ultimateReady: { p1: false, p2: false },
+    blinkStrikeTargets: [],
+    warpathTargets: [],
+    bulwarkTargets: [],
+    bulwarkedTokenIds: [5],
+    reflipsUsedThisTurn: 0,
+  };
+  refreshMarkers(demoState);
+  updateTokenTints(demoState);
 }
 
