@@ -154,9 +154,128 @@ function roundedRectShape(w: number, d: number, r: number): THREE.Shape {
   return s;
 }
 
-const woodTopMat = new THREE.MeshStandardMaterial({ color: 0x2b1c11, roughness: 0.95 });
-const woodSideMat = new THREE.MeshStandardMaterial({ color: 0x221510, roughness: 0.9 });
-const woodDarkMat = new THREE.MeshStandardMaterial({ color: 0x1c110b, roughness: 0.92 });
+// --- Wood grain for the tabletop: one generated tile (albedo + a shared
+// gray relief sheet) so the slab reads as jointed oak boards instead of flat
+// brown paint. The extrude's cap UVs ARE shape coordinates, so the texture
+// tiles in world units and the grain runs the table's long axis; the side
+// walls sample the same sheet along the perimeter, which reads as long grain
+// around the slab edge for free. The relief sheet does double duty: bumpMap
+// for raking-light grain relief and roughnessMap so polished grain catches
+// the lamp while seams and knots stay dead.
+function makeWoodSheets(): { albedo: THREE.CanvasTexture; relief: THREE.CanvasTexture } {
+  const s = 512;
+  const ac = document.createElement("canvas");
+  const rc = document.createElement("canvas");
+  ac.width = ac.height = rc.width = rc.height = s;
+  const a = ac.getContext("2d")!;
+  const r = rc.getContext("2d")!;
+  a.fillStyle = "#2b1c11";
+  a.fillRect(0, 0, s, s);
+  // Soft diagonal light drift so tiled repeats never read as uniform.
+  const drift = a.createLinearGradient(0, 0, s, s);
+  drift.addColorStop(0, "rgba(255,205,150,0.05)");
+  drift.addColorStop(0.55, "rgba(0,0,0,0)");
+  drift.addColorStop(1, "rgba(0,0,0,0.07)");
+  a.fillStyle = drift;
+  a.fillRect(0, 0, s, s);
+  r.fillStyle = "#d9d9d9";
+  r.fillRect(0, 0, s, s);
+  const boards = 3; // ~1.07 world units deep per board at the repeat below
+  const bh = s / boards;
+  for (let b = 0; b < boards; b++) {
+    const y0 = b * bh;
+    // Each board leans warm or cold a touch — they came from different trees.
+    a.fillStyle = `rgba(${b % 2 ? "255,210,160" : "20,8,2"},${0.03 + Math.random() * 0.04})`;
+    a.fillRect(0, y0, s, bh);
+    // Long grain: wobbling near-horizontal strokes, dark and warm-light.
+    for (let k = 0; k < 26; k++) {
+      const y = y0 + 3 + Math.random() * (bh - 6);
+      const dark = Math.random() < 0.6;
+      a.strokeStyle = dark
+        ? `rgba(8,3,0,${0.1 + Math.random() * 0.14})`
+        : `rgba(255,208,150,${0.03 + Math.random() * 0.05})`;
+      a.lineWidth = 0.7 + Math.random() * 1.6;
+      const wob = (Math.random() - 0.5) * 10;
+      a.beginPath();
+      a.moveTo(-6, y);
+      a.bezierCurveTo(s * 0.33, y + wob, s * 0.66, y - wob, s + 6, y + wob * 0.5);
+      a.stroke();
+      r.strokeStyle = dark ? "rgba(125,125,125,0.32)" : "rgba(232,232,232,0.28)";
+      r.lineWidth = a.lineWidth;
+      r.beginPath();
+      r.moveTo(-6, y);
+      r.bezierCurveTo(s * 0.33, y + wob, s * 0.66, y - wob, s + 6, y + wob * 0.5);
+      r.stroke();
+    }
+    // A knot or two per board: dark whorl wrapped in concentric grain rings.
+    const knots = 1 + (Math.random() < 0.5 ? 1 : 0);
+    for (let n = 0; n < knots; n++) {
+      const kx = 30 + Math.random() * (s - 60);
+      const ky = y0 + bh * (0.25 + Math.random() * 0.5);
+      const kr = 5 + Math.random() * 9;
+      const g = a.createRadialGradient(kx, ky, 0, kx, ky, kr);
+      g.addColorStop(0, "rgba(12,5,1,0.55)");
+      g.addColorStop(0.6, "rgba(24,11,4,0.28)");
+      g.addColorStop(1, "rgba(24,11,4,0)");
+      a.fillStyle = g;
+      a.beginPath();
+      a.arc(kx, ky, kr, 0, Math.PI * 2);
+      a.fill();
+      for (let q = 1; q <= 3; q++) {
+        a.strokeStyle = `rgba(10,4,0,${0.16 - q * 0.03})`;
+        a.lineWidth = 0.8;
+        a.beginPath();
+        a.ellipse(kx, ky, kr + q * 4.5, (kr + q * 4.5) * 0.45, 0, 0, Math.PI * 2);
+        a.stroke();
+      }
+      r.fillStyle = "rgba(95,95,95,0.5)";
+      r.beginPath();
+      r.arc(kx, ky, kr, 0, Math.PI * 2);
+      r.fill();
+    }
+    // Board seam.
+    a.fillStyle = "rgba(0,0,0,0.34)";
+    a.fillRect(0, y0 + bh - 1.2, s, 1.6);
+    r.fillStyle = "rgba(70,70,70,0.8)";
+    r.fillRect(0, y0 + bh - 1.2, s, 1.6);
+  }
+  // Fine speckle: pores and dust ground into the finish.
+  for (let k = 0; k < 900; k++) {
+    a.fillStyle = Math.random() < 0.7 ? "rgba(0,0,0,0.1)" : "rgba(255,215,170,0.07)";
+    a.fillRect(Math.random() * s, Math.random() * s, 1, 1);
+  }
+  const albedo = new THREE.CanvasTexture(ac);
+  albedo.wrapS = albedo.wrapT = THREE.RepeatWrapping;
+  albedo.colorSpace = THREE.SRGBColorSpace;
+  albedo.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  albedo.repeat.set(1 / 3.2, 1 / 3.2); // texture tile = 3.2 world units
+  const relief = new THREE.CanvasTexture(rc);
+  relief.wrapS = relief.wrapT = THREE.RepeatWrapping;
+  relief.anisotropy = albedo.anisotropy;
+  relief.repeat.copy(albedo.repeat);
+  return { albedo, relief };
+}
+const woodSheets = makeWoodSheets();
+const woodTopMat = new THREE.MeshStandardMaterial({
+  map: woodSheets.albedo,
+  bumpMap: woodSheets.relief,
+  bumpScale: 0.5,
+  roughnessMap: woodSheets.relief,
+  roughness: 1.1, // relief sheet centers ~0.85 gray; product lands ~0.94
+});
+const woodSideMat = new THREE.MeshStandardMaterial({
+  map: woodSheets.albedo,
+  bumpMap: woodSheets.relief,
+  bumpScale: 0.4,
+  color: 0xbfaf9f, // multiplies the map — slab edges sit a shade darker
+  roughness: 0.9,
+});
+const woodDarkMat = new THREE.MeshStandardMaterial({
+  color: 0x1c110b,
+  bumpMap: woodSheets.relief, // legs/apron: grain relief only, stay dark
+  bumpScale: 0.3,
+  roughness: 0.92,
+});
 const brassMat = new THREE.MeshStandardMaterial({
   color: 0x7a5c2e,
   metalness: 0.85,
@@ -165,7 +284,44 @@ const brassMat = new THREE.MeshStandardMaterial({
   polygonOffsetFactor: -2,
   polygonOffsetUnits: -2,
 });
-const wallMat = new THREE.MeshStandardMaterial({ color: 0x2d1e12, roughness: 1 });
+// Plaster mottling for the walls — low-contrast blotches and faint vertical
+// weep streaks so the fire/lamp spill lands on a surface instead of flat
+// paint. Kept whisper-subtle: the walls are set dressing behind fog.
+function makePlasterTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "#2d1e12";
+  g.fillRect(0, 0, s, s);
+  for (let k = 0; k < 46; k++) {
+    const x = Math.random() * s;
+    const y = Math.random() * s;
+    const rad = 12 + Math.random() * 34;
+    const light = Math.random() < 0.45;
+    const blob = g.createRadialGradient(x, y, 0, x, y, rad);
+    blob.addColorStop(
+      0,
+      light
+        ? `rgba(255,220,180,${0.02 + Math.random() * 0.03})`
+        : `rgba(0,0,0,${0.04 + Math.random() * 0.05})`,
+    );
+    blob.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = blob;
+    g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+  }
+  for (let k = 0; k < 9; k++) {
+    const x = Math.random() * s;
+    g.fillStyle = `rgba(0,0,0,${0.03 + Math.random() * 0.03})`;
+    g.fillRect(x, 0, 1 + Math.random() * 2, s);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.repeat.set(3, 2);
+  return tex;
+}
+const wallMat = new THREE.MeshStandardMaterial({ map: makePlasterTexture(), roughness: 1 });
 const beamMat = new THREE.MeshStandardMaterial({ color: 0x170f09, roughness: 0.95 });
 const stoneMat = new THREE.MeshStandardMaterial({ color: 0x3c322a, roughness: 1 });
 
@@ -254,49 +410,92 @@ for (const [lx, lz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
   scene.add(leg);
 }
 
-// --- Worn plank floor. One small generated canvas, tiled.
-function makePlankTexture(): THREE.CanvasTexture {
-  const s = 256;
-  const c = document.createElement("canvas");
-  c.width = c.height = s;
-  const g = c.getContext("2d")!;
-  const planks = 4;
+// --- Worn plank floor. One generated canvas pair (albedo + relief), tiled.
+function makeFloorSheets(): { albedo: THREE.CanvasTexture; relief: THREE.CanvasTexture } {
+  const s = 512;
+  const ac = document.createElement("canvas");
+  const rc = document.createElement("canvas");
+  ac.width = ac.height = rc.width = rc.height = s;
+  const g = ac.getContext("2d")!;
+  const r = rc.getContext("2d")!;
+  r.fillStyle = "#d4d4d4";
+  r.fillRect(0, 0, s, s);
+  const planks = 6;
   const pw = s / planks;
   // Warm mid-browns — dark enough for the tavern mood, bright enough that
   // the fire's floor wash actually reads on them (near-black albedo here
   // made the floor invisible no matter how hard it was lit).
-  const bases = ["#4a3322", "#513826", "#443021", "#4d3524"];
+  const bases = ["#4a3322", "#513826", "#443021", "#4d3524", "#473124", "#503723"];
   for (let i = 0; i < planks; i++) {
     g.fillStyle = bases[i];
     g.fillRect(i * pw, 0, pw, s);
     // Grain: faint streaks running the plank's length.
-    for (let k = 0; k < 14; k++) {
+    for (let k = 0; k < 20; k++) {
       const x = i * pw + 2 + Math.random() * (pw - 4);
-      g.strokeStyle = Math.random() < 0.55 ? "rgba(0,0,0,0.14)" : "rgba(255,225,180,0.05)";
-      g.lineWidth = 0.6 + Math.random() * 1.1;
-      const wob = (Math.random() - 0.5) * 6;
+      const dark = Math.random() < 0.55;
+      g.strokeStyle = dark ? "rgba(0,0,0,0.14)" : "rgba(255,225,180,0.05)";
+      g.lineWidth = 0.6 + Math.random() * 1.3;
+      const wob = (Math.random() - 0.5) * 7;
       g.beginPath();
       g.moveTo(x, -4);
       g.bezierCurveTo(x + wob, s * 0.3, x - wob, s * 0.7, x + wob, s + 4);
       g.stroke();
+      r.strokeStyle = dark ? "rgba(110,110,110,0.3)" : "rgba(228,228,228,0.28)";
+      r.lineWidth = g.lineWidth;
+      r.beginPath();
+      r.moveTo(x, -4);
+      r.bezierCurveTo(x + wob, s * 0.3, x - wob, s * 0.7, x + wob, s + 4);
+      r.stroke();
+    }
+    // Boot-worn patches: soft dark blotches of ground-in years.
+    for (let k = 0; k < 3; k++) {
+      const wx = i * pw + pw / 2 + (Math.random() - 0.5) * pw * 0.6;
+      const wy = Math.random() * s;
+      const wr = 14 + Math.random() * 30;
+      const wear = g.createRadialGradient(wx, wy, 0, wx, wy, wr);
+      wear.addColorStop(0, `rgba(0,0,0,${0.05 + Math.random() * 0.08})`);
+      wear.addColorStop(1, "rgba(0,0,0,0)");
+      g.fillStyle = wear;
+      g.beginPath();
+      g.arc(wx, wy, wr, 0, Math.PI * 2);
+      g.fill();
     }
     g.fillStyle = "rgba(0,0,0,0.55)"; // seam between planks
     g.fillRect(i * pw - 1, 0, 2, s);
+    r.fillStyle = "rgba(55,55,55,0.9)";
+    r.fillRect(i * pw - 1, 0, 2, s);
     if (Math.random() < 0.8) {
-      // occasional butt joint across the plank
-      g.fillRect(i * pw, Math.random() * s, pw, 1.5);
+      // occasional butt joint across the plank, nailed at both edges
+      const jy = Math.random() * s;
+      g.fillRect(i * pw, jy, pw, 1.5);
+      r.fillRect(i * pw, jy, pw, 1.5);
+      g.fillStyle = "rgba(15,10,6,0.9)";
+      g.fillRect(i * pw + 4, jy + 4, 2, 2);
+      g.fillRect(i * pw + pw - 6, jy + 4, 2, 2);
+      g.fillStyle = "rgba(0,0,0,0.55)";
     }
   }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.repeat.set(14, 14);
-  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-  return tex;
+  const albedo = new THREE.CanvasTexture(ac);
+  albedo.wrapS = albedo.wrapT = THREE.RepeatWrapping;
+  albedo.colorSpace = THREE.SRGBColorSpace;
+  albedo.repeat.set(10, 10);
+  albedo.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  const relief = new THREE.CanvasTexture(rc);
+  relief.wrapS = relief.wrapT = THREE.RepeatWrapping;
+  relief.repeat.set(10, 10);
+  relief.anisotropy = albedo.anisotropy;
+  return { albedo, relief };
 }
+const floorSheets = makeFloorSheets();
 const floor = new THREE.Mesh(
   new THREE.PlaneGeometry(46, 46),
-  new THREE.MeshStandardMaterial({ map: makePlankTexture(), roughness: 0.95 }),
+  new THREE.MeshStandardMaterial({
+    map: floorSheets.albedo,
+    bumpMap: floorSheets.relief,
+    bumpScale: 0.4,
+    roughnessMap: floorSheets.relief,
+    roughness: 1.1,
+  }),
 );
 floor.rotation.x = -Math.PI / 2;
 floor.position.y = FLOOR_Y;
@@ -377,7 +576,34 @@ const barrelGeo = new THREE.LatheGeometry(
   >).map(([r, y]) => new THREE.Vector2(r, y)),
   14,
 );
-const barrelMat = new THREE.MeshStandardMaterial({ color: 0x241811, roughness: 0.9 });
+// Stave seams: a lathe's U wraps the circumference, so one seam per tile
+// repeated 9 times around reads as coopered staves for one tiny canvas.
+function makeStaveTexture(): THREE.CanvasTexture {
+  const s = 128;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "#241811";
+  g.fillRect(0, 0, s, s);
+  for (let k = 0; k < 10; k++) {
+    const x = 4 + Math.random() * (s - 8);
+    g.strokeStyle = Math.random() < 0.6 ? "rgba(0,0,0,0.18)" : "rgba(255,215,170,0.05)";
+    g.lineWidth = 0.8 + Math.random() * 1.4;
+    const wob = (Math.random() - 0.5) * 5;
+    g.beginPath();
+    g.moveTo(x, -4);
+    g.bezierCurveTo(x + wob, s * 0.35, x - wob, s * 0.7, x, s + 4);
+    g.stroke();
+  }
+  g.fillStyle = "rgba(0,0,0,0.5)"; // the seam itself, on the tile edge
+  g.fillRect(0, 0, 2, s);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.repeat.set(9, 1);
+  return tex;
+}
+const barrelMat = new THREE.MeshStandardMaterial({ map: makeStaveTexture(), roughness: 0.9 });
 const hoopMat = new THREE.MeshStandardMaterial({
   color: 0x2a221c,
   metalness: 0.6,
@@ -1014,6 +1240,23 @@ const fireSprite = new THREE.Sprite(
 fireSprite.position.set(fireCfg.x, fireCfg.y - 0.35, fireCfg.z);
 fireSprite.scale.set(fireCfg.size, fireCfg.size * 0.73, 1);
 scene.add(fireSprite);
+// A second, smaller sprite inside the flame: the near-white heart real fires
+// have. Flickers on its own faster clock than the outer glow, which is what
+// makes the pair read as combustion instead of a pulsing lamp.
+const fireCore = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: glowTex,
+    color: 0xffd98a,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    fog: false,
+    opacity: 0.85,
+  }),
+);
+fireCore.position.set(fireCfg.x, fireCfg.y - 0.55, fireCfg.z);
+fireCore.scale.set(1.15, 0.95, 1);
+scene.add(fireCore);
 
 // ---------------------------------------------------------------------------
 // Movable-stone rings — the "tap here" affordance. One additive ground quad
@@ -1312,14 +1555,104 @@ function refreshMarkers(state: GameState) {
   handleEscapeChanges(nowEscaped);
 }
 
-/** Master Killer only: tint warded / Ward Breaker-safe / Bulwarked tokens.
- *  Reuses the real isWarded() from master-killer.ts against a minimal
- *  PowerState built from the public `power` field, so the client can never
- *  drift from the server's own definition of "warded". Bulwark's own
- *  protected-ness is simpler — the server already hands over the exact
- *  token id list (bulwarkedTokenIds), no derivation needed. Classic rooms
- *  (currentPower === null) always take the clear-everything branch — a
- *  no-op against the materials' own black-emissive default, so classic
+// ---------------------------------------------------------------------------
+// Protection VFX — emissive tint alone stopped reading the moment the class
+// sculpts took over the stones (teal emissive on a blue Warrior sculpt is
+// invisible; Kasen's exact complaint on the 2026-07-17 iPad pass). Protected
+// stones now wear a dedicated rig in the OWNING CLASS's canon color — the
+// same hexes as the plate gems and targeting rings, so color = author:
+//   Ward (Mage passive)        -> mage purple spinning rune-ring
+//   Bulwark (Warrior cast)     -> warrior blue rune-ring + translucent dome
+//   Ward Breaker safety        -> table-gold rune-ring
+//   Sheltering on a shield tile -> faint still steel ring (information, not
+//                                  spectacle — the tile art carries the rest)
+// Pool of 8 rigs assigned per broadcast in updateTokenTints, animated and
+// stone-tracked in tick(). Classic rooms never assign any.
+// ---------------------------------------------------------------------------
+type StatusKind = "ward" | "bulwark" | "safe" | "shieldTile";
+const STATUS_TINTS: Record<StatusKind, number> = {
+  ward: 0xb45cff,
+  bulwark: 0x3f83ff,
+  safe: 0xffc36a,
+  shieldTile: 0xcfdcec,
+};
+/** Dashed rune-ring, drawn white so the material color carries the class —
+ *  deliberately a different visual language from the solid "movable" ring. */
+function makeStatusRingTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  const dashes = 12;
+  g.strokeStyle = "rgba(255,255,255,0.95)";
+  g.lineWidth = 9;
+  g.shadowBlur = 7;
+  g.shadowColor = "rgba(255,255,255,0.9)";
+  for (let i = 0; i < dashes; i++) {
+    const a0 = (i / dashes) * Math.PI * 2;
+    g.beginPath();
+    g.arc(s / 2, s / 2, 90, a0, a0 + (Math.PI * 2 / dashes) * 0.55);
+    g.stroke();
+  }
+  g.shadowBlur = 0;
+  g.strokeStyle = "rgba(255,255,255,0.35)";
+  g.lineWidth = 2;
+  g.beginPath();
+  g.arc(s / 2, s / 2, 74, 0, Math.PI * 2);
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+// Sized so the dash ring (radius 90/256 of the plane) clearly CIRCLES a
+// stone (Ø ~0.44) instead of hiding under it, yet stays inside one tile
+// (pitch ~0.7) so a protected stone never smears onto its neighbors.
+const statusRingGeo = new THREE.PlaneGeometry(0.94, 0.94);
+const statusRingTex = makeStatusRingTexture();
+const statusDomeGeo = new THREE.SphereGeometry(0.27, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+interface StatusRig {
+  ring: THREE.Mesh;
+  ringMat: THREE.MeshBasicMaterial;
+  dome: THREE.Mesh;
+  domeMat: THREE.MeshBasicMaterial;
+}
+const STATUS_RIG_COUNT = 8;
+const statusRigs: StatusRig[] = [];
+for (let i = 0; i < STATUS_RIG_COUNT; i++) {
+  const ringMat = new THREE.MeshBasicMaterial({
+    map: statusRingTex,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const ring = new THREE.Mesh(statusRingGeo, ringMat);
+  ring.rotation.x = -Math.PI / 2;
+  ring.renderOrder = 1;
+  ring.visible = false;
+  const domeMat = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.12,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const dome = new THREE.Mesh(statusDomeGeo, domeMat);
+  dome.renderOrder = 2;
+  dome.visible = false;
+  scene.add(ring, dome);
+  statusRigs.push({ ring, ringMat, dome, domeMat });
+}
+/** Which stones currently wear which protection — rebuilt per broadcast. */
+const statusMarks: { idx: number; kind: StatusKind }[] = [];
+
+/** Master Killer only: mark warded / Bulwarked / Ward Breaker-safe /
+ *  shield-tile-sheltered tokens for the protection rigs, plus a matching
+ *  emissive lift on the sculpt itself. Reuses the real isWarded() from
+ *  master-killer.ts against a minimal PowerState built from the public
+ *  `power` field, so the client can never drift from the server's own
+ *  definition of "warded". Bulwark's protected-ness is simpler — the server
+ *  already hands over the exact token id list (bulwarkedTokenIds). Classic
+ *  rooms (currentPower === null) always take the clear-everything branch —
+ *  a no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
 function updateTokenTints(state: GameState) {
   const safe = currentPower ? new Set(currentPower.safeTokens) : null;
@@ -1336,21 +1669,35 @@ function updateTokenTints(state: GameState) {
         bulwarkSaves: {},
       }
     : null;
+  statusMarks.length = 0;
   state.tokens.forEach((token, idx) => {
     const mat = markers[idx].mesh.material as THREE.MeshStandardMaterial;
+    let kind: StatusKind | null = null;
     if (fakePower && isWarded(state, fakePower, token)) {
+      kind = "ward";
       mat.emissive.setHex(0x8040ff); // violet — Mage ward
       mat.emissiveIntensity = 0.55;
     } else if (bulwarked && bulwarked.has(token.id)) {
-      mat.emissive.setHex(0x2fd0c0); // cool teal — Warrior Bulwark
+      kind = "bulwark";
+      mat.emissive.setHex(0x2f6bff); // warrior blue — Bulwark is his cast
       mat.emissiveIntensity = 0.5;
     } else if (safe && safe.has(token.id)) {
+      kind = "safe";
       mat.emissive.setHex(0xffa332); // warm gold — Ward Breaker-safe
       mat.emissiveIntensity = 0.45;
     } else {
+      if (
+        currentPower &&
+        token.position >= 0 &&
+        token.position < PATH_LENGTH &&
+        BOARD_LAYOUT[token.position].type === "shield"
+      ) {
+        kind = "shieldTile"; // rig only — no emissive, it's the quiet one
+      }
       mat.emissive.setHex(0x000000);
       mat.emissiveIntensity = 0;
     }
+    if (kind && statusMarks.length < STATUS_RIG_COUNT) statusMarks.push({ idx, kind });
   });
 }
 
@@ -3060,6 +3407,7 @@ function applyOverlay(v: RoomResponse) {
     // and the public power block carries them even if the classPick overlay
     // resolved too fast for pickedClasses to have caught our own pick.
     currentPower = v.power ?? null;
+    updateTokenTints(v.state);
     updatePlates(null);
     updateDock(false); // visible but dormant through the flip-off
     const iFlipped = v.openingFlips[mySide] !== null;
@@ -3079,6 +3427,10 @@ function applyOverlay(v: RoomResponse) {
   // ---- play ----
   currentPower = v.power ?? null;
   currentPowerMoves = v.powerMoves ?? null;
+  // Recompute protection tints/rigs from every applied view, not only from
+  // event replays — event-less applies (opening, action echoes, reconnect
+  // edges) must never leave a stale ward/Bulwark rig on the board.
+  updateTokenTints(v.state);
   const mine = v.yourTurn;
   const movesForTap: Move[] | null = myVariant === "masterKiller" ? v.powerMoves : v.legalMoves;
   updatePlates(v.state);
@@ -4083,6 +4435,49 @@ function tick() {
       (confirmRing.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - out);
     }
   }
+  // Protection rigs ride their stones: class-colored rune-ring decal on the
+  // ground, translucent dome (Bulwark) over the stone itself. Hidden while
+  // the stone is mid-flight, same as the movable rings.
+  for (let i = 0; i < statusRigs.length; i++) {
+    const rig = statusRigs[i];
+    const mark = statusMarks[i];
+    const marker = mark ? markers[mark.idx] : null;
+    if (!mark || !marker || !marker.mesh.visible || marker.flying) {
+      rig.ring.visible = rig.dome.visible = false;
+      continue;
+    }
+    rig.ringMat.color.setHex(STATUS_TINTS[mark.kind]);
+    rig.ring.visible = true;
+    rig.ring.position.set(
+      marker.mesh.position.x,
+      marker.target.y + ELIGIBLE_RING_Y_OFFSET + 0.004,
+      marker.mesh.position.z,
+    );
+    if (mark.kind === "shieldTile") {
+      // Quiet shelter: smaller, faint, still — information, not spectacle.
+      rig.ring.rotation.z = 0;
+      rig.ringMat.opacity = 0.2 + 0.06 * Math.sin(now * 0.0011 + i);
+      rig.ring.scale.setScalar(0.88);
+    } else {
+      // Ward spins with intent; Bulwark turns slow and heavy.
+      rig.ring.rotation.z = now * (mark.kind === "bulwark" ? 0.00035 : 0.0009) + i * 1.3;
+      rig.ringMat.opacity = 0.5 + 0.22 * Math.sin(now * 0.0026 + i * 2.1);
+      rig.ring.scale.setScalar(1);
+    }
+    const domed = mark.kind === "bulwark";
+    rig.dome.visible = domed;
+    if (domed) {
+      rig.domeMat.color.setHex(STATUS_TINTS.bulwark);
+      rig.dome.position.set(
+        marker.mesh.position.x,
+        marker.mesh.position.y - 0.08, // token base — hemisphere wraps the coin
+        marker.mesh.position.z,
+      );
+      const swell = 1 + 0.035 * Math.sin(now * 0.0032 + i);
+      rig.dome.scale.set(swell, swell * 0.85, swell);
+      rig.domeMat.opacity = 0.11 + 0.05 * Math.sin(now * 0.004 + i * 1.7);
+    }
+  }
   // Gentle breathing on the capture-hover glow.
   if (hoverGlow.visible) {
     (hoverGlow.material as THREE.MeshBasicMaterial).opacity =
@@ -4098,6 +4493,22 @@ function tick() {
   fireSprite.scale.set(fireCfg.size * fs, fireCfg.size * 0.73 * fs, 1);
   (fireSprite.material as THREE.SpriteMaterial).opacity =
     fireCfg.opacity + 0.2 * fireCfg.flicker * Math.abs(Math.sin(now * 0.013));
+  // The flame's heart jitters on a faster clock than the outer glow — the
+  // frequency mismatch is what reads as combustion rather than pulsing.
+  const coreFs = 1 + 0.12 * Math.sin(now * 0.031 + 1.1) + 0.08 * Math.sin(now * 0.057);
+  fireCore.scale.set(1.15 * coreFs, 0.95 * coreFs, 1);
+  (fireCore.material as THREE.SpriteMaterial).opacity =
+    0.7 + 0.25 * Math.abs(Math.sin(now * 0.027 + 0.4));
+  // ...and the room breathes with it: the ember spill and under-table floor
+  // wash ride the same flicker (phase-shifted so the room never strobes in
+  // sync) instead of sitting frozen while their own fire dances.
+  const flickN = flick / 10.1; // ±1-ish normalized
+  emberSpill.intensity = 5 * (1 + 0.16 * flickN);
+  floorGlow.intensity =
+    10 * (1 + 0.13 * (Math.sin(now * 0.009 + 2.6) + 0.6 * Math.sin(now * 0.021 + 1.1)));
+  // The hanging lamp drifts a hair in the draft — life, not flicker; the
+  // board must stay rock-steady to read.
+  lamp.intensity = 58 * (1 + 0.02 * Math.sin(now * 0.0008) + 0.012 * Math.sin(now * 0.0021 + 2));
   updateMotes(now);
   updateCoins(now);
   updateMugs(now);
@@ -4214,5 +4625,52 @@ if (dockDemoParam !== null) {
   setInterval(() => {
     if (!armed) applyDemo();
   }, 3000);
+}
+
+// ---------------------------------------------------------------------------
+// Dev-only protection-VFX harness (localhost, ?vfx — same gate family as
+// ?sips / ?dockdemo): parks the menu and poses one deterministic mid-game
+// tableau exercising every protection rig — Mage warded on a sword tile,
+// stones sheltering on shield tiles, a Bulwarked Warrior stone, a Ward
+// Breaker-safe stone — through the REAL refreshMarkers/updateTokenTints
+// path, so what it shows is exactly what a live game shows. Display-only;
+// no session exists.
+// ---------------------------------------------------------------------------
+if (location.hostname === "localhost" && new URLSearchParams(location.search).has("vfx")) {
+  menuEl.classList.remove("show");
+  myVariant = "masterKiller";
+  hud.textContent = "vfx demo";
+  ensureMkPieces();
+  const demoState: GameState = {
+    tokens: [
+      { id: 0, owner: "p1", position: 5 }, // most advanced mage stone → Warded
+      { id: 1, owner: "p1", position: 3 }, // own-row shield tile → sheltering
+      { id: 2, owner: "p1", position: 0 },
+      { id: 3, owner: "p1", position: -1 },
+      { id: 4, owner: "p2", position: 7 }, // middle shield tile → sheltering
+      { id: 5, owner: "p2", position: 9 }, // Bulwarked
+      { id: 6, owner: "p2", position: 4 }, // Ward Breaker-safe
+      { id: 7, owner: "p2", position: -1 },
+    ],
+    currentPlayer: "p1",
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  currentPower = {
+    classes: { p1: "mage", p2: "warrior" },
+    charges: { p1: CHARGE_CAP, p2: 1 }, // full bank → the Mage ward is up
+    safeTokens: [6],
+    pushTargets: [],
+    chargedShotTargets: [],
+    ultimateReady: { p1: false, p2: false },
+    blinkStrikeTargets: [],
+    warpathTargets: [],
+    bulwarkTargets: [],
+    bulwarkedTokenIds: [5],
+    reflipsUsedThisTurn: 0,
+  };
+  refreshMarkers(demoState);
+  updateTokenTints(demoState);
 }
 
