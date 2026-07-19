@@ -1593,6 +1593,12 @@ let currentPower: {
    *  which can be free when the plain cast's is blocked (and vice versa). */
   darkRaiseTargets?: number[];
   exhumeTargets?: number[];
+  /** Optional (older servers omit them): raw lifecycle numbers behind
+   *  bulwarkedTokenIds and the streak — surfaced for the activity log's
+   *  effects panel, never used for gameplay decisions client-side. */
+  bulwarkTurns?: Record<number, number>;
+  bulwarkSavesLeft?: Record<number, number>;
+  shieldStreak?: Record<PlayerId, number>;
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -2233,6 +2239,7 @@ let peeking = false;
 let suppressDockClick = false;
 
 dockEl.addEventListener("pointerdown", (e) => {
+  if (viewingHistory()) return; // board frozen on a historical frame
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".dock-btn");
   if (!btn) return;
   suppressDockClick = false;
@@ -2364,6 +2371,12 @@ function isMyMugUnderPointer(clientX: number, clientY: number): boolean {
 }
 
 canvas.addEventListener("pointerdown", (e) => {
+  if (viewingHistory()) {
+    // Board taps are dead while scrubbing — pulse the banner as the answer.
+    historyBanner.style.transform = "translateX(-50%) scale(1.06)";
+    setTimeout(() => (historyBanner.style.transform = "translateX(-50%)"), 140);
+    return;
+  }
   // Opening flip-off: same tap target and glow as the roll gate.
   if (openingTapArmed) {
     if (isMyCoinUnderPointer(e.clientX, e.clientY)) {
@@ -3255,6 +3268,9 @@ async function post(body: unknown): Promise<unknown> {
 /** Replay one server event — all the TRANSIENT effects, exactly once. */
 function replayEvent(ev: RoomEvent) {
   if (ev.kind === "chat" || ev.kind === "classPick") return; // overlay-rendered
+  // Scrubbing history: the event is already captured in the activity log;
+  // the board stays frozen on the selected frame until "Back to live".
+  if (viewingHistory()) return;
   if (ev.kind === "opening") {
     hideWinScreen(); // a rematch re-enters the flip-off
     clearProcQueue(); // last match's queued procs die with it
@@ -3417,12 +3433,375 @@ function applyOverlay(v: RoomResponse) {
     setStatus(`Game over — ${playerLabel(v.gameOver.winner)} wins`, "ok");
     const { winner, stats } = v.gameOver;
     setTimeout(() => {
+      if (viewingHistory()) {
+        // Rewound view — don't cover it; exitHistory clears shownWinner so
+        // the celebration re-fires the moment we return to live.
+        shownWinner = null;
+        return;
+      }
       showWinScreen(winner, stats);
       showPlayAgainButton();
     }, WIN_SCREEN_DELAY_MS + 1500); // extra beat: the winner's mug slams first
   }
   if (!v.gameOver) shownWinner = null;
 }
+
+// ============================================================================
+// ACTIVITY LOG + REPLAY — every state event the poll stream delivers is kept
+// client-side (the server retains only a short replay window; the full-game
+// history exists only here), rendered as a tap-to-rewind list. Selecting an
+// entry freezes live rendering (events still arrive and are captured — the
+// board just stops following them), re-renders that frame through the SAME
+// refreshMarkers/updateTokenTints/updatePlates path the live game uses, and
+// shows a derived effects breakdown (frame-vs-frame diff + the event's own
+// last* signals): Kasen's 2026-07-19 diagnosis ask — "when events occur on
+// board we have no way of seeing if they are actually correct". "Play out"
+// steps the remaining frames; "Live" snaps back (win screen, overlays and
+// input re-arm via the cached last poll response).
+// ============================================================================
+type StateEvent = Extract<RoomEvent, { kind: "state" }>;
+const LOG_CAP = 2000;
+const activityLog: RoomEvent[] = [];
+let logSelected = -1; // index into activityLog; -1 = following live
+let logPlayTimer: number | null = null;
+let lastResponse: RoomResponse | null = null;
+
+const logPanel = document.getElementById("activity-log") as HTMLDivElement;
+const logEntriesEl = document.getElementById("log-entries") as HTMLDivElement;
+const logToggle = document.getElementById("log-toggle") as HTMLButtonElement;
+const historyBanner = document.getElementById("history-banner") as HTMLDivElement;
+const historyBannerText = document.getElementById("history-banner-text") as HTMLSpanElement;
+
+function viewingHistory(): boolean {
+  return logSelected >= 0;
+}
+
+function captureLogEvent(ev: RoomEvent) {
+  if (ev.kind === "chat" || ev.kind === "classPick") return;
+  activityLog.push(ev);
+  if (activityLog.length > LOG_CAP) activityLog.splice(0, activityLog.length - LOG_CAP);
+  if (logPanel.classList.contains("open") && !viewingHistory()) renderLogList();
+}
+
+function resetActivityLog() {
+  stopPlayOut();
+  activityLog.length = 0;
+  logSelected = -1;
+  logPanel.classList.remove("viewing");
+  historyBanner.classList.remove("show");
+  if (logPanel.classList.contains("open")) renderLogList();
+}
+
+const classHex = (cls: PlayerClass | null | undefined): string =>
+  cls ? `#${DOCK_RING_TINTS[cls].toString(16).padStart(6, "0")}` : "#8a7a5f";
+
+/** You/Opponent labels when seated; P1/P2 for spectatorless edge cases. */
+function logLabel(p: PlayerId): string {
+  return myRole ? (p === myRole ? "You" : "Opponent") : p.toUpperCase();
+}
+
+function actorOf(ev: StateEvent): PlayerId {
+  // Raise commits leave lastMovePlayer stale by contract (the turn never
+  // changed hands) — the caster is the risen stone's owner. Re-flip names
+  // its player outright for the same reason.
+  if (ev.lastRaise) {
+    const o = ev.state.tokens.find((t) => t.id === ev.lastRaise!.tokenId)?.owner;
+    if (o) return o;
+  }
+  if (ev.lastReflip) return ev.lastReflip.player;
+  return ev.lastMovePlayer ?? ev.state.currentPlayer;
+}
+
+/** One line for the list; the effects panel carries the detail. */
+function summarizeEvent(ev: StateEvent): string {
+  if (ev.state.winner) return `${logLabel(ev.state.winner)} win${ev.state.winner === myRole ? "" : "s"} the game`;
+  if (ev.lastExhume) return `Exhume — dragged back to ${tileDisplay(ev.lastExhume.returnedTo)}`;
+  if (ev.lastUltimate) return ev.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
+  if (ev.lastRainOfArrows)
+    return ev.lastRainOfArrows.targetTokenId === null ? "Rain of Arrows — no target" : "Rain of Arrows";
+  if (ev.lastRaise) return ev.lastRaise.dark ? "Dark Resurrection" : "Raise Dead";
+  if (ev.lastChargeSweep) return `Charge — sweep of ${ev.lastChargeSweep.sweptTokenIds.length}`;
+  if (ev.lastPush) return "Push";
+  if (ev.lastChargedShot) return "Charged Shot";
+  if (ev.lastBulwark) return ev.lastBulwark.reinforced ? "Reinforced Bulwark cast" : "Bulwark cast";
+  if (ev.lastReflip) return "Re-flip";
+  if (ev.lastMove) {
+    const m = ev.lastMove;
+    const caps = m.captures.length + ("bonusCaptures" in m ? m.bonusCaptures.length : 0);
+    return `moves ${tileDisplay(m.from)} → ${tileDisplay(m.to)}${caps > 0 ? ` · captures ${caps}` : ""}`;
+  }
+  if (ev.wasSkipped) return `flip ${ev.flip ?? "—"} · turn skipped`;
+  if (ev.lastBulwarkBlock) return `flip ${ev.flip ?? "—"} · Bulwark blocked!`;
+  return ev.flip !== null ? `flip ${ev.flip}` : "state";
+}
+
+function prevStateEvent(i: number): StateEvent | null {
+  for (let k = i - 1; k >= 0; k--) {
+    const e = activityLog[k];
+    if (e.kind === "state") return e;
+  }
+  return null;
+}
+
+/** The diagnosis view: every observable consequence of this frame, derived
+ *  from the frame-vs-frame diff plus the event's own last* signals — the
+ *  same data the live client renders from, so what it says is what the
+ *  server actually did. */
+function describeEffects(i: number): string[] {
+  const ev = activityLog[i] as StateEvent;
+  const prev = prevStateEvent(i);
+  const fx: string[] = [];
+  const cls = (p: PlayerId): string => {
+    const c = ev.power?.classes?.[p];
+    return c ? ` (${c})` : "";
+  };
+  const owner = (id: number): PlayerId | null =>
+    ev.state.tokens.find((t) => t.id === id)?.owner ?? prev?.state.tokens.find((t) => t.id === id)?.owner ?? null;
+  const ownedLabel = (id: number): string => {
+    const o = owner(id);
+    return o ? `${logLabel(o)}'s stone #${id}` : `stone #${id}`;
+  };
+
+  const actor = actorOf(ev);
+  fx.push(`Actor: <b>${logLabel(actor)}</b>${cls(actor)}`);
+  if (ev.flip !== null) fx.push(`Coin flip: <b>${ev.flip}</b>`);
+  if (ev.wasSkipped) fx.push(`<b>Turn skipped</b> — no legal moves${ev.skipReason ? ` (${ev.skipReason})` : ""}`);
+
+  if (ev.lastMove) {
+    const m = ev.lastMove;
+    fx.push(`Move: stone #${m.tokenId} ${tileDisplay(m.from)} → <b>${tileDisplay(m.to)}</b>`);
+    if (m.landsOnShield) fx.push(`Landed on a <b>shield tile</b> — extra turn + charge`);
+  }
+  if (ev.lastReflip) fx.push(`<b>Re-flip</b>: same turn, replacement coin toss`);
+  if (ev.lastRaise) {
+    const dark = ev.lastRaise.dark === true;
+    fx.push(
+      `<b>${dark ? "Dark Resurrection" : "Raise Dead"}</b>: reserve stone #${ev.lastRaise.tokenId} placed on ${tileDisplay(dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION)} — turn continues`,
+    );
+  }
+  if (ev.lastPush) fx.push(`<b>Push</b>: ${ownedLabel(ev.lastPush.targetTokenId)} knocked back`);
+  if (ev.lastChargedShot) fx.push(`<b>Charged Shot</b>: ${ownedLabel(ev.lastChargedShot.targetTokenId)} struck`);
+  if (ev.lastChargeSweep)
+    fx.push(
+      ev.lastChargeSweep.sweptTokenIds.length > 0
+        ? `<b>Charge sweep</b>: swept ${ev.lastChargeSweep.sweptTokenIds.map((id) => ownedLabel(id)).join(", ")}`
+        : `<b>Charge</b>: sweep took no extra stones`,
+    );
+  if (ev.lastRainOfArrows)
+    fx.push(
+      ev.lastRainOfArrows.targetTokenId === null
+        ? `<b>Rain of Arrows</b> fired — no valid target`
+        : `<b>Rain of Arrows</b>: ${ownedLabel(ev.lastRainOfArrows.targetTokenId)} struck down`,
+    );
+  if (ev.lastUltimate)
+    fx.push(
+      `<b>${ev.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath"}</b>: target ${ownedLabel(ev.lastUltimate.targetTokenId)}${ev.lastUltimate.sweptTokenIds.length > 0 ? `, swept ${ev.lastUltimate.sweptTokenIds.map((id) => ownedLabel(id)).join(", ")}` : ""}`,
+    );
+  if (ev.lastExhume)
+    fx.push(`<b>Exhume</b>: escaped ${ownedLabel(ev.lastExhume.targetTokenId)} dragged back to ${tileDisplay(ev.lastExhume.returnedTo)}`);
+  if (ev.lastSoulHarvest)
+    fx.push(`<b>Soul Harvest</b>: ${logLabel(ev.lastSoulHarvest.player)} bank a charge from the death`);
+
+  // Board diff: sent home / escaped / entered (raise entries described above).
+  if (prev) {
+    for (const t of ev.state.tokens) {
+      const was = prev.state.tokens.find((p) => p.id === t.id);
+      if (!was) continue;
+      if (was.position >= 0 && was.position < PATH_LENGTH && t.position === -1)
+        fx.push(`<b>Captured</b>: ${ownedLabel(t.id)} sent home (was ${tileDisplay(was.position)})`);
+      if (was.position < PATH_LENGTH && t.position >= PATH_LENGTH) fx.push(`<b>Escaped</b>: ${ownedLabel(t.id)} is out!`);
+    }
+  }
+
+  // Charge economy: exact before/after per player.
+  if (ev.power && prev?.power) {
+    for (const p of ["p1", "p2"] as PlayerId[]) {
+      const a = prev.power.charges[p];
+      const b = ev.power.charges[p];
+      if (a !== b) fx.push(`Charges ${logLabel(p)}: ${a} → <b>${b}</b>`);
+    }
+  }
+  if (ev.flip === 0 && ev.lastChargeEvent && ev.lastChargeEvent.delta > 0)
+    fx.push(`Zero flip — <b>consolation charge</b> banked`);
+
+  // Shield streak + ultimate readiness (the Exhume/Warpath/Blink gate).
+  if (ev.power?.shieldStreak && prev?.power?.shieldStreak) {
+    for (const p of ["p1", "p2"] as PlayerId[]) {
+      const a = prev.power.shieldStreak[p];
+      const b = ev.power.shieldStreak[p];
+      if (a !== b) fx.push(`Shield streak ${logLabel(p)}: ${a} → <b>${b}</b>`);
+    }
+  }
+  if (ev.power && prev?.power) {
+    for (const p of ["p1", "p2"] as PlayerId[]) {
+      if (!prev.power.ultimateReady[p] && ev.power.ultimateReady[p])
+        fx.push(`<b>ULTIMATE READY</b> for ${logLabel(p)} — streak complete`);
+      if (prev.power.ultimateReady[p] && !ev.power.ultimateReady[p]) fx.push(`Ultimate spent by ${logLabel(p)}`);
+    }
+  }
+
+  // Bulwark lifecycle — the raw countdown/save numbers behind the glow.
+  if (ev.lastBulwarkBlock)
+    for (const id of ev.lastBulwarkBlock.tokenIds)
+      fx.push(`<b>Bulwark BLOCKED</b> a threat to ${ownedLabel(id)} — it still guards for the rest of this turn`);
+  const bwNow = ev.power?.bulwarkTurns ?? {};
+  const bwPrev = prev?.power?.bulwarkTurns ?? {};
+  const svNow = ev.power?.bulwarkSavesLeft ?? {};
+  const svPrev = prev?.power?.bulwarkSavesLeft ?? {};
+  if (ev.power?.bulwarkTurns || prev?.power?.bulwarkTurns) {
+    for (const idStr of Object.keys(bwNow)) {
+      const id = Number(idStr);
+      if (bwPrev[id] === undefined)
+        fx.push(`<b>Bulwark raised</b> on ${ownedLabel(id)} — ${bwNow[id]} turns${(svNow[id] ?? 1) > 1 ? `, ${svNow[id]} saves` : ""}`);
+      else if (bwNow[id] < bwPrev[id]) fx.push(`Bulwark on ${ownedLabel(id)} ticks: <b>${bwNow[id]}</b> turn${bwNow[id] === 1 ? "" : "s"} left`);
+      if (svPrev[id] !== undefined && svNow[id] !== undefined && svNow[id] < svPrev[id])
+        fx.push(`Bulwark on ${ownedLabel(id)} spent a save — <b>${svNow[id]}</b> left`);
+    }
+    for (const idStr of Object.keys(bwPrev)) {
+      const id = Number(idStr);
+      if (bwNow[id] !== undefined) continue;
+      if (ev.lastBulwarkBlock?.tokenIds.includes(id))
+        fx.push(`Bulwark on ${ownedLabel(id)} <b>consumed</b> by that block — glow falls when the turn ends`);
+      else if (bwPrev[id] === 1) fx.push(`Bulwark on ${ownedLabel(id)} <b>expired</b> (countdown reached 0)`);
+      else fx.push(`Bulwark on ${ownedLabel(id)} ended (stone captured or spent)`);
+    }
+  }
+
+  if (prev && prev.state.currentPlayer !== ev.state.currentPlayer)
+    fx.push(`Turn passes: ${logLabel(prev.state.currentPlayer)} → <b>${logLabel(ev.state.currentPlayer)}</b>`);
+  else if (ev.state.extraTurn) fx.push(`<b>Extra turn</b> — same player goes again`);
+  if (ev.state.winner) fx.push(`<b>GAME OVER</b> — ${logLabel(ev.state.winner)} win${ev.state.winner === myRole ? "" : "s"}`);
+  return fx;
+}
+
+function renderLogList() {
+  const start = Math.max(0, activityLog.length - 500);
+  let html = start > 0 ? `<div class="log-divider">${start} earlier events trimmed</div>` : "";
+  if (activityLog.length === 0) html = `<div class="log-divider">No events yet</div>`;
+  for (let i = start; i < activityLog.length; i++) {
+    const ev = activityLog[i];
+    if (ev.kind === "opening") {
+      html += `<div class="log-divider">— flip-off —</div>`;
+      continue;
+    }
+    if (ev.kind !== "state") continue;
+    const actor = actorOf(ev);
+    const sel = i === logSelected;
+    html +=
+      `<button class="log-entry${sel ? " sel" : ""}" data-i="${i}">` +
+      `<span class="le-turn">#${ev.seq}</span>` +
+      `<span class="le-who" style="color:${classHex(ev.power?.classes?.[actor])};background:${classHex(ev.power?.classes?.[actor])}"></span>` +
+      `${logLabel(actor)} ${summarizeEvent(ev)}</button>`;
+    if (sel) html += `<ul class="log-effects">${describeEffects(i).map((f) => `<li>${f}</li>`).join("")}</ul>`;
+  }
+  logEntriesEl.innerHTML = html;
+  if (!viewingHistory()) logEntriesEl.scrollTop = logEntriesEl.scrollHeight;
+}
+
+/** Render one historical frame through the live pipeline. */
+function renderHistoryFrame(i: number) {
+  const ev = activityLog[i];
+  if (ev.kind !== "state") return;
+  refreshMarkers(ev.state, ev.lastExhume != null);
+  currentPower = ev.power ?? null;
+  updateTokenTints(ev.state);
+  updatePlates(ev.state);
+  historyBannerText.textContent = `Viewing history — event #${ev.seq}`;
+}
+
+function enterHistory(i: number) {
+  if (activityLog[i]?.kind !== "state") return;
+  stopPlayOut();
+  disarm();
+  hideAbilityTip();
+  clearProcQueue();
+  hideWinScreen(); // a finished game's celebration would sit over the rewind
+  shownWinner = null; // …and must re-fire when we return to live
+  logSelected = i;
+  logPanel.classList.add("viewing");
+  historyBanner.classList.add("show");
+  renderMoves(null, false);
+  renderHistoryFrame(i);
+  renderLogList();
+  logEntriesEl.querySelector(".log-entry.sel")?.scrollIntoView({ block: "center" });
+}
+
+function stopPlayOut() {
+  if (logPlayTimer !== null) {
+    clearInterval(logPlayTimer);
+    logPlayTimer = null;
+  }
+}
+
+function exitHistory() {
+  stopPlayOut();
+  logSelected = -1;
+  logPanel.classList.remove("viewing");
+  historyBanner.classList.remove("show");
+  // Snap to the newest recorded frame, then re-arm overlays (win screen,
+  // move rings, dock, pending flip) from the cached last poll response.
+  for (let k = activityLog.length - 1; k >= 0; k--) {
+    const e = activityLog[k];
+    if (e.kind === "state") {
+      refreshMarkers(e.state, false);
+      currentPower = e.power ?? null;
+      updateTokenTints(e.state);
+      updatePlates(e.state);
+      break;
+    }
+  }
+  if (lastResponse) applyOverlay(lastResponse);
+  renderLogList();
+}
+
+function stepHistory(dir: 1 | -1) {
+  let n = logSelected + dir;
+  while (n >= 0 && n < activityLog.length && activityLog[n].kind !== "state") n += dir;
+  if (n < 0 || n >= activityLog.length) return;
+  enterHistoryQuiet(n);
+}
+
+/** enterHistory without the one-time teardown (already in history mode). */
+function enterHistoryQuiet(i: number) {
+  logSelected = i;
+  renderHistoryFrame(i);
+  renderLogList();
+  logEntriesEl.querySelector(".log-entry.sel")?.scrollIntoView({ block: "nearest" });
+}
+
+function playOutHistory() {
+  stopPlayOut();
+  logPlayTimer = window.setInterval(() => {
+    let n = logSelected + 1;
+    while (n < activityLog.length && activityLog[n].kind !== "state") n++;
+    if (n >= activityLog.length) {
+      exitHistory();
+      return;
+    }
+    enterHistoryQuiet(n);
+  }, 650);
+}
+
+logToggle.addEventListener("click", () => {
+  const open = logPanel.classList.toggle("open");
+  if (open) renderLogList();
+});
+document.getElementById("log-close")!.addEventListener("click", () => {
+  logPanel.classList.remove("open");
+});
+logEntriesEl.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".log-entry");
+  if (!btn) return;
+  const i = Number(btn.dataset.i);
+  if (i === logSelected) exitHistory();
+  else if (viewingHistory()) enterHistoryQuiet(i);
+  else enterHistory(i);
+});
+document.getElementById("log-prev")!.addEventListener("click", () => stepHistory(-1));
+document.getElementById("log-next")!.addEventListener("click", () => stepHistory(1));
+document.getElementById("log-play")!.addEventListener("click", () => playOutHistory());
+document.getElementById("log-live")!.addEventListener("click", () => exitHistory());
+document.getElementById("history-live")!.addEventListener("click", () => exitHistory());
 
 /** Process a poll response: resync-snap or replay, then apply the overlay. */
 function processResponse(v: RoomResponse) {
@@ -3434,21 +3813,27 @@ function processResponse(v: RoomResponse) {
   // wire — never let an older snapshot regress an overlay we've already
   // rendered past. (Events are separately seq-gated below regardless.)
   if (v.latestSeq < lastSeq) return;
+  lastResponse = v; // exitHistory re-arms overlays from the newest response
   if (v.resync) {
     // Too far behind for replay: snap silently (no banners, no tumbles).
     seenOpeningFlips = { ...v.openingFlips };
-    currentPower = v.power ?? null;
-    refreshMarkers(v.state);
-    updateTokenTints(v.state);
-    updatePlates(v.state);
+    if (!viewingHistory()) {
+      currentPower = v.power ?? null;
+      refreshMarkers(v.state);
+      updateTokenTints(v.state);
+      updatePlates(v.state);
+    }
     if (v.flip !== null && v.yourTurn) pendingFlipSeq = v.latestSeq;
   } else {
     for (const ev of v.events) {
-      if (ev.seq > lastSeq) replayEvent(ev);
+      if (ev.seq > lastSeq) {
+        captureLogEvent(ev); // the log records even what the board won't show yet
+        replayEvent(ev);
+      }
     }
   }
   lastSeq = Math.max(lastSeq, v.latestSeq);
-  applyOverlay(v);
+  if (!viewingHistory()) applyOverlay(v);
   setStatus(v.opponentAway ? "Opponent reconnecting…" : "Connected", v.opponentAway ? "err" : "ok");
 }
 
@@ -3791,6 +4176,9 @@ function resetToMenu(message: string) {
   pollGen++; // retire any in-flight poll loop
   session = null;
   lastSeq = 0;
+  resetActivityLog();
+  lastResponse = null;
+  logPanel.classList.remove("open");
   pendingFlipSeq = 0;
   armedFlipSeq = 0;
   shownWinner = null;
@@ -4634,5 +5022,87 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
   };
   refreshMarkers(demoState);
   updateTokenTints(demoState);
+}
+
+// ---------------------------------------------------------------------------
+// Dev-only Activity Log harness (localhost, ?logdemo[=select] — same gate
+// family as ?vfx / ?dockdemo): drives a SEEDED CPU-vs-CPU Master Killer game
+// through the REAL client pipeline — every commit lands via viewFor →
+// processResponse, so the activity log, board, plates and scrubber behave
+// exactly as a live game's would, deterministically. `?logdemo=select`
+// additionally rewinds to the most diagnostic frame (a Bulwark block or a
+// Dark Resurrection if the seed produced one, else the last capture) so a
+// single screenshot verifies list + rewind + effects. Engine modules load
+// via dynamic import so this whole harness code-splits out of the
+// production path.
+// ---------------------------------------------------------------------------
+if (location.hostname === "localhost" && new URLSearchParams(location.search).has("logdemo")) {
+  void (async () => {
+    const eng = await import("../../room-engine.ts");
+    const { pickBotPowerAction } = await import("../../master-killer-bot.ts");
+    const mulberry32 = (seed: number) => () => {
+      seed |= 0;
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const rand = mulberry32(20260719);
+    let now = 1_000_000;
+    let doc = eng.createRoomDoc("LOGDEMO", true, "masterKiller", "p1tok", now, false, "standard");
+    myRole = "p1";
+    menuEl.classList.remove("show");
+    hud.textContent = "logdemo: playing…";
+    let seq = 0;
+    for (let steps = 0; steps < 900 && !doc.state.winner; steps++) {
+      now += 5000;
+      doc = eng.tick(doc, now, rand);
+      if (doc.phase === "classPick" && !doc.classesPicked.p1) {
+        doc = eng.applyAction(doc, "p1", { op: "pickClass", class: "necromancer" }, now).doc;
+      } else if (doc.phase === "opening" && doc.openingFlips.p1 === null) {
+        doc = eng.applyAction(doc, "p1", { op: "openingFlip" }, now).doc;
+      } else if (
+        doc.phase === "play" &&
+        !doc.state.winner &&
+        doc.state.currentPlayer === "p1" &&
+        doc.currentFlip !== null &&
+        doc.mk
+      ) {
+        const moves = doc.currentPowerMoves ?? [];
+        const action = pickBotPowerAction(doc.state, eng.fromWirePower(doc.mk), moves, doc.currentFlip, rand, "standard");
+        if (action) {
+          const input =
+            action.kind === "move"
+              ? { op: "chooseMove", moveIndex: moves.indexOf(action.move) }
+              : action.kind === "charge"
+                ? { op: "usePower", action: { kind: "charge", moveIndex: moves.indexOf(action.move) } }
+                : { op: "usePower", action };
+          const r = eng.applyAction(doc, "p1", input as Parameters<typeof eng.applyAction>[2], now);
+          if (!r.error) doc = r.doc;
+        }
+      }
+      const v = eng.viewFor(doc, "p1", seq, now);
+      if (v.latestSeq > seq) {
+        processResponse(v as unknown as RoomResponse);
+        seq = v.latestSeq;
+      }
+    }
+    clearProcQueue(); // the burst queued a game's worth of banners — drop them
+    logPanel.classList.add("open");
+    renderLogList();
+    if (new URLSearchParams(location.search).get("logdemo") === "select") {
+      let pick = -1;
+      for (let i = activityLog.length - 1; i >= 0 && pick < 0; i--) {
+        const e = activityLog[i];
+        if (e.kind === "state" && (e.lastBulwarkBlock || e.lastRaise?.dark === true)) pick = i;
+      }
+      for (let i = activityLog.length - 1; i >= 0 && pick < 0; i--) {
+        const e = activityLog[i];
+        if (e.kind === "state" && e.lastMove && e.lastMove.captures.length > 0) pick = i;
+      }
+      if (pick >= 0) enterHistory(pick);
+    }
+    hud.textContent = `logdemo: ${activityLog.length} events · winner ${doc.state.winner ?? "none"}`;
+  })();
 }
 
