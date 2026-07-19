@@ -901,8 +901,8 @@ const MK_WIN_VALUE = 1_000_000;
 const SIM_RAND = () => 0.5;
 
 /** One player's side of the eval: escaped >> progress + shield perch, minus
- *  probability-weighted capture threat (skipped while Ward/Bulwark/transient
- *  safety protects the token), plus the charge economy terms. */
+ *  probability-weighted capture threat (skipped while Ward/Bulwark
+ *  protects the token), plus the charge economy terms. */
 function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): number {
   let score = 0;
   for (const t of state.tokens) {
@@ -924,8 +924,7 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
       tile.isContested &&
       tile.type !== "shield" &&
       !isWarded(state, power, t) &&
-      !isBulwarked(power, t) &&
-      !power.safeTokens.has(t.id)
+      !isBulwarked(power, t)
     ) {
       // A necromancer's exposure is cheap by design — see MK_EVAL_NECRO_THREAT_SCALE.
       const threatScale = power.classes[player] === "necromancer" ? MK_EVAL_NECRO_THREAT_SCALE : 1;

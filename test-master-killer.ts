@@ -262,8 +262,9 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Ward Breaker: breaks a ward, grants transient safety that persists
-//    across an unrelated move and clears when that token itself moves again
+// 5. Ward Breaker: breaks a ward and captures — WITHOUT any follow-up
+//    protection (the old transient-safety "ward counter" was removed on
+//    2026-07-17, Kasen's fix list: it played like an undocumented ward)
 // ---------------------------------------------------------------------------
 {
   // p1 warrior token 0 at 4; p2 mage token 4 at 6, p2 at full charge (warded).
@@ -276,37 +277,27 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Ward Breaker: flags breaksWard", !!m && m.breaksWard === true);
 
   const r1 = applyPowerMove(s, pw, m!, "p1");
-  check("Ward Breaker: grants transient safety to the landing token", r1.power.safeTokens.has(0));
-
-  // An UNRELATED move by a different p1 token shouldn't clear token 0's safety.
-  // (The Ward Breaker capture wasn't a shield landing, so the turn passed to
-  // p2 — force it back to p1 to test "p1's next move" in isolation.)
+  // REGRESSION (safety removal): the Warrior's landing token must be
+  // capturable right back on the opponent's next turn — no lingering
+  // protection of any kind. p2's remaining mage token at 4 flips a 2 onto
+  // the Warrior now sitting at 6 (contested — same physical tile).
   const s2: GameState = {
     ...r1.state,
-    currentPlayer: "p1",
-    tokens: r1.state.tokens.map((t) => (t.id === 1 ? { ...t, position: 0 } : t)),
+    tokens: r1.state.tokens.map((t) => (t.id === 5 ? { ...t, position: 4 } : t)),
   };
-  const moves2 = getLegalPowerMoves(s2, r1.power, 1); // token 1 at 0 -> 1, a plain move
-  const m2 = moves2.find((mv) => mv.tokenId === 1);
-  const r2 = applyPowerMove(s2, r1.power, m2!, "p1");
-  check("Ward Breaker: safety survives an unrelated move by the same player", r2.power.safeTokens.has(0));
-
-  // Now move token 0 itself again — its safety should clear.
-  const s3 = { ...r2.state, currentPlayer: "p1" as PlayerId };
-  const moves3 = getLegalPowerMoves(s3, r2.power, 1); // token 0 at 6 -> 7 (shield) or similar
-  const m3 = moves3.find((mv) => mv.tokenId === 0);
-  if (m3) {
-    const r3 = applyPowerMove(s3, r2.power, m3, "p1");
-    check("Ward Breaker: safety clears once that token moves again", !r3.power.safeTokens.has(0));
-  } else {
-    check("Ward Breaker: safety clears once that token moves again", false, "no move found for token 0 to re-test with");
-  }
+  const movesBack = getLegalPowerMoves(s2, r1.power, 2); // p2's turn after the capture
+  const mBack = movesBack.find((mv) => mv.tokenId === 5 && mv.to === 6);
+  check(
+    "Ward Breaker: the capturing Warrior gains NO protection — it can be captured right back",
+    !!mBack && mBack.captures.includes(0),
+    JSON.stringify(movesBack),
+  );
 }
 
 // ---------------------------------------------------------------------------
 // 6. Charge: sweeps intermediate captures (including warded ones — the
-//    sweep pierces Ward same as Ward Breaker), stops at shield tiles and
-//    transient safety, refuses when its own token blocks the lane
+//    sweep pierces Ward same as Ward Breaker), stops at shield tiles,
+//    refuses when its own token blocks the lane
 // ---------------------------------------------------------------------------
 {
   // p1 warrior at 4, flip 4 -> to 8. Intermediate contested tiles 5,6,7.
@@ -356,20 +347,6 @@ function check(name: string, cond: boolean, detail?: string) {
     "Charge: DOES sweep a warded intermediate enemy",
     !!mWard && mWard.chargeSweepCaptures.includes(4),
     JSON.stringify(mWard),
-  );
-
-  // Transient safety (Ward Breaker's own "just captured, briefly immune"
-  // grant) still blocks the sweep unconditionally, same as a shield tile —
-  // this is the one protection with no exception for anyone, including
-  // the Warrior that granted it.
-  const sSafe = state("p1", { 0: 4, 4: 6 });
-  const pwSafe: PowerState = { ...power({ p1: "warrior" }, { p1: 1 }), safeTokens: new Set([4]) };
-  const movesSafe = getLegalPowerMoves(sSafe, pwSafe, 4);
-  const mSafe = movesSafe.find((mv) => mv.tokenId === 0 && mv.to === 8);
-  check(
-    "Charge: does not sweep a transiently-safe enemy",
-    !!mSafe && !mSafe.chargeSweepCaptures.includes(4),
-    JSON.stringify(mSafe),
   );
 
   // CHARGE_SWEEP_CAP: two unprotected enemies sit in the lane, but only 1
@@ -670,22 +647,14 @@ function check(name: string, cond: boolean, detail?: string) {
   const rWard = applyPowerMove(s1, pwVsMage2, m1, "p1", () => 0);
   check("Ultimate: Rain of Arrows bypasses Ward for its target", rWard.rainOfArrows?.targetTokenId === 4);
 
-  // Respects transient safety: the sole eligible candidate is safe — pool is
-  // empty, so it fires into nothing (streak still consumed, not a silent no-op).
-  const pwSafe: PowerState = { ...pwArcher2, safeTokens: new Set([4]) };
-  const rSafe = applyPowerMove(s1, pwSafe, m1, "p1", () => 0);
-  check(
-    "Ultimate: respects transient safety — whiffs rather than picking a safe token",
-    rSafe.rainOfArrows?.targetTokenId === null,
-  );
-  check("Ultimate: streak still resets to 0 on a whiff", rSafe.power.shieldStreak.p1 === 0);
-
-  // Empty pool entirely (no enemies anywhere): also a clean whiff, and no
-  // phantom charge beyond the ordinary landsOnShield grant.
+  // Empty pool entirely (no enemies anywhere): a clean whiff — streak still
+  // consumed (not a silent no-op), and no phantom charge beyond the
+  // ordinary landsOnShield grant.
   const sEmpty = state("p1", { 0: 6 });
   const mEmpty = getLegalPowerMoves(sEmpty, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
   const rEmpty = applyPowerMove(sEmpty, pwArcher2, mEmpty, "p1", () => 0);
   check("Ultimate: whiffs cleanly with no enemies on the board at all", rEmpty.rainOfArrows?.targetTokenId === null);
+  check("Ultimate: streak still resets to 0 on a whiff", rEmpty.power.shieldStreak.p1 === 0);
   check(
     "Ultimate: an empty-pool whiff still only grants the ordinary shield-landing charge",
     rEmpty.power.charges.p1 === 1,
@@ -812,15 +781,6 @@ function check(name: string, cond: boolean, detail?: string) {
   const rBlinkWard = applyBlinkStrike(sBlinkWard, pwBlinkWard, 4, "p1");
   check("Blink Strike: captures a warded target", rBlinkWard.state.tokens.find((t) => t.id === 4)!.position === -1);
 
-  // Respects transient safety — a safe token is excluded from the target
-  // pool entirely (inherited from getRainOfArrowsTargets).
-  const sBlinkSafe = state("p1", { 0: 5, 4: 9 });
-  const pwBlinkSafe: PowerState = { ...readyPower("mage"), safeTokens: new Set([4]) };
-  check(
-    "Blink Strike: a transiently-safe token is excluded from targets",
-    !getBlinkStrikeTargets(sBlinkSafe, pwBlinkSafe, "p1").includes(4),
-  );
-
   // No on-board token to relocate -> no legal targets at all.
   const sBlinkNone = state("p1", { 4: 9 }); // p1 has zero on-board tokens
   check(
@@ -857,15 +817,8 @@ function check(name: string, cond: boolean, detail?: string) {
     JSON.stringify(rWarUncapped.sweptTokenIds),
   );
 
-  // Does not sweep a transiently-safe token.
-  const pwWarSafe: PowerState = { ...readyPower("warrior"), safeTokens: new Set([4]) };
-  const rWarSafe = applyWarpath(sWarSweep, pwWarSafe, 5, "p1");
-  check("Warpath: does not sweep a transiently-safe token", rWarSafe.state.tokens.find((t) => t.id === 4)!.position === 6);
-  check("Warpath: sweptTokenIds excludes the safe token", !rWarSafe.sweptTokenIds.includes(4));
-
   // Bypasses shield-tile protection AND Ward for a SWEPT token (not just the
-  // primary target), and grants Ward Breaker-style transient safety to the
-  // landing token because a Ward broke somewhere along the way. Teleporting
+  // primary target). Teleporting
   // BACKWARD (target behind the mover) puts the swept token closer to the
   // mover's start — i.e. at a HIGHER raw position than the target — which is
   // exactly what it takes for it to be p2's most-advanced on-board token
@@ -879,13 +832,16 @@ function check(name: string, cond: boolean, detail?: string) {
   );
   const rWarWard = applyWarpath(sWarWard, pwWarWard, 5, "p1");
   check("Warpath: sweeps a warded token sitting on a shield tile", rWarWard.state.tokens.find((t) => t.id === 4)!.position === -1);
+  // REGRESSION (safety removal): breaking a Ward along the way grants the
+  // landing token nothing anymore — p2 can capture it right back (a fresh
+  // p2 token entering at tile 4, where the Warpath landed p1's token0).
+  const movesAfterWard = getLegalPowerMoves(rWarWard.state, rWarWard.power, 5); // p2's turn; reserve entry lands at 4
+  const mRecapture = movesAfterWard.find((mv) => mv.to === 4 && mv.captures.includes(0));
   check(
-    "Warpath: grants transient safety to the landing token when a Ward breaks along the way",
-    rWarWard.power.safeTokens.has(0),
+    "Warpath: a Ward broken along the way grants NO protection to the landing token",
+    !!mRecapture,
+    JSON.stringify(movesAfterWard),
   );
-
-  // No Ward broken anywhere -> no safety grant.
-  check("Warpath: no transient safety granted when no Ward was broken", !rWarSweep.power.safeTokens.has(0));
 
   // Direction-agnostic: teleporting BACKWARD (target behind the mover) still
   // sweeps whatever's caught strictly between, same as forward.
@@ -923,12 +879,11 @@ function check(name: string, cond: boolean, detail?: string) {
 // ---------------------------------------------------------------------------
 // 14. Warrior's Bulwark: a second charge-spend active. Unlike every other
 //     power action, the mover taps ONE OF THEIR OWN on-board tokens. Full
-//     immunity to a normal capture/Snipe, a Charge sweep, Blink Strike, and
-//     Warpath (folded into isProtected/isBulwarked); a Push can still knock
-//     it around, just never send it all the way home; Rain of Arrows is a
-//     deliberate exception (judgment call — not in the spec's explicit
-//     4-action block list, and consistent with its "punches through
-//     everything" identity, same as it already does to shield tiles/Ward).
+//     immunity to a normal capture/Snipe and a Charge sweep (folded into
+//     isProtected/isBulwarked); a Push can still knock it around, just
+//     never send it all the way home; every ultimate — Rain of Arrows,
+//     Blink Strike, AND Warpath — punches straight through it (2026-07-17,
+//     Kasen's fix list dropped the old Bulwark-blocks-ultimates rule).
 //     Expires after BULWARK_TURNS of the Bulwarked player's own turns, OR
 //     the instant it actually blocks something, whichever comes first.
 // ---------------------------------------------------------------------------
@@ -1001,42 +956,51 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- Blocks Blink Strike --------------------------------------------------
+  // --- Blink Strike pierces Bulwark (2026-07-17) ---------------------------
   {
     const s = state("p1", { 0: 5, 4: 8 });
     const base = power({ p1: "mage" });
     const pw: PowerState = { ...base, ultimateReady: { ...base.ultimateReady, p1: true }, bulwarked: { 4: 3 } };
     const targets = getBlinkStrikeTargets(s, pw, "p1");
-    check("Bulwark: excluded from Blink Strike's target pool", !targets.includes(4), JSON.stringify(targets));
+    check("Bulwark: a Bulwarked token IS a legal Blink Strike target (ultimates pierce)", targets.includes(4), JSON.stringify(targets));
 
-    // Sanity: the same token IS a legal Blink Strike target without Bulwark.
-    const pwNo: PowerState = { ...base, ultimateReady: { ...base.ultimateReady, p1: true } };
+    const r = applyBlinkStrike(s, pw, 4, "p1");
+    check("Bulwark: Blink Strike captures the Bulwarked token", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    // Leak regression (same bug class as the old Rain of Arrows fix): the
+    // captured token's Bulwark entry must not survive the trip to reserve.
     check(
-      "Bulwark: sanity — the same token is targetable without Bulwark",
-      getBlinkStrikeTargets(s, pwNo, "p1").includes(4),
+      "Bulwark: Blink Strike clears the captured token's bulwarked entry",
+      r.power.bulwarked[4] === undefined,
+      JSON.stringify(r.power.bulwarked),
     );
   }
 
-  // --- Blocks Warpath (both the primary target AND a swept token) ----------
+  // --- Warpath pierces Bulwark too (primary target AND swept tokens) -------
   {
     const sTarget = state("p1", { 0: 4, 4: 9 });
     const baseW = power({ p1: "warrior" });
     const pwTarget: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, bulwarked: { 4: 3 } };
     check(
-      "Bulwark: excluded from Warpath's primary target pool",
-      !getWarpathTargets(sTarget, pwTarget, "p1").includes(4),
+      "Bulwark: a Bulwarked token IS a legal Warpath primary target (ultimates pierce)",
+      getWarpathTargets(sTarget, pwTarget, "p1").includes(4),
     );
 
-    // Sweep victim Bulwarked (the primary target itself is unprotected).
+    // Sweep victim Bulwarked (the primary target itself is unprotected) —
+    // the sweep takes it anyway, and its Bulwark entry clears with it.
     const sSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between, Bulwarked); target enemy5 at 9
     const pwSweep: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, bulwarked: { 4: 3 } };
     const r = applyWarpath(sSweep, pwSweep, 5, "p1");
-    check("Bulwark: a swept token in Warpath's path is NOT captured", r.state.tokens.find((t) => t.id === 4)!.position === 6);
-    check("Bulwark: the swept-but-Bulwarked id is excluded from sweptTokenIds", !r.sweptTokenIds.includes(4));
-    check("Bulwark: the primary (unprotected) target is still captured", r.state.tokens.find((t) => t.id === 5)!.position === -1);
+    check("Bulwark: a Bulwarked token in Warpath's path IS swept", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Bulwark: the swept Bulwarked id appears in sweptTokenIds", r.sweptTokenIds.includes(4));
+    check("Bulwark: the primary target is still captured", r.state.tokens.find((t) => t.id === 5)!.position === -1);
+    check(
+      "Bulwark: Warpath clears the swept token's bulwarked entry",
+      r.power.bulwarked[4] === undefined,
+      JSON.stringify(r.power.bulwarked),
+    );
   }
 
-  // --- Judgment call: Rain of Arrows still bypasses Bulwark -----------------
+  // --- Rain of Arrows pierces Bulwark (always has) --------------------------
   {
     const s = state("p1", { 0: 6, 4: 9 }); // token0 6->7 (shield); sole candidate enemy4 at 9, Bulwarked
     const seeded: PowerState = {
@@ -1047,7 +1011,7 @@ function check(name: string, cond: boolean, detail?: string) {
     const m = getLegalPowerMoves(s, seeded, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
     const r = applyPowerMove(s, seeded, m, "p1", () => 0);
     check(
-      "Bulwark: Rain of Arrows still bypasses Bulwark (deliberate — not in the spec's 4-action block list)",
+      "Bulwark: Rain of Arrows bypasses Bulwark (same rule as every ultimate now)",
       r.rainOfArrows?.targetTokenId === 4,
     );
   }
@@ -1295,12 +1259,9 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- Protection semantics while up: identical to plain (isBulwarked) ------
+  // --- Protection semantics while up (2026-07-17, Kasen's fix list) --------
   {
-    // Blink Strike still can't target it (Bulwark blocks ultimates, plain or
-    // reinforced), and a soft Push is still allowed while a send-home Push
-    // is still blocked — the same isBulwarked-driven rules as section 14,
-    // exercised here with a REINFORCED record shape (saves entry present).
+    // Ultimates pierce a reinforced Bulwark same as a plain one...
     const base = power({ p1: "mage", p2: "warrior" }, { p1: 0 });
     const s = state("p1", { 0: 8, 4: 6 });
     const pwUlt: PowerState = {
@@ -1310,17 +1271,26 @@ function check(name: string, cond: boolean, detail?: string) {
       bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
     };
     check(
-      "Reinforced Bulwark: excluded from Blink Strike's target pool, same as plain",
-      !getBlinkStrikeTargets(s, pwUlt, "p1").includes(4),
+      "Reinforced Bulwark: IS a legal Blink Strike target (ultimates pierce, plain or reinforced)",
+      getBlinkStrikeTargets(s, pwUlt, "p1").includes(4),
     );
 
-    const sSoft = state("p1", { 0: 4, 4: 8 }); // push 8 -> 7: no collision, stays on board
+    // ...but a plain Push can't touch it AT ALL — not even the soft shove a
+    // plain Bulwark still allows. This is fix 1 from the 2026-07-17 list:
+    // "archer's push doesn't affect reinforced bulwark."
+    const sSoft = state("p1", { 0: 4, 4: 8 }); // push 8 -> 7 would be a clean soft shove
     const pwSoft: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
       bulwarked: { 4: BULWARK_REINFORCED_TURNS },
       bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
     };
-    check("Reinforced Bulwark: a soft (non-home) Push target is still legal", getPushTargets(sSoft, pwSoft, "p1").includes(4));
+    check("Reinforced Bulwark: NOT a legal Push target, even for a soft shove", !getPushTargets(sSoft, pwSoft, "p1").includes(4));
+    // Sanity: the same soft shove IS legal against a merely-plain Bulwark.
+    const pwPlain: PowerState = {
+      ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
+      bulwarked: { 4: BULWARK_TURNS },
+    };
+    check("Reinforced Bulwark: sanity — the same soft Push IS legal against a plain Bulwark", getPushTargets(sSoft, pwPlain, "p1").includes(4));
 
     const sHome = state("p1", { 4: 0 }); // push 0 -> -1: send-home
     const pwHome: PowerState = {
@@ -1329,6 +1299,42 @@ function check(name: string, cond: boolean, detail?: string) {
       bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
     };
     check("Reinforced Bulwark: a send-home Push target is still NOT legal", !getPushTargets(sHome, pwHome, "p1").includes(4));
+
+    // "Charged shot moves reinforced bulwark back": the soft Charged Shot
+    // IS still legal against a reinforced Bulwark — it's the one Archer
+    // tool that reaches it — while a send-home Charged Shot stays blocked.
+    const sShotSoft = state("p1", { 4: 11 }); // 11 - CHARGED_SHOT_DISTANCE = 7, on-board, no collision
+    const pwShot: PowerState = {
+      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    check(
+      "Reinforced Bulwark: a soft Charged Shot IS legal — the tool that still moves it",
+      getChargedShotTargets(sShotSoft, pwShot, "p1").includes(4),
+    );
+    const rShot = applyChargedShot(sShotSoft, pwShot, 4, "p1");
+    check(
+      `Reinforced Bulwark: the Charged Shot knocks it back CHARGED_SHOT_DISTANCE (${CHARGED_SHOT_DISTANCE})`,
+      rShot.state.tokens.find((t) => t.id === 4)!.position === 11 - CHARGED_SHOT_DISTANCE,
+      `landed at ${rShot.state.tokens.find((t) => t.id === 4)!.position}`,
+    );
+    check(
+      "Reinforced Bulwark: the Bulwark survives the soft Charged Shot (no capture happened)",
+      rShot.power.bulwarked[4] !== undefined && rShot.power.bulwarkSaves[4] === BULWARK_REINFORCED_SAVES,
+    );
+    // Target at contested 6; its landing (6 - CHARGED_SHOT_DISTANCE = 2, its
+    // own lane) is occupied by its own teammate -> collision -> send-home.
+    const sShotHome = state("p1", { 4: 6, 5: 6 - CHARGED_SHOT_DISTANCE });
+    const pwShotHome: PowerState = {
+      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
+      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+    };
+    check(
+      "Reinforced Bulwark: a send-home Charged Shot is still NOT legal",
+      !getChargedShotTargets(sShotHome, pwShotHome, "p1").includes(4),
+    );
   }
 
   // --- Rain of Arrows still pierces, and a reserve trip clears the saves ----
@@ -1360,7 +1366,7 @@ function check(name: string, cond: boolean, detail?: string) {
 // ---------------------------------------------------------------------------
 // 15. Archer's Charged Shot: spends BOTH banked charges at once for a flat,
 //     fixed knockback — same target-pool shape as Push (contested zone,
-//     shield/transient-safety/Bulwark protections), but using
+//     shield/Bulwark protections), but using
 //     CHARGED_SHOT_DISTANCE's own collision math, gated on
 //     charges === CHARGE_CAP right inside getChargedShotTargets itself, and
 //     (unlike the original design) fully blocked by Ward with no
@@ -1401,19 +1407,13 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- Legality: respects shield-tile and transient-safety, same as Push --
+  // --- Legality: respects shield tiles, same as Push ----------------------
   {
     const pw = power({ p1: "archer" }, { p1: CHARGE_CAP });
     const sShield = state("p1", { 4: 7 }); // tile 7 is a shield tile
     check(
       "Charged Shot: a target on a shield tile is not a legal target",
       !getChargedShotTargets(sShield, pw, "p1").includes(4),
-    );
-    const sSafe = state("p1", { 4: 6 });
-    const pwSafe: PowerState = { ...pw, safeTokens: new Set([4]) };
-    check(
-      "Charged Shot: a transiently-safe target is not a legal target",
-      !getChargedShotTargets(sSafe, pwSafe, "p1").includes(4),
     );
   }
 
@@ -1627,6 +1627,28 @@ function check(name: string, cond: boolean, detail?: string) {
     check(
       "Bulwark: a send-home-Charged-Shot threat DOES count as blocked once the Archer is at the full charge cap",
       getBulwarkBlockedIds(sChargedShotOnly, pwAtCap, 1).includes(4),
+    );
+  }
+
+  // --- REGRESSION (2026-07-17): an ultimate-ready threat never counts as a
+  //     Bulwark block — ultimates pierce Bulwark, so nothing was blocked and
+  //     no save may be spent. (Guards against reintroducing the deleted
+  //     Blink-Strike/Warpath branches in getBulwarkBlockedIds.) -------------
+  {
+    // p2's Bulwarked token at 9 is out of reach of any normal capture/Push
+    // (p1's only token is far behind at 4 with a flip of 1 -> to 5), but a
+    // ready Blink Strike could take it — that must NOT read as "blocked."
+    const sUltThreat = state("p1", { 0: 4, 4: 9 });
+    const baseUlt = power({ p1: "mage", p2: "warrior" });
+    const pwUltReady: PowerState = {
+      ...baseUlt,
+      ultimateReady: { ...baseUlt.ultimateReady, p1: true },
+      bulwarked: { 4: 3 },
+    };
+    check(
+      "Bulwark: a ready ultimate's reach never counts as a block (it pierces instead)",
+      !getBulwarkBlockedIds(sUltThreat, pwUltReady, 1).includes(4),
+      JSON.stringify(getBulwarkBlockedIds(sUltThreat, pwUltReady, 1)),
     );
   }
 }

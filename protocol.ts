@@ -178,7 +178,6 @@ export type ServerMessage =
       power?: {
         classes: Record<PlayerId, PlayerClass>;
         charges: Record<PlayerId, number>;
-        safeTokens: number[];
         /** Valid Push targets for the CURRENT player, if they're an Archer
          *  with a charge and it's their turn — empty otherwise. */
         pushTargets: number[];
@@ -201,8 +200,7 @@ export type ServerMessage =
          *  Warrior with a charge and it's their turn — empty otherwise. */
         bulwarkTargets: number[];
         /** Every currently-Bulwarked token id, across both players — public
-         *  table-state, same visibility as safeTokens (drives the client's
-         *  tint, same idea as isWarded/hasTransientSafety). */
+         *  table-state (drives the client's tint, same idea as isWarded). */
         bulwarkedTokenIds: number[];
         /** Valid Raise Dead targets (the caster's own reserve token ids)
          *  for the CURRENT player, if they're a Necromancer with a charge

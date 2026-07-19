@@ -178,7 +178,7 @@ export const PUSH_WARD_COST = 1;
  *  both of which only ever apply against a Mage, so archer-vs-warrior and
  *  archer-mirror are structurally unaffected no matter what these two land
  *  on. A push that does 0 tiles is a real, if minimal, action: it still
- *  spends the charge, still strips transient safety, still breaks the
+ *  spends the charge, still breaks the
  *  mover's shield streak — same non-distance side effects Push always had —
  *  it just can never itself send a Warded target home. See
  *  batch-random-master-killer-games.ts output for the actual re-tuned
@@ -297,6 +297,10 @@ export const BULWARK_TURNS = 2;
  *  BULWARK_TURNS), 2x saves (BULWARK_REINFORCED_SAVES, vs a plain Bulwark's
  *  implicit 1). This constant is the caster's-own-turns countdown before an
  *  unconsumed Reinforced Bulwark expires.
+ *
+ *  2026-07-17 (Kasen's fix list): a reinforced Bulwark also shrugs off a
+ *  plain Push entirely (see isBulwarkReinforced/getPushTargets) — Charged
+ *  Shot is the Archer tool that still moves it, soft knockback only.
  *
  *  CHOSEN BY SIMULATION over the other candidate, "twin Bulwark" (one
  *  action Bulwarks two own tokens at once, 1 charge each), 30000
@@ -430,9 +434,6 @@ export interface PowerState {
   classes: Record<PlayerId, PlayerClass>;
   /** Banked charges, 0..CHARGE_CAP, per player. */
   charges: Record<PlayerId, number>;
-  /** Token ids granted Warrior Ward Breaker's transient safety — cleared
-   *  the moment that specific token next moves (its own, or captured). */
-  safeTokens: Set<number>;
   /** How many Re-flips the Mage has fired THIS turn, 0..REFLIPS_PER_TURN
    *  (was a once-per-turn boolean, reflipUsedThisTurn, before the second
    *  banked charge earned a second re-flip). Reset whenever a fresh flip
@@ -459,9 +460,10 @@ export interface PowerState {
   ultimateReady: Record<PlayerId, boolean>;
   /** Warrior's Bulwark: token id -> turns remaining before it expires
    *  unconsumed. Presence in the map (any value > 0) means the token is
-   *  fully immune to a normal capture, Charge sweep, Blink Strike, or
-   *  Warpath (folded into isProtected/isBulwarked — see those), and to a
-   *  Push that would send it home specifically (see getPushTargets).
+   *  fully immune to a normal capture or Charge sweep (folded into
+   *  isProtected/isBulwarked — see those), and to a Push that would send
+   *  it home specifically (see getPushTargets). Ultimates (Rain of Arrows,
+   *  Blink Strike, Warpath) all pierce it — see isBulwarked's doc.
    *  Deliberately NOT reset by resetTurnFlags — same reasoning as
    *  shieldStreak/ultimateReady: resetTurnFlags fires on every resolved
    *  turn, including a shield-landing's own extra turn, and Bulwark has to
@@ -476,7 +478,7 @@ export interface PowerState {
    *  entry here and is consumed by its first block, exactly as before —
    *  consumeBulwarkBlocks treats a missing entry as 1. Cleared alongside
    *  its bulwarked entry everywhere that clears one (expiry, final block,
-   *  Rain of Arrows capture). */
+   *  an ultimate's capture). */
   bulwarkSaves: Record<number, number>;
 }
 
@@ -540,7 +542,6 @@ export function initialPowerState(): PowerState {
   return {
     classes: { p1: "archer", p2: "archer" }, // placeholder until picked
     charges: { p1: 0, p2: 0 },
-    safeTokens: new Set(),
     reflipsUsedThisTurn: 0,
     shieldStreak: { p1: 0, p2: 0 },
     ultimateReady: { p1: false, p2: false },
@@ -621,28 +622,31 @@ function onShieldTile(token: TokenState): boolean {
   return BOARD_LAYOUT[token.position].type === "shield";
 }
 
-/** Is this token currently protected by Warrior Ward Breaker's transient
- *  "safe until it next moves" grant? Unlike Ward, nothing pierces this —
- *  not even another Warrior's Ward Breaker — it's a simple temporary
- *  shield, not a re-breakable one. */
-function hasTransientSafety(power: PowerState, token: TokenState): boolean {
-  return power.safeTokens.has(token.id);
-}
-
 /** Is this token currently protected by Warrior Bulwark? Live map lookup —
  *  presence in power.bulwarked (any positive turns-remaining count) means
- *  "still active." Like a shield tile or transient safety (and unlike
- *  Ward), nothing pierces this for normal captures/Charge — see isProtected.
- *  TWO exceptions: a soft (non-home) Push, which Bulwark deliberately does
- *  not block (see getPushTargets's own Bulwark-aware filter, not this
- *  function); and Rain of Arrows, which — by the same "punches through
- *  everything" identity that lets it ignore shield tiles and Ward — also
- *  ignores Bulwark (see excludeBulwarked's doc; resolveTurn clears a
- *  captured token's bulwarked entry so this doesn't leak free protection
- *  across a reserve trip). Blink Strike and Warpath, unlike Rain of Arrows,
- *  DO respect Bulwark. */
+ *  "still active." Like a shield tile (and unlike Ward), nothing pierces
+ *  this for normal captures/Charge — see isProtected. TWO exceptions: a
+ *  soft (non-home) Push, which Bulwark deliberately does not block (see
+ *  getPushTargets's own Bulwark-aware filter, not this function — though a
+ *  REINFORCED Bulwark shrugs off a plain Push entirely, see
+ *  isBulwarkReinforced); and ultimates — Rain of Arrows, Blink Strike, and
+ *  Warpath ALL punch through Bulwark, the same "pierces everything"
+ *  identity that lets them ignore shield tiles and Ward (each capture path
+ *  clears the captured token's bulwarked entry so this doesn't leak free
+ *  protection across a reserve trip). */
 export function isBulwarked(power: PowerState, token: TokenState): boolean {
   return power.bulwarked[token.id] !== undefined;
+}
+
+/** Is this token under a REINFORCED Bulwark specifically? A bulwarkSaves
+ *  entry exists only for reinforced casts and lives exactly as long as its
+ *  bulwarked entry does. On top of everything a plain Bulwark blocks, a
+ *  reinforced one can't be touched by a plain Push AT ALL — not even the
+ *  soft on-board shove a plain Bulwark still allows. Charged Shot is the
+ *  tool that still moves it (soft only — the send-home immunity every
+ *  Bulwark grants stays). */
+export function isBulwarkReinforced(power: PowerState, token: TokenState): boolean {
+  return power.bulwarkSaves[token.id] !== undefined;
 }
 
 /** Universal "is this token capturable/pushable/sweepable AT ALL right
@@ -650,12 +654,11 @@ export function isBulwarked(power: PowerState, token: TokenState): boolean {
  *  needs to distinguish ward-protection specifically, since that's the one
  *  case a Warrior's landing can pierce via Ward Breaker) and Push (which
  *  can also pierce Ward, at a price, and only partially pierces Bulwark —
- *  see getPushTargets/pushCost). Shield tiles, transient safety, and
- *  Bulwark block every class with no exception. */
+ *  see getPushTargets/pushCost). Shield tiles and Bulwark block every
+ *  class with no exception. */
 function isProtected(state: GameState, power: PowerState, token: TokenState): boolean {
   return (
     onShieldTile(token) ||
-    hasTransientSafety(power, token) ||
     isWarded(state, power, token) ||
     isBulwarked(power, token)
   );
@@ -773,13 +776,12 @@ export function getLegalPowerMoves(
     let breaksWard = false;
 
     if (enemy) {
-      // Shield tiles, transient safety, and Bulwark block EVERY class, no
-      // exception — Bulwark isn't something even a Warrior's Ward Breaker
-      // pierces, unlike Ward.
-      if (onShieldTile(enemy) || hasTransientSafety(power, enemy) || isBulwarked(power, enemy)) continue;
+      // Shield tiles and Bulwark block EVERY class, no exception — Bulwark
+      // isn't something even a Warrior's Ward Breaker pierces, unlike Ward.
+      if (onShieldTile(enemy) || isBulwarked(power, enemy)) continue;
       if (isWarded(state, power, enemy)) {
         if (cls !== "warrior") continue; // blocked for everyone but a Warrior
-        breaksWard = true; // Ward Breaker: legal, captures, grants safety below
+        breaksWard = true; // Ward Breaker: legal, captures (client announces the break)
         captures = [enemy.id];
       } else {
         captures = [enemy.id]; // normal contested capture
@@ -811,13 +813,13 @@ export function getLegalPowerMoves(
     // intermediate contested tile must be clear of the Warrior's own
     // tokens. The sweep itself only touches contested tiles strictly
     // between from and to, and — like a normal move — never crosses a
-    // shield tile or a token under Warrior Ward Breaker's own transient
-    // safety. A WARDED token in the sweep IS captured, same as a direct
-    // landing — Ward Breaker's whole identity is "Warriors pierce Ward,"
-    // so the sweep shouldn't quietly disagree with that just because the
-    // token is in the middle of the lane instead of the landing tile. A
-    // BULWARKED token, unlike a warded one, is NOT captured by the sweep —
-    // Bulwark isn't something Ward Breaker was ever meant to pierce.
+    // shield tile. A WARDED token in the sweep IS captured, same as a
+    // direct landing — Ward Breaker's whole identity is "Warriors pierce
+    // Ward," so the sweep shouldn't quietly disagree with that just
+    // because the token is in the middle of the lane instead of the
+    // landing tile. A BULWARKED token, unlike a warded one, is NOT
+    // captured by the sweep — Bulwark isn't something Ward Breaker was
+    // ever meant to pierce.
     let chargeAvailable = false;
     const chargeSweepCaptures: number[] = [];
     if (cls === "warrior" && from >= 0) {
@@ -835,7 +837,6 @@ export function getLegalPowerMoves(
           foe &&
           chargeSweepCaptures.length < CHARGE_SWEEP_CAP &&
           !onShieldTile(foe) &&
-          !hasTransientSafety(power, foe) &&
           !isBulwarked(power, foe)
         ) {
           chargeSweepCaptures.push(foe.id);
@@ -870,14 +871,13 @@ export function getLegalPowerMoves(
 
 /** Rain of Arrows' target pool (Archer's ultimate only): enemy tokens,
  *  on-board, anywhere in the contested zone — deliberately skipping
- *  onShieldTile/isWarded, since punching through both is the whole point.
- *  Only hasTransientSafety still guards against it. */
+ *  onShieldTile/isWarded/isBulwarked, since punching through every
+ *  protection is the whole point. Nothing guards against it. */
 export function getRainOfArrowsTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !hasTransientSafety(power, t))
     .map((t) => t.id);
 }
 
@@ -925,14 +925,9 @@ function resolveShieldStreak(
 }
 
 /** Shared plumbing: send a set of token ids to reserve, advance the mover,
- *  clear any of their SPENT (stale, prior-turn) Ward Breaker safety, grant
- *  fresh safety if THIS move just broke a ward, grant a charge for a
- *  capturing/shield-landing move, hand the turn to the opponent (or keep it
- *  on a shield landing), and reset per-turn flags for the next flip.
- *
- *  Ordering matters: stale safety is cleared BEFORE a fresh grant is added,
- *  never after — otherwise a same-turn Ward Breaker grant would be wiped
- *  out by its own move's stale-safety cleanup before ever being returned. */
+ *  grant a charge for a capturing/shield-landing move, hand the turn to
+ *  the opponent (or keep it on a shield landing), and reset per-turn flags
+ *  for the next flip. */
 function resolveTurn(
   state: GameState,
   power: PowerState,
@@ -942,7 +937,6 @@ function resolveTurn(
   allCaptures: number[],
   landsOnShield: boolean,
   causesWin: boolean,
-  grantsSafety: boolean,
   rand: () => number = Math.random,
 ): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
   const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
@@ -957,22 +951,13 @@ function resolveTurn(
     return t;
   });
 
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(tokenId) || finalCaptures.some((id) => safeTokens.has(id))) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(tokenId); // this token moved — any OLD safety it carried is spent
-    for (const id of finalCaptures) safeTokens.delete(id); // captured tokens carry none forward
-  }
-  if (grantsSafety) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.add(tokenId); // fresh grant, added AFTER the stale-clear above
-  }
-
-  // A captured token's Bulwark must clear too — Rain of Arrows is the one
-  // capture path that deliberately ignores isBulwarked (see excludeBulwarked's
-  // doc), so a Bulwarked token CAN be sent home by it. Without this, the
-  // stale bulwarked[id] entry survives the trip to reserve and grants free,
-  // un-recast protection the instant that token re-enters the board later.
+  // A captured token's Bulwark must clear too — Rain of Arrows deliberately
+  // ignores isBulwarked (see getRainOfArrowsTargets), so a Bulwarked token
+  // CAN be sent home by it. Without this, the stale bulwarked[id] entry
+  // survives the trip to reserve and grants free, un-recast protection the
+  // instant that token re-enters the board later. (applyBlinkStrike and
+  // applyWarpath — the other Bulwark-piercing capture paths — carry the
+  // same cleanup themselves.)
   let bulwarked = power.bulwarked;
   let bulwarkSaves = power.bulwarkSaves;
   if (finalCaptures.some((id) => bulwarked[id] !== undefined)) {
@@ -984,7 +969,7 @@ function resolveTurn(
     }
   }
 
-  let nextPower: PowerState = { ...power, safeTokens, bulwarked, bulwarkSaves };
+  let nextPower: PowerState = { ...power, bulwarked, bulwarkSaves };
   if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
@@ -1019,13 +1004,11 @@ export function applyPowerMove(
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard,
     rand,
   );
 }
 
-/** Warrior's Charge: same move, but the sweep captures ride along too, and
- *  (like any move) a Ward Breaker landing still grants its safety. */
+/** Warrior's Charge: same move, but the sweep captures ride along too. */
 export function applyCharge(
   state: GameState,
   power: PowerState,
@@ -1051,7 +1034,6 @@ export function applyCharge(
     allCaptures,
     move.landsOnShield,
     move.causesWin,
-    move.breaksWard,
     rand,
   );
 }
@@ -1107,7 +1089,7 @@ function computeChargedShotLanding(state: GameState, power: PowerState, target: 
 }
 
 /** Archer's Push: valid targets are enemy tokens on a contested tile that
- *  aren't shield/transient-safety blocked. A warded token is ALSO a valid
+ *  aren't shield-blocked. A warded token is ALSO a valid
  *  target, but only if the Archer can afford PUSH_WARD_COST — baking
  *  affordability into the target list itself (rather than a separate
  *  legality branch at the call site) so the UI's target highlights and the
@@ -1115,15 +1097,21 @@ function computeChargedShotLanding(state: GameState, power: PowerState, target: 
  *  of the pusher's moves (see applyPush's history note for why granting an
  *  extra turn here was tried and reverted).
  *
- *  A Bulwarked token is ALSO a valid target — Bulwark deliberately does NOT
- *  give full Push immunity, since Push usually just knocks a token back a
- *  few tiles while it stays on the board (a "soft" effect the game already
- *  allows against Bulwarked tokens). Bulwark only blocks the cases where
- *  THIS SPECIFIC push would send the target all the way home (the same
- *  collision math computePushLanding/applyPush use) — a live per-target
- *  check, not a blanket exclusion, mirroring exactly how the isWarded
- *  filter above gates on affordability rather than excluding warded targets
- *  outright.
+ *  A plain-Bulwarked token is ALSO a valid target — Bulwark deliberately
+ *  does NOT give full Push immunity, since Push usually just knocks a token
+ *  back a few tiles while it stays on the board (a "soft" effect the game
+ *  already allows against plain-Bulwarked tokens). Bulwark only blocks the
+ *  cases where THIS SPECIFIC push would send the target all the way home
+ *  (the same collision math computePushLanding/applyPush use) — a live
+ *  per-target check, not a blanket exclusion, mirroring exactly how the
+ *  isWarded filter above gates on affordability rather than excluding
+ *  warded targets outright.
+ *
+ *  A REINFORCED Bulwark, though, shrugs off a plain Push entirely — not
+ *  even the soft shove — so those targets are excluded outright (no
+ *  charge-burning no-op trap; the target ring simply never appears).
+ *  Charged Shot is the Archer tool that still moves one (2026-07-17,
+ *  Kasen's fix list).
  *
  *  Refunds its charge (see applyPush) specifically when it sends the target
  *  all the way home to reserve — that outcome is functionally a capture
@@ -1136,8 +1124,9 @@ export function getPushTargets(state: GameState, power: PowerState, mover: Playe
   return state.tokens
     .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t))
+    .filter((t) => !onShieldTile(t))
     .filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST)
+    .filter((t) => !isBulwarkReinforced(power, t))
     .filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1)
     .map((t) => t.id);
 }
@@ -1154,15 +1143,9 @@ export function applyPush(
   const sendsHome = landing === -1; // functionally a capture — refund below
 
   const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(targetTokenId)) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(targetTokenId);
-  }
   let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
-    safeTokens,
   };
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
@@ -1190,9 +1173,14 @@ export function applyPush(
 }
 
 /** Archer's Charged Shot: same target pool shape as Push (contested-zone
- *  enemy, shield-tile/transient-safety/Bulwark-vs-would-this-specific-shot-
- *  send-home protections all mirrored exactly), but with one deliberate
- *  difference from getPushTargets:
+ *  enemy, shield-tile/Bulwark-vs-would-this-specific-shot-
+ *  send-home protections all mirrored exactly), but with TWO deliberate
+ *  differences from getPushTargets:
+ *
+ *  A REINFORCED Bulwark does NOT exclude a target here the way it does for
+ *  a plain Push — Charged Shot is precisely the tool that still moves a
+ *  reinforced-Bulwarked stone (soft knockback only; the send-home immunity
+ *  every Bulwark grants still applies via the landing filter below). And:
  *
  *  Gated on `power.charges[mover] === CHARGE_CAP` right here in the pure
  *  target-getter, unlike getPushTargets/getBulwarkTargets (whose baseline
@@ -1221,7 +1209,7 @@ export function getChargedShotTargets(state: GameState, power: PowerState, mover
   return state.tokens
     .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !onShieldTile(t) && !hasTransientSafety(power, t))
+    .filter((t) => !onShieldTile(t))
     .filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1)
     .map((t) => t.id);
 }
@@ -1246,15 +1234,9 @@ export function applyChargedShot(
   const sendsHome = landing === -1; // functionally a capture — refund below
 
   const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(targetTokenId)) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(targetTokenId);
-  }
   let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
-    safeTokens,
   };
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
@@ -1295,42 +1277,45 @@ export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
 // the target-selection UI identical to Push's "tap one target" flow.
 // ============================================================================
 
-/** Filters a target-id pool down to non-Bulwarked tokens. Rain of Arrows
- *  itself does NOT use this (it deliberately punches through shield tiles
- *  and Ward, and — by the same "punches through everything" identity —
- *  Bulwark too); Blink Strike and Warpath DO, since a Bulwarked token is
- *  meant to be fully immune to them (see isProtected/isBulwarked). Kept as
- *  a filter over the SAME pool getRainOfArrowsTargets already computes
- *  rather than a parallel target-eligibility function, so this can't drift
- *  from that rule. */
-function excludeBulwarked(state: GameState, power: PowerState, ids: number[]): number[] {
-  return ids.filter((id) => {
-    const t = state.tokens.find((tok) => tok.id === id)!;
-    return !isBulwarked(power, t);
-  });
-}
-
-/** Mage's Blink Strike ultimate: valid targets are the same as Rain of
- *  Arrows (contested-zone enemies, bypassing shield tiles and Ward, but not
- *  transient safety) minus any Bulwarked token — reused directly since the
- *  underlying "who's vulnerable to a shield/ward-piercing strike" rule is
- *  identical. Empty if the mover has no on-board token to relocate at all. */
+/** Mage's Blink Strike ultimate: valid targets are exactly Rain of Arrows'
+ *  pool (contested-zone enemies, bypassing shield tiles, Ward, AND Bulwark —
+ *  every ultimate punches through everything; 2026-07-17, Kasen's fix list
+ *  dropped the old Bulwark-blocks-ultimates carve-out). Reused directly so
+ *  the two rules can't drift. Empty if the mover has no on-board token to
+ *  relocate at all. */
 export function getBlinkStrikeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (!findMostAdvancedToken(state, mover)) return [];
-  return excludeBulwarked(state, power, getRainOfArrowsTargets(state, power, mover));
+  return getRainOfArrowsTargets(state, power, mover);
 }
 
 /** Warrior's Warpath ultimate: same target eligibility as Blink Strike —
- *  the sweep along the way (see applyWarpath) uses the same rule too.
+ *  the sweep along the way (see applyWarpath) pierces everything too.
  *  Empty if the mover has no on-board token to relocate at all. */
 export function getWarpathTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (!findLeastAdvancedToken(state, mover)) return [];
-  return excludeBulwarked(state, power, getRainOfArrowsTargets(state, power, mover));
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Shared by the ultimate capture paths (Blink Strike/Warpath): drop the
+ *  bulwarked/bulwarkSaves entries of every captured token, so a pierced
+ *  Bulwark can't ride along to reserve and come back as free, un-recast
+ *  protection — the exact leak resolveTurn already guards against for
+ *  Rain of Arrows. No-op (same reference back) when nothing captured was
+ *  Bulwarked. */
+function clearCapturedBulwarks(power: PowerState, capturedIds: number[]): PowerState {
+  if (!capturedIds.some((id) => power.bulwarked[id] !== undefined)) return power;
+  const bulwarked = { ...power.bulwarked };
+  const bulwarkSaves = { ...power.bulwarkSaves };
+  for (const id of capturedIds) {
+    delete bulwarked[id];
+    delete bulwarkSaves[id];
+  }
+  return { ...power, bulwarked, bulwarkSaves };
 }
 
 /** Mage's Blink Strike: instantly relocates the mover's most-advanced
  *  on-board token onto the target's tile, capturing it — bypassing shield
- *  tiles and Ward, same as Rain of Arrows, but not transient safety (see
+ *  tiles, Ward, and Bulwark, same as Rain of Arrows (see
  *  getBlinkStrikeTargets). Spends the banked ultimateReady flag, not a
  *  charge — but still grants a charge back on the capture, same as any
  *  other capturing action. Always ends the turn, even if the destination
@@ -1349,17 +1334,13 @@ export function applyBlinkStrike(
     if (t.id === targetTokenId) return { ...t, position: -1 };
     return t;
   });
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(mine.id) || safeTokens.has(targetTokenId)) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(mine.id);
-    safeTokens.delete(targetTokenId);
-  }
-  let nextPower: PowerState = {
-    ...power,
-    safeTokens,
-    ultimateReady: { ...power.ultimateReady, [mover]: false },
-  };
+  let nextPower: PowerState = clearCapturedBulwarks(
+    {
+      ...power,
+      ultimateReady: { ...power.ultimateReady, [mover]: false },
+    },
+    [targetTokenId],
+  );
   nextPower = addCharge(nextPower, mover);
   nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), 1);
   const nextState: GameState = {
@@ -1377,14 +1358,11 @@ export function applyBlinkStrike(
 
 /** Warrior's Warpath: instantly relocates the mover's LEAST-advanced
  *  on-board token onto the target's tile, capturing it, AND sweeps every
- *  unprotected enemy on a contested tile strictly between where that token
+ *  enemy on a contested tile strictly between where that token
  *  started and where it lands (either direction — this is a teleport, not
  *  a real move, so "forward" doesn't matter) — uncapped, unlike Charge's
- *  CHARGE_SWEEP_CAP. Same bypass rules as Blink Strike (shield + Ward, not
- *  transient safety) for every token it hits, primary or swept. If it
- *  breaks a Ward anywhere along the way, the landing token gets
- *  Ward Breaker's usual transient-safety grant — ties this back to
- *  Warrior's core identity instead of being a bare reskin of Blink Strike.
+ *  CHARGE_SWEEP_CAP. Same bypass rules as Blink Strike (shield + Ward +
+ *  Bulwark — everything) for every token it hits, primary or swept.
  *  Spends ultimateReady, not a charge; still grants exactly 1 charge back
  *  on a successful capture, matching Charge's own sweep economy (one
  *  capturing move = one charge, regardless of how many tokens it takes
@@ -1403,15 +1381,13 @@ export function applyWarpath(
   const hi = Math.max(from, to);
 
   const sweepCaptures: number[] = [];
-  let brokeWard = isWarded(state, power, target);
   for (let i = lo + 1; i < hi; i++) {
     if (!BOARD_LAYOUT[i].isContested) continue;
     const foe = state.tokens.find(
       (t) => t.position === i && t.owner !== mover && t.id !== mine.id && t.id !== targetTokenId,
     );
-    if (foe && !hasTransientSafety(power, foe) && !isBulwarked(power, foe)) {
+    if (foe) {
       sweepCaptures.push(foe.id);
-      if (isWarded(state, power, foe)) brokeWard = true;
     }
   }
 
@@ -1422,22 +1398,13 @@ export function applyWarpath(
     return t;
   });
 
-  let safeTokens = power.safeTokens;
-  if (safeTokens.has(mine.id) || allCaptures.some((id) => safeTokens.has(id))) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.delete(mine.id);
-    for (const id of allCaptures) safeTokens.delete(id);
-  }
-  if (brokeWard) {
-    safeTokens = new Set(safeTokens);
-    safeTokens.add(mine.id);
-  }
-
-  let nextPower: PowerState = {
-    ...power,
-    safeTokens,
-    ultimateReady: { ...power.ultimateReady, [mover]: false },
-  };
+  let nextPower: PowerState = clearCapturedBulwarks(
+    {
+      ...power,
+      ultimateReady: { ...power.ultimateReady, [mover]: false },
+    },
+    allCaptures,
+  );
   nextPower = addCharge(nextPower, mover);
   // Soul Harvest pays per token — a Warpath double-capture is two souls.
   nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), allCaptures.length);
@@ -1454,13 +1421,16 @@ export function applyWarpath(
 // ============================================================================
 // WARRIOR'S BULWARK — a second charge-spend active for Warrior (alongside
 // Charge). The mover taps ONE OF THEIR OWN on-board tokens to flag it
-// Bulwarked: full immunity to a normal capture, a Charge sweep, Blink
-// Strike, or Warpath (folded into isProtected/isBulwarked, so every
-// existing capture-legality check above already respects it for free), and
-// immunity to a Push that would send it home specifically (see
-// getPushTargets) — but NOT to a soft, on-board Push knockback, which is
-// deliberately still allowed. This is the one power action that targets the
-// MOVER'S OWN token instead of an enemy's or having no target at all.
+// Bulwarked: full immunity to a normal capture or a Charge sweep (folded
+// into isProtected/isBulwarked, so every existing capture-legality check
+// above already respects it for free), and immunity to a Push that would
+// send it home specifically (see getPushTargets) — but NOT to a soft,
+// on-board Push knockback, which is deliberately still allowed (a
+// REINFORCED Bulwark blocks even that — plain Push can't touch it at all),
+// and NOT to any ultimate: Rain of Arrows, Blink Strike, and Warpath all
+// punch straight through Bulwark (2026-07-17, Kasen's fix list). This is
+// the one power action that targets the MOVER'S OWN token instead of an
+// enemy's or having no target at all.
 // ============================================================================
 
 /** Warrior's Bulwark: valid targets are the mover's own on-board tokens
@@ -1552,16 +1522,20 @@ export function tickBulwarkExpiry(state: GameState, power: PowerState, mover: Pl
 /** Ids of the CURRENT mover's opponent's Bulwarked tokens that Bulwark
  *  ACTUALLY blocked THIS flip — would have been captured by a normal move
  *  (including Snipe), a Charge sweep (only if the mover can actually afford
- *  Charge this turn), an available ultimate, or sent home by a Push (only
- *  if the mover can afford one), had Bulwark not protected them.
+ *  Charge this turn), or sent home by a Push/Charged Shot (only if the
+ *  mover can afford one), had Bulwark not protected them. Ultimates are
+ *  deliberately NOT considered: they pierce Bulwark outright (2026-07-17),
+ *  so a Bulwark never "blocks" one and must never spend a save on one. A
+ *  REINFORCED Bulwark's plain-Push immunity is likewise not a "block" —
+ *  it's a static property (the target never enters Push's pool at all, in
+ *  the real list or the hypothetical below), so it costs no save.
  *
  *  Computed by diffing the real move/target lists against the SAME lists
  *  with every Bulwark switched off, rather than reimplementing any capture
  *  legality here — so this can never drift from the rules enforced above
- *  (isProtected/isBulwarked, getPushTargets, getBlinkStrikeTargets,
- *  getWarpathTargets). A token surfacing as a NEW capture/target once
- *  Bulwark is switched off, that isn't in the real (Bulwark-respecting)
- *  result, means Bulwark was the thing blocking it. */
+ *  (isProtected/isBulwarked, getPushTargets). A token surfacing as a NEW
+ *  capture/target once Bulwark is switched off, that isn't in the real
+ *  (Bulwark-respecting) result, means Bulwark was the thing blocking it. */
 export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: number): number[] {
   if (Object.keys(power.bulwarked).length === 0) return [];
   const mover = state.currentPlayer;
@@ -1586,16 +1560,6 @@ export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: 
     }
   }
 
-  if (power.classes[mover] === "mage" && power.ultimateReady[mover]) {
-    for (const id of getBlinkStrikeTargets(state, unbulwarked, mover)) {
-      if (power.bulwarked[id] !== undefined) blocked.add(id);
-    }
-  }
-  if (power.classes[mover] === "warrior" && power.ultimateReady[mover]) {
-    for (const id of getWarpathTargets(state, unbulwarked, mover)) {
-      if (power.bulwarked[id] !== undefined) blocked.add(id);
-    }
-  }
   if (power.classes[mover] === "archer" && power.charges[mover] >= 1) {
     const realPush = getPushTargets(state, power, mover);
     for (const id of getPushTargets(state, unbulwarked, mover)) {
@@ -1720,8 +1684,8 @@ export function getRaiseTargets(
  *  archer arm can't apply). A plain cast (RAISE_POSITION, not a shield)
  *  stays streak-neutral.
  *  The raised token carries no stale protection state by construction:
- *  safeTokens/bulwarked entries are cleared at capture time (resolveTurn),
- *  and never-boarded tokens never had any. Like every pure apply* here,
+ *  bulwarked entries are cleared at capture time (resolveTurn), and
+ *  never-boarded tokens never had any. Like every pure apply* here,
  *  no affordability self-guard — the caller already verified it. */
 export function applyRaiseDead(
   state: GameState,

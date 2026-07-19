@@ -109,14 +109,15 @@ export const OPPONENT_LEFT_MS = 120_000;
 export const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer"];
 
 // ============================================================================
-// WIRE-SAFE POWER STATE — PowerState.safeTokens is a Set, which JSON.stringify
-// silently drops. Docs store the wire shape; call boundaries convert.
+// WIRE-SAFE POWER STATE — PowerState is plain JSON now (safeTokens, its one
+// Set, was removed with the transient-safety mechanic on 2026-07-17), but
+// the boundary conversions stay: docs store the wire shape, and
+// fromWirePower is where live-room back-compat migrations live.
 // ============================================================================
 
 export interface WirePowerState {
   classes: Record<PlayerId, PlayerClass>;
   charges: Record<PlayerId, number>;
-  safeTokens: number[];
   reflipsUsedThisTurn: number;
   shieldStreak: Record<PlayerId, number>;
   ultimateReady: Record<PlayerId, boolean>;
@@ -125,12 +126,11 @@ export interface WirePowerState {
 }
 
 export function toWirePower(p: PowerState): WirePowerState {
-  return { ...p, safeTokens: [...p.safeTokens] };
+  return { ...p };
 }
 export function fromWirePower(w: WirePowerState): PowerState {
   return {
     ...w,
-    safeTokens: new Set(w.safeTokens),
     // Docs persisted before the once-per-turn boolean (reflipUsedThisTurn)
     // became a counter read as undefined here — treat the old true as "one
     // re-flip already used" so a mid-deploy live room can't double-dip.
@@ -142,7 +142,8 @@ export function fromWirePower(w: WirePowerState): PowerState {
           : 0,
     // Same live-room back-compat: docs persisted before reinforced Bulwark
     // existed have no bulwarkSaves — every live Bulwark in them is a plain
-    // 1-block cast, which an empty map means exactly.
+    // 1-block cast, which an empty map means exactly. (A doc persisted with
+    // the retired safeTokens array just carries a harmless extra key.)
     bulwarkSaves: w.bulwarkSaves ?? {},
   };
 }
@@ -160,7 +161,6 @@ export type Variant = "classic" | "masterKiller";
 export interface PublicPower {
   classes: Record<PlayerId, PlayerClass>;
   charges: Record<PlayerId, number>;
-  safeTokens: number[];
   pushTargets: number[];
   chargedShotTargets: number[];
   ultimateReady: Record<PlayerId, boolean>;
@@ -423,7 +423,6 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
   return {
     classes: { ...doc.mk.classes },
     charges: { ...doc.mk.charges },
-    safeTokens: [...doc.mk.safeTokens],
     pushTargets: doc.mk.classes[mover] === "archer" ? getPushTargets(doc.state, p, mover) : [],
     chargedShotTargets: doc.mk.classes[mover] === "archer" ? getChargedShotTargets(doc.state, p, mover) : [],
     ultimateReady: { ...doc.mk.ultimateReady },

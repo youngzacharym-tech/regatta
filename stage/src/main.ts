@@ -1031,7 +1031,7 @@ scene.add(fireSprite);
 // per stone (crisp gold ring + soft underglow), shown only under stones the
 // current flip lets you move, breathing in sync through the shared material
 // (see tick()). Living on the ground keeps the stone's emissive channel free
-// for the ward/bulwark/safe status tints.
+// for the ward/bulwark status tints.
 // ---------------------------------------------------------------------------
 
 /** Ring height: 8 mm above the tile stamp (stone base is target.y - 0.08). */
@@ -1333,19 +1333,19 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // same hexes as the plate gems and targeting rings, so color = author:
 //   Ward (Mage passive)        -> mage purple spinning rune-ring
 //   Bulwark (Warrior cast)     -> warrior blue rune-ring + translucent dome
-//   Ward Breaker safety        -> table-gold rune-ring
 //   Sheltering on a shield tile -> faint still steel ring (information, not
 //                                  spectacle — the tile art carries the rest)
+// (The rig set had a fourth limb — Ward Breaker safety, table-gold ring —
+// until the transient-safety mechanic itself was removed 2026-07-17.)
 // Pool of 8 rigs assigned per broadcast in updateTokenTints, animated and
 // stone-tracked in tick(). Classic rooms never assign any. Pure radial
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
 // the tiled wood textures, not these).
 // ---------------------------------------------------------------------------
-type StatusKind = "ward" | "bulwark" | "safe" | "shieldTile";
+type StatusKind = "ward" | "bulwark" | "shieldTile";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
-  safe: 0xffc36a,
   shieldTile: 0xcfdcec,
 };
 /** Dashed rune-ring, drawn white so the material color carries the class —
@@ -1427,13 +1427,11 @@ const statusMarks: { idx: number; kind: StatusKind }[] = [];
  *  a no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
 function updateTokenTints(state: GameState) {
-  const safe = currentPower ? new Set(currentPower.safeTokens) : null;
   const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
   const fakePower: PowerState | null = currentPower
     ? {
         classes: currentPower.classes,
         charges: currentPower.charges,
-        safeTokens: new Set(),
         reflipsUsedThisTurn: 0,
         shieldStreak: { p1: 0, p2: 0 },
         ultimateReady: { p1: false, p2: false },
@@ -1453,10 +1451,6 @@ function updateTokenTints(state: GameState) {
       kind = "bulwark";
       mat.emissive.setHex(0x2f6bff); // warrior blue — Bulwark is his cast
       mat.emissiveIntensity = 0.5;
-    } else if (safe && safe.has(token.id)) {
-      kind = "safe";
-      mat.emissive.setHex(0xffa332); // warm gold — Ward Breaker-safe
-      mat.emissiveIntensity = 0.45;
     } else {
       if (
         currentPower &&
@@ -1578,7 +1572,6 @@ let myVariant: "classic" | "masterKiller" = "classic";
 let currentPower: {
   classes: Record<PlayerId, PlayerClass>;
   charges: Record<PlayerId, number>;
-  safeTokens: number[];
   pushTargets: number[];
   chargedShotTargets: number[];
   ultimateReady: Record<PlayerId, boolean>;
@@ -1738,25 +1731,25 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bulwark",
     cost: "1 charge",
     klass: "warrior",
-    desc: "Shield one of your own stones: it can't be captured, swept by a Charge, or taken by an ultimate. Fades after a few turns, or the moment it saves the stone.",
+    desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate still punches through. Fades after a few turns, or the moment it saves the stone.",
   },
   bulwarkReinforced: {
     name: "Reinforced Bulwark",
     cost: `${CHARGE_CAP} charges`,
     klass: "warrior",
-    desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down.",
+    desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down. A plain Push can't budge it; only a Charged Shot moves it.",
   },
   blinkStrike: {
     name: "Blink Strike",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "mage",
-    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields and Wards.",
+    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields, Wards, and Bulwarks.",
   },
   warpath: {
     name: "Warpath",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "warrior",
-    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every unprotected enemy stone along the way.",
+    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and Bulwarks.",
   },
   raiseDead: {
     name: "Raise Dead",
@@ -4070,7 +4063,9 @@ const GUIDE_SPREADS: [string, string][] = [
        the board, and it is sent all the way home to their hand — and your
        charge comes right back, since that's really a capture.</li>
        <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
-       Push entirely — the charge is spent, but the stone doesn't move.</li>
+       Push entirely — the charge is spent, but the stone doesn't move. A
+       <span class="gold">Reinforced Bulwark</span> can't be Pushed at all —
+       only a Charged Shot still moves it.</li>
      </ul>`,
     `<div class="runner">The Archer &middot; continued</div>
      <ul>
@@ -4109,16 +4104,15 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight
-       onto any enemy in shared water — capturing it even through a shield
-       or a Ward.</li>
+       onto any enemy in shared water — capturing it even through a shield,
+       a Ward, or a Bulwark.</li>
      </ul>`,
   ],
   [
     `<h2>The Warrior</h2>
      <ul>
        <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
-       stone and the Ward breaks — captured all the same, and your stone
-       stands safe from capture until it next moves.</li>
+       stone and the Ward breaks — captured all the same.</li>
        <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
        enemy stone in shared water between where you started and where you
        land is captured too, Warded or not.</li>
@@ -4128,20 +4122,20 @@ const GUIDE_SPREADS: [string, string][] = [
     `<div class="runner">The Warrior &middot; continued</div>
      <ul>
        <li><b>Bulwark</b> (active, 1 charge): raise a shield over one of
-       YOUR OWN stones — it cannot be captured, swept by Charge, or taken by
-       an enemy ultimate, and a Push can only shove it, never send it home.
-       It fades after a few of your turns unused, or the instant it saves
-       the stone.</li>
+       YOUR OWN stones — it cannot be captured or swept by Charge, and a
+       Push can only shove it, never send it home. An enemy ultimate still
+       punches through. It fades after a few of your turns unused, or the
+       instant it saves the stone.</li>
        <li><b>Reinforced Bulwark</b> (active, spends both charges): the
        same shield with everything doubled — it lasts twice as many turns,
-       and it shrugs off the first save instead of fading. Only the second
-       save, or time, brings it down.</li>
+       and it shrugs off the first save instead of fading. A plain Push
+       can't budge it at all; only a Charged Shot still moves it. Only the
+       second save, or time, brings it down.</li>
        <li><b>Warpath</b> (active, spends your ultimate): land on a shield
        tile three times running, then teleport your least-advanced stone
-       onto any enemy in shared water — capturing it plus every unprotected
+       onto any enemy in shared water — capturing it plus every
        enemy stone caught between where it started and where it lands,
-       Warded or not. Break a Ward along the way and the landing stone
-       stands safe from capture until it next moves.</li>
+       through shields, Wards, and Bulwarks alike.</li>
      </ul>`,
   ],
   [
@@ -4379,7 +4373,7 @@ function tick() {
   }
   // Movable stones wear a breathing gold ring on the ground — "stones you
   // may move light up", as the guide and tutorial promise. The affordance
-  // lives entirely OFF the stone material, so the ward/bulwark/safe status
+  // lives entirely OFF the stone material, so the ward/bulwark status
   // tints stay visible on a movable stone. Ring visibility is recomputed
   // from eligibleTokenIds every frame — no restore bookkeeping to go stale.
   const breath = 0.5 + 0.5 * Math.sin(now * 0.0035); // ~1.8 s calm period
@@ -4553,7 +4547,6 @@ if (dockDemoParam !== null) {
     currentPower = {
       classes: { p1: cls, p2: "archer" },
       charges: { p1: d.charges, p2: 1 },
-      safeTokens: [],
       pushTargets: [4, 5],
       chargedShotTargets: [4],
       ultimateReady: { p1: d.ult, p2: false },
@@ -4620,7 +4613,7 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
       { id: 3, owner: "p1", position: -1 },
       { id: 4, owner: "p2", position: 7 }, // middle shield tile → sheltering
       { id: 5, owner: "p2", position: 9 }, // Bulwarked
-      { id: 6, owner: "p2", position: 4 }, // Ward Breaker-safe
+      { id: 6, owner: "p2", position: 4 }, // plain contested-row stone
       { id: 7, owner: "p2", position: -1 },
     ],
     currentPlayer: "p1",
@@ -4631,7 +4624,6 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
   currentPower = {
     classes: { p1: "mage", p2: "warrior" },
     charges: { p1: CHARGE_CAP, p2: 1 }, // full bank → the Mage ward is up
-    safeTokens: [6],
     pushTargets: [],
     chargedShotTargets: [],
     ultimateReady: { p1: false, p2: false },
