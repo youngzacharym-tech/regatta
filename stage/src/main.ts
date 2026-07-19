@@ -80,6 +80,18 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.78;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// The shadow pass only re-renders while something that CASTS shadows is
+// actually moving (tick() gates needsUpdate; markShadowsDirty() covers
+// asset loads/swaps). An idle board — most of a turn-based game — skips
+// the whole pass: the single biggest constant GPU cost on iPad, and the
+// load grew with every necro-era asset until it read as "runs slow, eats
+// battery" (Kasen, 2026-07-19). Visually identical: static shadows don't
+// change.
+renderer.shadowMap.autoUpdate = false;
+let shadowsDirty = true;
+function markShadowsDirty(): void {
+  shadowsDirty = true;
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x120d09);
@@ -478,6 +490,7 @@ const CAM_TARGET = new THREE.Vector3(-0.5, 0.15, 0.95);
 const CAM_BASE_POS = new THREE.Vector3(-0.5, 4.6, 5.0);
 const CAM_BASE_DIST = CAM_BASE_POS.distanceTo(CAM_TARGET);
 function resize() {
+  markShadowsDirty(); // fresh drawing buffer needs a fresh shadow pass
   camera.aspect = window.innerWidth / window.innerHeight;
   // Short screens (phone landscape) pull the camera back along its own view
   // ray — up to ~+22% — so the board keeps clear margins for the HUD, the
@@ -552,20 +565,35 @@ gltfLoader.load(
 
 // Each captain gets a beer — one mug per side of the table. Every stone
 // brought home earns a swig: the mug tilts back, gulps, and the foam head
-// shrinks a quarter. mug.glb ships as mug_body + mug_foam (foam pivoted at
-// the rim so scaling its Y squashes the head down into the tankard).
+// SINKS into the tankard. mug.glb ships as mug_body + mug_foam; the body's
+// upper wall is sculpted-and-painted foam lace, so the head must never
+// shrink in diameter (the old xz-shrink pulled the cap away from that lace
+// and exposed a ragged grey seam — Kasen's "drinking bugs out the foam"
+// report, 2026-07-19). Instead the cap keeps 93% width (just inside the
+// glass), squashes, and drops below the rim — the lace reads as foam
+// clinging to the glass above the sunken head.
 interface MugRig {
   root: THREE.Group;
   foam: THREE.Object3D | null;
   basePos: THREE.Vector3;
   baseRotY: number;
+  /** The foam node's authored local height — sips sink it from here. */
+  foamBaseY: number;
   /** Sips taken (0..4). 4 = slammed empty. */
   sips: number;
   anim: { start: number; kind: "sip" | "slam" } | null;
 }
 let myMug: MugRig | null = null;
 let theirMug: MugRig | null = null;
-const FOAM_SCALES = [1, 0.68, 0.42, 0.2, 0.0001];
+/** Per-sip foam pose: fixed 0.93 xz (fits the glass bore), y squash + sink
+ *  (model units, tuned against Blender renders of every state). */
+const FOAM_SIPS = [
+  { xz: 1, y: 1, drop: 0 },
+  { xz: 0.93, y: 0.8, drop: 0.045 },
+  { xz: 0.93, y: 0.62, drop: 0.1 },
+  { xz: 0.93, y: 0.45, drop: 0.16 },
+  { xz: 0.93, y: 0.3, drop: 0.16 }, // slammed empty — hidden outright
+];
 
 gltfLoader.load(
   "/mug.glb",
@@ -582,27 +610,35 @@ gltfLoader.load(
       mug.position.set(x, TABLE_Y + 0.575, z);
       mug.rotation.y = rotY;
       scene.add(mug);
+      const foam = mug.getObjectByName("mug_foam") ?? null;
       return {
         root: mug,
-        foam: mug.getObjectByName("mug_foam") ?? null,
+        foam,
         basePos: mug.position.clone(),
         baseRotY: rotY,
+        foamBaseY: foam?.position.y ?? 0,
         sips: 0,
         anim: null,
       };
     };
     myMug = place(0.5, 2.12, -2.44); // beside my coins, handle turned out
     theirMug = place(0.5, -2.0, 2.4); // the opponent's, across the table
+    markShadowsDirty(); // two new casters just landed on the table
   },
   undefined,
   (err) => console.error("Failed to load /mug.glb", err),
 );
 
-function applyFoam(rig: MugRig): void {
+function setFoamSips(rig: MugRig, level: number): void {
   if (!rig.foam) return;
-  const s = FOAM_SCALES[Math.min(rig.sips, 4)];
-  rig.foam.visible = rig.sips < 4;
-  rig.foam.scale.set(0.45 + 0.55 * s, s, 0.45 + 0.55 * s);
+  const p = FOAM_SIPS[Math.min(level, 4)];
+  rig.foam.visible = level < 4;
+  rig.foam.scale.set(p.xz, p.y, p.xz);
+  rig.foam.position.y = rig.foamBaseY - p.drop;
+}
+
+function applyFoam(rig: MugRig): void {
+  setFoamSips(rig, rig.sips);
 }
 
 function drinkSip(rig: MugRig, kind: "sip" | "slam"): void {
@@ -659,15 +695,8 @@ function updateMugs(now: number): void {
         new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), toward * tilt),
       );
     rig.root.position.y = rig.basePos.y + lift;
-    // foam shrinks at the drink's peak, once
-    if (t > 0.5 && rig.sips < (kind === "slam" ? 4 : rig.sips + 1)) {
-      const target = kind === "slam" ? 4 : rig.sips + 1;
-      if (rig.foam) {
-        const s = FOAM_SCALES[Math.min(target, 4)];
-        rig.foam.visible = target < 4;
-        rig.foam.scale.set(0.45 + 0.55 * s, s, 0.45 + 0.55 * s);
-      }
-    }
+    // foam sinks at the drink's peak (idempotent per frame past t=0.5)
+    if (t > 0.5) setFoamSips(rig, kind === "slam" ? 4 : Math.min(rig.sips + 1, 4));
   }
 }
 
@@ -761,6 +790,7 @@ function applyTokenGeometries() {
     const geos = (cls ? classTokenGeos?.[cls] : null) ?? sculptedTokenGeos;
     if (geos) marker.mesh.geometry = owner === "p1" ? geos.red : geos.blue;
   });
+  markShadowsDirty(); // geometry swaps change the casters
 }
 
 const CAPTURE_FLIGHT_MS = 700;
@@ -1140,6 +1170,7 @@ gltfLoader.load(
     for (const coin of myCoins) coin.mesh.geometry = coinRed;
     for (const coin of theirCoins) coin.mesh.geometry = coinBlue;
     for (const coin of allCoins) coin.mesh.material = coinMat;
+    markShadowsDirty(); // stones + coins just became real casters
   },
   undefined,
   (err) => console.error("Failed to load", PIECES_URL, err),
@@ -4865,6 +4896,23 @@ function tick() {
       "swig",
       "Your mug glows — every stone brought home earns a swig. Tap the mug and drink to the crossing.",
     );
+  // Shadow pass only while a caster is moving (stones in flight or still
+  // lerping home, coins tumbling, a mug mid-drink) or a load marked it.
+  let casterMoving = shadowsDirty;
+  if (!casterMoving) {
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i];
+      if (m.mesh.visible && (m.flying || m.mesh.position.distanceToSquared(m.target) > 1e-6)) {
+        casterMoving = true;
+        break;
+      }
+    }
+  }
+  if (!casterMoving)
+    casterMoving =
+      allCoins.some((c) => c.isFlipping) || myMug?.anim != null || theirMug?.anim != null;
+  renderer.shadowMap.needsUpdate = casterMoving;
+  shadowsDirty = false;
   renderer.render(scene, camera);
 }
 tick();
@@ -4895,12 +4943,35 @@ window.addEventListener("pointerdown", () => (lastPresenceAt = performance.now()
 window.addEventListener("focus", () => (lastPresenceAt = performance.now()));
 window.addEventListener("pageshow", () => (lastPresenceAt = performance.now()));
 document.addEventListener("visibilitychange", () => (lastPresenceAt = performance.now()));
+let wedgeKicks = 0;
+let wedgeFallback: number | null = null;
 setInterval(() => {
-  if (performance.now() - lastFrameAt < 2000) return; // frames are flowing — all good
+  if (performance.now() - lastFrameAt < 2000) {
+    wedgeKicks = 0; // frames are flowing — all good
+    return;
+  }
   const userPresent = performance.now() - lastPresenceAt < 30_000;
   if (document.hidden && !userPresent) return; // truly backgrounded: stay quiet
   cancelAnimationFrame(rafId); // no double chains when rAF wakes back up
-  resize();
+  // Rebuild the drawing buffer ONCE per wedge episode — the old
+  // resize()-every-second turned a wedged-rAF session into a 1 fps
+  // buffer-reallocation grind (heat + "runs slow as if on low battery").
+  if (wedgeKicks === 0) resize();
+  wedgeKicks++;
+  // Still wedged after two kicks: iOS isn't giving rAF back. Drive frames
+  // from a ~30 fps timer instead (timers demonstrably fire in this state);
+  // it retires itself the moment real rAF frames resume.
+  if (wedgeKicks >= 2 && wedgeFallback === null) {
+    wedgeFallback = window.setInterval(() => {
+      if (performance.now() - lastFrameAt < 25) {
+        clearInterval(wedgeFallback!);
+        wedgeFallback = null;
+        return; // rAF is healthy again — hand the loop back
+      }
+      cancelAnimationFrame(rafId);
+      tick();
+    }, 33);
+  }
   tick();
 }, 1000);
 

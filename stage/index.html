@@ -15,6 +15,11 @@
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #111; color: #eee; font-family: system-ui, sans-serif; }
+      /* This is a game surface, not a document: nothing is selectable (a
+         press-drag was highlighting HUD text like a web page). The chat
+         input and the room-code link opt back in below. */
+      body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+      #chat-input { -webkit-user-select: text; user-select: text; }
       #canvas { display: block; width: 100%; height: 100%; }
 
       /* ================= Gilded UI system =================
