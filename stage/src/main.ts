@@ -4760,10 +4760,43 @@ let lastFrameAt = 0;
 /** Last moment we KNOW the player was here (input, focus, visibility). */
 let lastPresenceAt = 0;
 
+/** Last frame we actually rendered (the governor may skip rAF callbacks). */
+let lastRenderAt = 0;
+
+/** Anything kinetic on the table RIGHT NOW — the states that deserve full
+ *  frame rate. Ambient motion (fire flicker, breathing rings, motes, rune
+ *  spin) is deliberately not on this list: it paces fine at 30. */
+function sceneKinetic(): boolean {
+  for (let i = 0; i < markers.length; i++) {
+    const m = markers[i];
+    if (m.mesh.visible && (m.flying || m.mesh.position.distanceToSquared(m.target) > 1e-6)) return true;
+  }
+  if (confirmStart > 0) return true;
+  if (myMug?.anim != null || theirMug?.anim != null) return true;
+  return allCoins.some((c) => c.isFlipping);
+}
+
 function tick() {
   rafId = requestAnimationFrame(tick);
   lastFrameAt = performance.now();
   const now = lastFrameAt;
+  // ---- Frame governor — the iPad battery fix, round two. A turn-based
+  // game spends most of its life with a still board; rendering the tavern
+  // at 60 fps anyway was the drain. Full rate only while something kinetic
+  // is happening (flights, lerps, coin tumbles, mug drinks); calm ambience
+  // paces at ~30; behind a full-screen overlay (menu, win screen, class
+  // pick, guide — where the scene is dimmed and blurred) ~15 is plenty,
+  // which also slashes iOS's per-canvas-frame backdrop-blur repaints. All
+  // scene animation is clock-driven, so a skipped callback costs nothing
+  // visually — the next rendered frame lands on the same timeline.
+  const overlayUp =
+    menuEl.classList.contains("show") ||
+    winScreen.classList.contains("show") ||
+    classpickEl.classList.contains("show") ||
+    guideOverlay.classList.contains("show");
+  const budgetMs = sceneKinetic() ? 0 : overlayUp ? 62 : 30;
+  if (budgetMs > 0 && now - lastRenderAt < budgetMs) return;
+  lastRenderAt = now;
   const lerp = 0.18;
 
   for (let i = 0; i < markers.length; i++) {
