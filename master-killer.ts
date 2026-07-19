@@ -350,9 +350,12 @@ export const RAISE_POSITION = 0;
  *  places the token HERE instead, the last private-lane tile before the
  *  contested row, trading the whole bank for 3 tiles of travel. Same
  *  Reinforced-Bulwark shape (one action, `dark` flag doubles the effect).
- *  Incidentally a shield TILE — mechanically moot for a placement in a
- *  private lane (nothing can capture there, and placement grants no
- *  landing benefits — see RAISE_POSITION). No explicit once-per-turn
+ *  A shield TILE — and since 2026-07-19 that is load-bearing: a Dark
+ *  Resurrection counts one link in the caster's shield streak (Kasen's
+ *  call — ultimates are rare and the necromancer is all defense, so a
+ *  full-bank cast onto the shield tile earns its place in the chain; see
+ *  applyRaiseDead). Placement still grants none of the OTHER landing
+ *  benefits (no charge, no extra turn). No explicit once-per-turn
  *  counter is needed for any Raise combination: a second plain cast is
  *  blocked by the first token now occupying RAISE_POSITION, and any
  *  plain+dark pairing costs more than CHARGE_CAP can hold.
@@ -1706,9 +1709,16 @@ export function getRaiseTargets(
  *  the SAME flip and recomputes legal moves against the new board, exactly
  *  the Re-flip contract (and like Re-flip, no resetTurnFlags: it's still
  *  the same turn). currentPlayer/lastFlip/extraTurn all pass through
- *  untouched. A placement is not a landing: no charge grant, no extra
- *  turn, no shield-streak advance — and no streak BREAK either, again
- *  matching Re-flip (only turn-ending non-landing actions break a streak).
+ *  untouched. A placement is not a landing: no charge grant and no extra
+ *  turn — and no streak BREAK either, again matching Re-flip (only
+ *  turn-ending non-landing actions break a streak). One exception, by
+ *  Kasen's 2026-07-19 rule: a DARK cast advances the shield streak —
+ *  DARK_RESURRECTION_POSITION is a shield tile, and a full-bank cast onto
+ *  it counts as a shield in the chain, banking ultimateReady at
+ *  ULTIMATE_STREAK exactly like resolveShieldStreak's non-archer branch
+ *  (the caster is a necromancer by construction, so the immediate-fire
+ *  archer arm can't apply). A plain cast (RAISE_POSITION, not a shield)
+ *  stays streak-neutral.
  *  The raised token carries no stale protection state by construction:
  *  safeTokens/bulwarked entries are cleared at capture time (resolveTurn),
  *  and never-boarded tokens never had any. Like every pure apply* here,
@@ -1723,10 +1733,21 @@ export function applyRaiseDead(
   const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
   const cost = dark ? CHARGE_CAP : 1;
   const tokens = state.tokens.map((t) => (t.id === tokenId ? { ...t, position: dest } : t));
-  const spent: PowerState = {
+  let spent: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
   };
+  if (dark) {
+    const next = spent.shieldStreak[mover] + 1;
+    spent =
+      next < ULTIMATE_STREAK
+        ? { ...spent, shieldStreak: { ...spent.shieldStreak, [mover]: next } }
+        : {
+            ...spent,
+            shieldStreak: { ...spent.shieldStreak, [mover]: 0 },
+            ultimateReady: { ...spent.ultimateReady, [mover]: true },
+          };
+  }
   return { state: { ...state, tokens }, power: spent };
 }
 

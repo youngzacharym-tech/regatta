@@ -1765,6 +1765,35 @@ function check(name: string, cond: boolean, detail?: string) {
     const rd = applyRaiseDead(s, pwDark, 1, "p1", true);
     check("Dark Resurrection: placed at the contested-row doorstep", rd.state.tokens.find((t) => t.id === 1)!.position === DARK_RESURRECTION_POSITION);
     check("Dark Resurrection: spends the full bank", rd.power.charges.p1 === 0, `p1=${rd.power.charges.p1}`);
+
+    // Kasen's 2026-07-19 rule: the dark cast lands a stone on a shield
+    // tile, so it counts one link in the shield streak — and completes it.
+    check("Dark Resurrection: advances the shield streak", rd.power.shieldStreak.p1 === 1, `streak=${rd.power.shieldStreak.p1}`);
+    check("Dark Resurrection: no ultimate off a short streak", rd.power.ultimateReady.p1 === false);
+
+    const pwTwo: PowerState = {
+      ...power({ p1: "necromancer" }, { p1: CHARGE_CAP }),
+      shieldStreak: { p1: ULTIMATE_STREAK - 1, p2: 0 },
+    };
+    const rdUlt = applyRaiseDead(s, pwTwo, 1, "p1", true);
+    check("Dark Resurrection: completes the streak and banks the ultimate", rdUlt.power.ultimateReady.p1 === true);
+    check("Dark Resurrection: streak consumed on completion", rdUlt.power.shieldStreak.p1 === 0, `streak=${rdUlt.power.shieldStreak.p1}`);
+
+    const pwBanked: PowerState = {
+      ...pwTwo,
+      ultimateReady: { p1: true, p2: false },
+    };
+    const rdAgain = applyRaiseDead(s, pwBanked, 1, "p1", true);
+    check("Dark Resurrection: completing at banked ult is consumed either way", rdAgain.power.ultimateReady.p1 === true && rdAgain.power.shieldStreak.p1 === 0);
+
+    // The plain cast targets RAISE_POSITION — not a shield tile — and must
+    // stay streak-neutral even one link short of the ultimate.
+    const pwPlainTwo: PowerState = {
+      ...power({ p1: "necromancer" }, { p1: 1 }),
+      shieldStreak: { p1: ULTIMATE_STREAK - 1, p2: 0 },
+    };
+    const rPlain = applyRaiseDead(s, pwPlainTwo, 1, "p1");
+    check("Raise: plain cast never advances the streak", rPlain.power.shieldStreak.p1 === ULTIMATE_STREAK - 1 && rPlain.power.ultimateReady.p1 === false);
   }
 
   // --- Exhume: target pool and apply ------------------------------------

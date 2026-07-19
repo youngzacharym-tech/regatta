@@ -926,10 +926,18 @@ function applyRaiseDead(state, power, tokenId, mover, dark = false) {
   const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
   const cost = dark ? CHARGE_CAP : 1;
   const tokens = state.tokens.map((t) => t.id === tokenId ? { ...t, position: dest } : t);
-  const spent = {
+  let spent = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost }
   };
+  if (dark) {
+    const next = spent.shieldStreak[mover] + 1;
+    spent = next < ULTIMATE_STREAK ? { ...spent, shieldStreak: { ...spent.shieldStreak, [mover]: next } } : {
+      ...spent,
+      shieldStreak: { ...spent.shieldStreak, [mover]: 0 },
+      ultimateReady: { ...spent.ultimateReady, [mover]: true }
+    };
+  }
   return { state: { ...state, tokens }, power: spent };
 }
 function getExhumeTargets(state, power, mover) {
