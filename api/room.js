@@ -1471,7 +1471,23 @@ function publicPower(doc) {
     blinkStrikeTargets: doc.mk.classes[mover] === "mage" && doc.mk.ultimateReady[mover] ? getBlinkStrikeTargets(doc.state, p, mover) : [],
     warpathTargets: doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover] ? getWarpathTargets(doc.state, p, mover) : [],
     bulwarkTargets: doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1 ? getBulwarkTargets(doc.state, p, mover) : [],
-    bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number),
+    // A Bulwark that blocked THIS flip was already consumed by
+    // tickBulwarkForNewTurn, but it is still doing its job for the rest of
+    // this turn (the served move list was computed with it up). Keep it in
+    // the VISIBLE list until the turn resolves — CLEAR_SLOTS wipes
+    // lastBulwarkBlock on the next commit, so the glow falls exactly when
+    // the protection actually stops mattering. Without this union the glow
+    // dropped at the block flip while captures stayed impossible all turn:
+    // Kasen's 2026-07-19 "it wore off but it's still activating" report.
+    bulwarkedTokenIds: [
+      .../* @__PURE__ */ new Set([
+        ...Object.keys(doc.mk.bulwarked).map(Number),
+        ...doc.lastBulwarkBlock?.tokenIds ?? []
+      ])
+    ],
+    bulwarkTurns: { ...doc.mk.bulwarked },
+    bulwarkSavesLeft: { ...doc.mk.bulwarkSaves },
+    shieldStreak: { ...doc.mk.shieldStreak },
     raiseTargets: doc.mk.classes[mover] === "necromancer" && doc.mk.charges[mover] >= 1 ? getRaiseTargets(doc.state, p, mover) : [],
     // Same >= 1 gate as raiseTargets (not the full-bank one) so the two
     // lists appear together and the client can tell "reserve is empty"

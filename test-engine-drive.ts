@@ -26,9 +26,11 @@ import {
   tick,
   viewFor,
   fromWirePower,
+  publicPower,
   EVENT_WINDOW,
   type RoomDoc,
   type RoomActionInput,
+  type WirePowerState,
 } from "./room-engine";
 
 const GAMES = Number(process.argv[2] ?? 400);
@@ -208,6 +210,42 @@ runMatchup("classic easy", "classic" as never, "archer", "archer", "easy", SMOKE
 runMatchup("classic hard", "classic" as never, "archer", "archer", "hard", SMOKE);
 runMatchup("mk mirror easy", "masterKiller", "warrior", "warrior", "easy", SMOKE);
 runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
+
+// ---------------------------------------------------------------------------
+// Bulwark display window: a Bulwark that blocked THIS flip is consumed by
+// tickBulwarkForNewTurn before the broadcast, but it is still doing its job
+// for the rest of the turn (the served move list was computed with it up) —
+// so publicPower must keep it VISIBLE until the turn resolves and
+// CLEAR_SLOTS wipes lastBulwarkBlock. Regression for Kasen's 2026-07-19
+// "the glow wore off but it's still activating" report.
+// ---------------------------------------------------------------------------
+{
+  const base = createRoomDoc("BWTEST", true, "masterKiller", "tok", 0, false);
+  const mk: WirePowerState & { classes: Record<PlayerId, PlayerClass> } = {
+    classes: { p1: "warrior", p2: "archer" },
+    charges: { p1: 0, p2: 0 },
+    reflipsUsedThisTurn: 0,
+    shieldStreak: { p1: 0, p2: 1 },
+    ultimateReady: { p1: false, p2: false },
+    bulwarked: { 2: 3 }, // one live Bulwark elsewhere on the table
+    bulwarkSaves: { 2: 2 },
+  };
+  const blockedDoc: RoomDoc = {
+    ...base,
+    phase: "play",
+    mk,
+    lastBulwarkBlock: { tokenIds: [5] }, // consumed this flip — gone from mk.bulwarked
+  };
+  const pp = publicPower(blockedDoc)!;
+  assert(pp.bulwarkedTokenIds.includes(5), "blocked-this-flip Bulwark stays in the visible list");
+  assert(pp.bulwarkedTokenIds.includes(2), "live Bulwark stays in the visible list");
+  const ppAfter = publicPower({ ...blockedDoc, lastBulwarkBlock: null })!;
+  assert(!ppAfter.bulwarkedTokenIds.includes(5), "consumed Bulwark leaves the list once the turn resolves");
+  assert(ppAfter.bulwarkedTokenIds.includes(2), "live Bulwark unaffected by the slot clearing");
+  // The activity-log debug fields mirror the raw lifecycle numbers.
+  assert(pp.bulwarkTurns?.[2] === 3 && pp.bulwarkSavesLeft?.[2] === 2, "bulwark lifecycle numbers ride the broadcast");
+  assert(pp.shieldStreak?.p2 === 1, "shield streak rides the broadcast");
+}
 
 if (failures > 0) {
   console.error(`\n${failures} assertion failure(s).`);

@@ -168,6 +168,16 @@ export interface PublicPower {
   warpathTargets: number[];
   bulwarkTargets: number[];
   bulwarkedTokenIds: number[];
+  /** Bulwark countdowns (token id -> turns remaining) and Reinforced saves
+   *  (token id -> blocks remaining) — the raw lifecycle numbers behind
+   *  bulwarkedTokenIds. ADDITIVE fields (older events lack them), added
+   *  2026-07-19 for the activity log's effects panel so a "why did that
+   *  block / why did the glow drop" question is answerable from the log. */
+  bulwarkTurns?: Record<number, number>;
+  bulwarkSavesLeft?: Record<number, number>;
+  /** Shield-streak progress per player — ADDITIVE, same activity-log pass
+   *  (diagnosing "did my Dark Resurrection count toward the ultimate"). */
+  shieldStreak?: Record<PlayerId, number>;
   raiseTargets: number[];
   /** Dark Resurrection's own list — same reserve-token pool as raiseTargets
    *  but gated on ITS destination tile, which can be free when the plain
@@ -438,7 +448,23 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
       doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1
         ? getBulwarkTargets(doc.state, p, mover)
         : [],
-    bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number),
+    // A Bulwark that blocked THIS flip was already consumed by
+    // tickBulwarkForNewTurn, but it is still doing its job for the rest of
+    // this turn (the served move list was computed with it up). Keep it in
+    // the VISIBLE list until the turn resolves — CLEAR_SLOTS wipes
+    // lastBulwarkBlock on the next commit, so the glow falls exactly when
+    // the protection actually stops mattering. Without this union the glow
+    // dropped at the block flip while captures stayed impossible all turn:
+    // Kasen's 2026-07-19 "it wore off but it's still activating" report.
+    bulwarkedTokenIds: [
+      ...new Set([
+        ...Object.keys(doc.mk.bulwarked).map(Number),
+        ...(doc.lastBulwarkBlock?.tokenIds ?? []),
+      ]),
+    ],
+    bulwarkTurns: { ...doc.mk.bulwarked },
+    bulwarkSavesLeft: { ...doc.mk.bulwarkSaves },
+    shieldStreak: { ...doc.mk.shieldStreak },
     raiseTargets:
       doc.mk.classes[mover] === "necromancer" && doc.mk.charges[mover] >= 1
         ? getRaiseTargets(doc.state, p, mover)
