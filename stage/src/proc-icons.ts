@@ -13,8 +13,10 @@
 //   - Cinzel echo: small rotated-square diamond finials terminate key
 //     strokes (the font's diamond tittles).
 //   - Warrior icons share one heater-shield base path; archer icons share
-//     arrow constructs; mage icons share circle/rune geometry. Silhouettes
-//     stay distinct at size (plain shield / double-rim / shield+burst).
+//     arrow constructs; mage icons share circle/rune geometry; necromancer
+//     icons share grave geometry (one headstone path, ground lines, gold
+//     soul-motes). Silhouettes stay distinct at size (plain shield /
+//     double-rim / shield+burst; plain stone / crowned stone / open pit).
 //
 // These strings are static trusted constants — safe for innerHTML, and they
 // must NEVER interpolate server-derived text.
@@ -33,7 +35,11 @@ export type ProcIconId =
   | "charge"
   | "bulwark"
   | "bulwarkReinforced"
-  | "bulwarkBlock";
+  | "bulwarkBlock"
+  | "raiseDead"
+  | "darkResurrection"
+  | "exhume"
+  | "soulHarvest";
 
 // Fixed frame gold — matches the plate/frame trim, constant across classes.
 const GOLD = "var(--gold-text, #e8c87e)";
@@ -55,6 +61,12 @@ const diamond = (x: number, y: number, r = 2.2, fill = "currentColor"): string =
 // Bulwark / Reinforced / Blocked! stay siblings instead of three shields.
 const SHIELD_PATH = "M13 13 Q24 16.5 35 13 C35 24 33 33 24 41 C15 33 13 24 13 13 Z";
 const SHIELD = `<path d="${SHIELD_PATH}" ${MAIN} ${BODY}/>`;
+
+// Necromancer family: one rounded headstone on a ground line, reused so
+// Raise Dead / Dark Resurrection stay siblings (the warrior shield rule).
+const STONE_PATH = "M15 40 L15 20 Q15 11 24 11 Q33 11 33 20 L33 40 Z";
+const STONE = `<path d="${STONE_PATH}" ${MAIN} ${BODY}/>`;
+const GROUND = `<path d="M6 40 L42 40" ${GOLD_DETAIL}/>` + `<path d="M42 ${40 - 1.8} L${42 + 1.8} 40 L42 ${40 + 1.8} L${42 - 1.8} 40 Z" fill="${GOLD}"/>`;
 
 export const PROC_ICONS: Record<ProcIconId, string> = {
   // Archer active: a token shoved sideways by force — a solid wedge of it
@@ -216,5 +228,64 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M7 12.5 L3.5 12" ${GOLD_DETAIL}/>` +
       // The crack that didn't get through.
       `<path d="M15 17.5 L19 21 L17.5 24 L21.5 27.5" ${DETAIL}/>`,
+  ),
+
+  // Necromancer 1-charge: the marked headstone, one soul slipping free —
+  // a rising chevron engraved on the face points the stone's tenant home.
+  raiseDead: wrap(
+    STONE +
+      GROUND +
+      // Engraved ascent chevron on the stone face.
+      `<path d="M24 34 L24 22" ${DETAIL}/>` +
+      `<path d="M19.5 26.5 L24 22 L28.5 26.5" ${DETAIL}/>` +
+      // The freed soul, rising off the stone's shoulder.
+      `<circle cx="38" cy="14.5" r="1.7" fill="${GOLD}"/>` +
+      `<circle cx="41" cy="8.5" r="1.2" fill="${GOLD}"/>`,
+  ),
+
+  // Necromancer full-bank: the same stone cracked open, the returning soul
+  // bursting off its top as a gold star — the sibling stays a headstone
+  // (raise = quiet chevron, resurrection = eruption).
+  darkResurrection: wrap(
+    STONE +
+      GROUND +
+      // The grave gives — a crack running up the face.
+      `<path d="M22 40 L24.5 32 L21 26" ${DETAIL}/>` +
+      // The soul erupting: four-point gold star off the stone's crown.
+      `<path d="M24 2 L26 6.8 L31 9 L26 11.2 L24 16 L22 11.2 L17 9 L22 6.8 Z" fill="${GOLD}"/>` +
+      `<circle cx="34" cy="15" r="1.3" fill="${GOLD}"/>` +
+      `<circle cx="13.5" cy="15" r="1.1" fill="${GOLD}"/>`,
+  ),
+
+  // Necromancer ultimate: the open pit, an escaped token dragged back down
+  // into it — the pull line arcs from the runaway straight into the grave.
+  exhume: wrap(
+    `<path d="M4 34 L15 34" ${MAIN}/>` +
+      `<path d="M33 34 L44 34" ${MAIN}/>` +
+      `<path d="M15 34 L15 44 L33 44 L33 34" ${MAIN}/>` +
+      `<path d="M15 34 L33 34 L33 44 L15 44 Z" ${BODY} stroke="none"/>` +
+      // The escapee, caught at the top of its run.
+      `<circle cx="36" cy="10" r="5" ${MAIN} ${BODY}/>` +
+      // The drag: down off the token, hauled into the pit mouth.
+      `<path d="M33 14 C25.5 19.5 22.5 25 24 31.5" ${MAIN}/>` +
+      `<path d="M20.6 27.8 L24 32.5 L27.4 27.6" ${MAIN}/>` +
+      diamond(33, 14, 1.8, GOLD) +
+      // Its interrupted flight, still hanging in the air behind it.
+      `<path d="M40.5 5 L44.5 1.5" ${GOLD_DETAIL}/>` +
+      `<path d="M42.5 12 L47 10.5" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Necromancer passive: the reaper's scythe, souls gathered under the
+  // blade's sweep — the one silhouette that can never read as a moon.
+  soulHarvest: wrap(
+    // Snath: the long diagonal staff.
+    `<path d="M11 45 L30 8.5" ${MAIN}/>` +
+      diamond(10.5, 45.8, 2) +
+      // Blade hooked off the snath's head, sweeping right and biting down.
+      `<path d="M28.5 9.5 C36 5.5 43.5 8.5 46.5 15 C41 13 35.5 13.8 31 17.5 C29.5 15 28.5 12 28.5 9.5 Z" ${MAIN} ${BODY}/>` +
+      // Souls drawn up into the harvest sweep.
+      `<circle cx="37" cy="24" r="1.7" fill="${GOLD}"/>` +
+      `<circle cx="41" cy="30" r="1.4" fill="${GOLD}"/>` +
+      `<circle cx="44" cy="36" r="1.1" fill="${GOLD}"/>`,
   ),
 };

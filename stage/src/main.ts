@@ -1858,21 +1858,9 @@ const ribbonIconEl = ribbonEl.querySelector(".ribbon-icon") as HTMLSpanElement;
 const ribbonTextEl = ribbonEl.querySelector(".ribbon-text") as HTMLSpanElement;
 const vignetteEl = document.getElementById("target-vignette") as HTMLDivElement;
 
-/** Placeholder glyphs — real icon art is a later pass. U+FE0E forces text
- *  presentation where iOS would otherwise serve a color emoji. */
-const DOCK_GLYPHS: Record<string, string> = {
-  reflip: "⟳",
-  push: "➳",
-  chargedShot: "➶",
-  charge: "»",
-  bulwark: "⛉︎",
-  bulwarkReinforced: "⛉︎",
-  blinkStrike: "✦",
-  warpath: "⚔︎",
-  raiseDead: "⚰︎",
-  darkResurrection: "⚰︎",
-  exhume: "☠︎",
-};
+/** Gem icons are the proc-banner SVG set (proc-icons.ts) — one shared
+ *  iconography, so the gem you tap and the banner that celebrates it wear
+ *  the same art. Every dock ability id is a ProcIconId by construction. */
 /** Charge cost per ability — drives the pip rows here and on the card.
  *  Ultimates cost no charges (their price is the shield streak, telegraphed
  *  by the always-visible dormant slot), so they carry no pips. */
@@ -1985,7 +1973,7 @@ function buildDock(cls: PlayerClass) {
     btn.dataset.ability = slot.ability;
     const cost = DOCK_COST[slot.ability];
     btn.innerHTML =
-      `<span class="dock-gem"><span class="dock-icon">${DOCK_GLYPHS[slot.ability]}</span>` +
+      `<span class="dock-gem"><span class="dock-icon">${PROC_ICONS[slot.ability as ProcIconId]}</span>` +
       (slot.ability === "reflip"
         ? `<span class="dock-uses">${"<i></i>".repeat(REFLIPS_PER_TURN)}</span><span class="dock-warn"></span>`
         : "") +
@@ -2178,7 +2166,7 @@ function armAbility(kind: ArmedKind) {
     btn.classList.toggle("dim", btn.dataset.ability !== kind);
   }
   ribbonEl.dataset.class = dockClass ?? "";
-  ribbonIconEl.textContent = DOCK_GLYPHS[kind];
+  ribbonIconEl.innerHTML = PROC_ICONS[kind];
   ribbonTextEl.innerHTML =
     `<b>${ABILITY_INFO[kind].name}</b> — ${RIBBON_COPY[kind]} ` +
     `<span class="ribbon-hint">· tap elsewhere to cancel</span>`;
@@ -2963,22 +2951,23 @@ function announceFromState(msg: {
   // expose a warded threat, see applyMkRaise), and that branch returns
   // early. The caster is the risen stone's owner — lastMovePlayer is stale
   // on raise commits (the turn never changed hands, Re-flip's contract).
-  // Icon borrowed from the nearest sibling (a stone forced onto a new
-  // square); dedicated necromancer art is a later proc-icons.ts pass, same
-  // placeholder rule as DOCK_GLYPHS.
   if (msg.lastRaise) {
     const raiser = msg.state.tokens.find((t) => t.id === msg.lastRaise!.tokenId)?.owner;
     const k = classOf(raiser);
-    if (k) showProc(k, msg.lastRaise.dark ? "Dark Resurrection!" : "Raise Dead!", "push");
+    if (k)
+      showProc(
+        k,
+        msg.lastRaise.dark ? "Dark Resurrection!" : "Raise Dead!",
+        msg.lastRaise.dark ? "darkResurrection" : "raiseDead",
+      );
   }
 
   // Soul Harvest proc — the VICTIM's side of a capture commit, which
   // announces (and returns) for the capturer below, so it must fire before
   // that chain. The matching gem flare rides replayEvent, mirroring
-  // lastChargeEvent's. Borrowed icon: wardBlock's gathered-essence circle
-  // (reserved, nothing else fires it) — same later-art-pass note as above.
+  // lastChargeEvent's.
   if (msg.lastSoulHarvest && classOf(msg.lastSoulHarvest.player) === "necromancer") {
-    showProc("necromancer", "Soul Harvest!", "wardBlock");
+    showProc("necromancer", "Soul Harvest!", "soulHarvest");
   }
 
   // Bulwark actually blocking a capture is its own signal, independent of
@@ -3082,15 +3071,14 @@ function announceFromState(msg: {
   // Necromancer's Exhume — an ultimate resolving, so it sits with its
   // Blink Strike/Warpath siblings (turn-ending, lastMovePlayer is the
   // caster). The landing tile is the server's own `returnedTo`, never the
-  // occupancy walk re-derived here. Borrowed warpath icon (ultimate-scaled
-  // dragging sweep) — same later-art-pass note as the Raise proc's.
+  // occupancy walk re-derived here.
   if (msg.lastExhume && msg.lastMovePlayer) {
     const who = playerLabel(msg.lastMovePlayer);
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
     const target = isMe ? "opponent's" : "your";
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, "Exhume!", "warpath");
+    if (k) showProc(k, "Exhume!", "exhume");
     showAnnouncement(
       `${subject} exhumed ${target} escaped token — dragged back to ${tileDisplay(msg.lastExhume.returnedTo)}!`,
       "ultimate",
