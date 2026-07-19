@@ -29,7 +29,10 @@ import {
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
+  DARK_RESURRECTION_POSITION,
+  EXHUME_RETURN_POSITION,
   isWarded,
+  RAISE_POSITION,
   REFLIPS_PER_TURN,
   type PlayerClass,
   type PowerMove,
@@ -957,13 +960,21 @@ function myAvailableSips(): number {
   return Math.max(0, earned - myMug.sips);
 }
 
-function handleEscapeChanges(now: { p1: number; p2: number }): void {
+function handleEscapeChanges(now: { p1: number; p2: number }, exhumed = false): void {
   const mySide: PlayerId = myRole ?? "p1";
   const otherSide: PlayerId = mySide === "p1" ? "p2" : "p1";
   if (now.p1 < escapedByOwner.p1 || now.p2 < escapedByOwner.p2) {
-    // Rematch: the tallies went backwards — refill both mugs.
-    resetMug(myMug);
-    resetMug(theirMug);
+    // Backwards tally: either a rematch (board reset — BOTH tallies land on
+    // zero) or a Necromancer's Exhume dragging ONE escaped stone back
+    // mid-match. Only the rematch refills the mugs — an Exhume must not
+    // erase the sips already drunk. The tally still re-baselines below, so
+    // the re-escape earns its swig again: the stone really crosses twice.
+    // `exhumed` settles the one ambiguous overlap (the victim's ONLY escape
+    // exhumed while the caster has none — a 0/0 that is not a reset).
+    if (!exhumed && now.p1 === 0 && now.p2 === 0) {
+      resetMug(myMug);
+      resetMug(theirMug);
+    }
   } else {
     // The opponent celebrates their own escapes (their tap on their screen;
     // an automatic swig on ours) once the escape flight has landed.
@@ -1148,7 +1159,7 @@ function ensureMkPieces() {
       const geoOf = (name: string) =>
         (gltf.scene.getObjectByName(name) as THREE.Mesh | undefined)?.geometry;
       const loaded: NonNullable<typeof classTokenGeos> = {};
-      for (const cls of ["archer", "mage", "warrior"] as const) {
+      for (const cls of ["archer", "mage", "warrior", "necromancer"] as const) {
         const red = geoOf(`token_${cls}_red`);
         const blue = geoOf(`token_${cls}_blue`);
         if (!red || !blue) {
@@ -1223,7 +1234,9 @@ function updateCoins(now: number) {
   }
 }
 
-function refreshMarkers(state: GameState) {
+/** `exhumed` = this broadcast carried a lastExhume, so a backwards escaped
+ *  tally is a dragged-back stone, never a rematch (see handleEscapeChanges). */
+function refreshMarkers(state: GameState, exhumed = false) {
   const reserveSlot = { p1: 0, p2: 0 };
   const escapedSlot = { p1: 0, p2: 0 };
   const now = performance.now();
@@ -1309,7 +1322,7 @@ function refreshMarkers(state: GameState) {
   for (const t of state.tokens) {
     if (t.position >= PATH_LENGTH) nowEscaped[t.owner]++;
   }
-  handleEscapeChanges(nowEscaped);
+  handleEscapeChanges(nowEscaped, exhumed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1577,6 +1590,16 @@ let currentPower: {
    *  player has already fired this turn — gates the Re-flip button
    *  together with charges (see renderPowerActions). */
   reflipsUsedThisTurn?: number;
+  /** Optional (pre-necromancer servers omit them): Raise Dead's valid
+   *  targets — the caster's OWN reserve token ids — and Exhume's, the
+   *  opponent's ESCAPED token ids. Both mirror pushTargets' rule:
+   *  populated only for the current player, empty otherwise. */
+  raiseTargets?: number[];
+  /** Optional (older servers omit it): Dark Resurrection's own list — the
+   *  same reserve pool as raiseTargets but gated on ITS destination tile,
+   *  which can be free when the plain cast's is blocked (and vice versa). */
+  darkRaiseTargets?: number[];
+  exhumeTargets?: number[];
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -1597,7 +1620,9 @@ type ArmedKind =
   | "warpath"
   | "bulwark"
   | "bulwarkReinforced"
-  | "charge";
+  | "charge"
+  | "raiseDead"
+  | "darkResurrection";
 let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
  *  sweep-capable move of the current roll (rebuilt by updateDock). The
@@ -1733,6 +1758,33 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "warrior",
     desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every unprotected enemy stone along the way.",
   },
+  raiseDead: {
+    name: "Raise Dead",
+    cost: "1 charge · keeps your turn",
+    klass: "necromancer",
+    desc: `Call a stone back from the graveyard: it rises on tile ${RAISE_POSITION + 1} and your flip stands — the risen stone may even be the one that moves. Rising is no landing: no extra turn, no charge, no shield streak.`,
+  },
+  darkResurrection: {
+    name: "Dark Resurrection",
+    cost: `${CHARGE_CAP} charges`,
+    klass: "necromancer",
+    desc: `The same rite with the whole bank behind it: the stone rises on tile ${DARK_RESURRECTION_POSITION + 1} instead — the last tile before shared water — trading every charge you hold for the head start.`,
+  },
+  exhume: {
+    name: "Exhume",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "necromancer",
+    desc: `Death honors no finish line: drag one of the opponent's ESCAPED stones back aboard at tile ${EXHUME_RETURN_POSITION + 1} — if that tile is taken it settles on the nearest free one behind — and it must sail the home stretch again. The one power that can undo an escape.`,
+  },
+  // Passive — no dock slot (same rule as the Archer's Snipe), so nothing
+  // opens this card yet; the entry keeps the tooltip copy in the one place
+  // every ability's copy lives, ready for the guide/plate surfaces.
+  soulHarvest: {
+    name: "Soul Harvest",
+    cost: "Passive · always on",
+    klass: "necromancer",
+    desc: "Every one of your stones an enemy sends home banks you a charge as it dies — one soul per stone, so a double capture pays twice. Aggression against the Necromancer is never free.",
+  },
 };
 
 const abilityTip = document.getElementById("ability-tip") as HTMLDivElement;
@@ -1817,6 +1869,9 @@ const DOCK_GLYPHS: Record<string, string> = {
   bulwarkReinforced: "⛉︎",
   blinkStrike: "✦",
   warpath: "⚔︎",
+  raiseDead: "⚰︎",
+  darkResurrection: "⚰︎",
+  exhume: "☠︎",
 };
 /** Charge cost per ability — drives the pip rows here and on the card.
  *  Ultimates cost no charges (their price is the shield streak, telegraphed
@@ -1830,6 +1885,9 @@ const DOCK_COST: Record<string, number> = {
   bulwarkReinforced: CHARGE_CAP,
   blinkStrike: 0,
   warpath: 0,
+  raiseDead: 1,
+  darkResurrection: CHARGE_CAP,
+  exhume: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
 const DOCK_NAMES: Record<string, string> = {
@@ -1841,6 +1899,9 @@ const DOCK_NAMES: Record<string, string> = {
   bulwarkReinforced: "Reinforced",
   blinkStrike: "Blink Strike",
   warpath: "Warpath",
+  raiseDead: "Raise Dead",
+  darkResurrection: "Resurrection",
+  exhume: "Exhume",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
  *  so the goal is visible from turn one. Archer's ult (Rain of Arrows) is
@@ -1854,6 +1915,14 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean }[]> = {
     { ability: "bulwarkReinforced" },
     { ability: "warpath", ult: true },
   ],
+  // Dark Resurrection gets its own full-bank slot beside the plain Raise —
+  // Reinforced Bulwark's exact affordance (one wire kind, the flag slot).
+  // Soul Harvest is passive and gets no slot, same rule as Snipe.
+  necromancer: [
+    { ability: "raiseDead" },
+    { ability: "darkResurrection" },
+    { ability: "exhume", ult: true },
+  ],
 };
 /** Ground-ring tint while targeting — the caster's class color (the ring
  *  texture is drawn white so this is a plain material recolor, see tick()). */
@@ -1861,6 +1930,11 @@ const DOCK_RING_TINTS: Record<PlayerClass, number> = {
   archer: 0x3ddc65,
   mage: 0xb45cff,
   warrior: 0x3f83ff,
+  // Spectral ash-violet — deliberately desaturated and ghostly so it can't
+  // be mistaken for the mage's saturated purple. Must stay in lockstep with
+  // index.html's data-class="necromancer" blocks; the final tint is a Kasen
+  // taste call.
+  necromancer: 0x9d8fd6,
 };
 /** What the ribbon asks the player to do, per armed ability. */
 const RIBBON_COPY: Record<ArmedKind, string> = {
@@ -1871,6 +1945,8 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   bulwarkReinforced: "tap one of your stones",
   blinkStrike: "tap an enemy to strike",
   warpath: "tap an enemy to end on",
+  raiseDead: "tap a fallen stone in your reserve to raise",
+  darkResurrection: "tap a fallen stone in your reserve",
 };
 
 /** Class the dock is currently built for — rebuild only on change. */
@@ -1959,6 +2035,37 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (targets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
     }
+    // Each rite gates on ITS OWN server list (the destination tiles differ,
+    // and either can be blocked while the other is free — an own stone on
+    // tile 1 must not lock out a legal full-bank Dark Resurrection). When
+    // one list is empty but the sibling's isn't, the reserve clearly holds
+    // bodies, so the reason names the blocked tile instead.
+    case "raiseDead": {
+      if (charges < 1) return { state: "noafford", reason: needCharges(1) };
+      if ((p.raiseTargets ?? []).length === 0) {
+        const blocked = (p.darkRaiseTargets ?? []).length > 0;
+        return {
+          state: "noafford",
+          reason: blocked ? `Tile ${RAISE_POSITION + 1} is occupied` : "No fallen stones to raise",
+        };
+      }
+      return { state: "ready" };
+    }
+    case "darkResurrection": {
+      if (charges < CHARGE_CAP) return { state: "noafford", reason: needCharges(CHARGE_CAP) };
+      if ((p.darkRaiseTargets ?? []).length === 0) {
+        const blocked = (p.raiseTargets ?? []).length > 0;
+        return {
+          state: "noafford",
+          reason: blocked ? `Tile ${DARK_RESURRECTION_POSITION + 1} is occupied` : "No fallen stones to raise",
+        };
+      }
+      return { state: "ready" };
+    }
+    case "exhume":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.exhumeTargets ?? []).length === 0) return { state: "noafford", reason: "No escaped enemies to drag back" };
+      return { state: "ready" };
   }
   return { state: "noafford" };
 }
@@ -2009,6 +2116,9 @@ function updateDock(active?: boolean) {
     p.blinkStrikeTargets.join(),
     p.warpathTargets.join(),
     p.bulwarkTargets.join(),
+    (p.raiseTargets ?? []).join(),
+    (p.darkRaiseTargets ?? []).join(),
+    (p.exhumeTargets ?? []).join(),
     [...chargeMoveIndexByToken.keys()].join(),
   ].join("|");
   if (key !== dockKey) {
@@ -2055,7 +2165,11 @@ function armAbility(kind: ArmedKind) {
             ? p.warpathTargets
             : kind === "charge"
               ? [...chargeMoveIndexByToken.keys()]
-              : p.bulwarkTargets, // bulwark / bulwarkReinforced
+              : kind === "raiseDead"
+                ? p.raiseTargets ?? [] // MY OWN reserve stones, Bulwark's rule
+                : kind === "darkResurrection"
+                  ? p.darkRaiseTargets ?? [] // same pool, ITS OWN destination gate
+                  : p.bulwarkTargets, // bulwark / bulwarkReinforced
   );
   if (ids.size === 0) return;
   armed = { kind, targetIds: ids };
@@ -2104,6 +2218,12 @@ function fireArmed(tokenId: number) {
       break;
     case "bulwarkReinforced":
       sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId, reinforced: true } });
+      break;
+    case "raiseDead":
+      sendToServer({ type: "usePower", action: { kind: "raiseDead", tokenId } });
+      break;
+    case "darkResurrection":
+      sendToServer({ type: "usePower", action: { kind: "raiseDead", tokenId, dark: true } });
       break;
     case "charge": {
       const moveIndex = chargeMoveIndexByToken.get(tokenId);
@@ -2191,6 +2311,19 @@ dockEl.addEventListener("click", (e) => {
     // usual pendingFlipSeq path, so the player taps their coins again.
     sendToServer({ type: "usePower", action: { kind: "reflip" } });
     flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "exhume") {
+    // Fires instantly too, Re-flip's precedent: every escaped enemy stone
+    // is equivalent (they sit in one pile past the prow and the server's
+    // occupancy walk decides the landing), so a board tap would be a choice
+    // carrying no information. The id still comes from the server's own
+    // exhumeTargets list — trust model unchanged.
+    const t = currentPower?.exhumeTargets?.[0];
+    if (t !== undefined) {
+      sendToServer({ type: "usePower", action: { kind: "exhume", targetTokenId: t } });
+      flashDockButton(ability, "fired");
+    }
     return;
   }
   if (armed?.kind === ability) disarm(); // re-tap the armed gem = cancel
@@ -2786,6 +2919,9 @@ function announceFromState(msg: {
   lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
   lastChargeSweep?: { sweptTokenIds: number[] } | null;
   lastReflip?: { player: PlayerId } | null;
+  lastRaise?: { tokenId: number; dark?: boolean } | null;
+  lastExhume?: { targetTokenId: number; returnedTo: number } | null;
+  lastSoulHarvest?: { player: PlayerId; delta: number } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -2822,6 +2958,29 @@ function announceFromState(msg: {
     showProc("mage", "Reroll!", "reflip");
   }
 
+  // Necromancer Raise Dead proc — hoisted for the Reroll's exact reason:
+  // the same commit can ALSO reveal a Bulwark block (the risen stone can
+  // expose a warded threat, see applyMkRaise), and that branch returns
+  // early. The caster is the risen stone's owner — lastMovePlayer is stale
+  // on raise commits (the turn never changed hands, Re-flip's contract).
+  // Icon borrowed from the nearest sibling (a stone forced onto a new
+  // square); dedicated necromancer art is a later proc-icons.ts pass, same
+  // placeholder rule as DOCK_GLYPHS.
+  if (msg.lastRaise) {
+    const raiser = msg.state.tokens.find((t) => t.id === msg.lastRaise!.tokenId)?.owner;
+    const k = classOf(raiser);
+    if (k) showProc(k, msg.lastRaise.dark ? "Dark Resurrection!" : "Raise Dead!", "push");
+  }
+
+  // Soul Harvest proc — the VICTIM's side of a capture commit, which
+  // announces (and returns) for the capturer below, so it must fire before
+  // that chain. The matching gem flare rides replayEvent, mirroring
+  // lastChargeEvent's. Borrowed icon: wardBlock's gathered-essence circle
+  // (reserved, nothing else fires it) — same later-art-pass note as above.
+  if (msg.lastSoulHarvest && classOf(msg.lastSoulHarvest.player) === "necromancer") {
+    showProc("necromancer", "Soul Harvest!", "wardBlock");
+  }
+
   // Bulwark actually blocking a capture is its own signal, independent of
   // lastMovePlayer (it fires the instant a fresh flip reveals the block —
   // see master-killer.ts's tickBulwarkForNewTurn — which can be before the
@@ -2834,6 +2993,26 @@ function announceFromState(msg: {
     const k = classOf(first?.owner);
     if (k) showProc(k, "Blocked!", "bulwarkBlock");
     showAnnouncement(`${subject} Bulwark${plural} blocked a capture!`, "shield");
+    return;
+  }
+
+  // Raise Dead's full announcement (the proc already fired above). The
+  // resulting tile comes from the authoritative state, lastPush's pattern —
+  // never re-derived from the constants here.
+  if (msg.lastRaise) {
+    const raisedToken = msg.state.tokens.find((t) => t.id === msg.lastRaise!.tokenId);
+    if (raisedToken) {
+      const raiser = raisedToken.owner;
+      const isMe = raiser === myRole;
+      const subject = isMe ? "You" : playerLabel(raiser);
+      const dark = msg.lastRaise.dark === true;
+      showAnnouncement(
+        dark
+          ? `${subject} cast Dark Resurrection — a fallen token rises on ${tileDisplay(raisedToken.position)}${chargeFor(raiser)}`
+          : `${subject} raised a fallen token — back aboard on ${tileDisplay(raisedToken.position)}${chargeFor(raiser)}`,
+        "shield",
+      );
+    }
     return;
   }
 
@@ -2895,6 +3074,25 @@ function announceFromState(msg: {
     if (k) showProc(k, `${label}!`, msg.lastUltimate.kind);
     showAnnouncement(
       `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}!${chargeFor(msg.lastMovePlayer)}`,
+      "ultimate",
+    );
+    return;
+  }
+
+  // Necromancer's Exhume — an ultimate resolving, so it sits with its
+  // Blink Strike/Warpath siblings (turn-ending, lastMovePlayer is the
+  // caster). The landing tile is the server's own `returnedTo`, never the
+  // occupancy walk re-derived here. Borrowed warpath icon (ultimate-scaled
+  // dragging sweep) — same later-art-pass note as the Raise proc's.
+  if (msg.lastExhume && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "opponent's" : "your";
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Exhume!", "warpath");
+    showAnnouncement(
+      `${subject} exhumed ${target} escaped token — dragged back to ${tileDisplay(msg.lastExhume.returnedTo)}!`,
       "ultimate",
     );
     return;
@@ -3104,13 +3302,21 @@ function replayEvent(ev: RoomEvent) {
   if (ev.state.winner === null) hideWinScreen();
   // Announce BEFORE refreshing markers so the banner lands with the animation.
   announceFromState(ev);
-  refreshMarkers(ev.state);
+  refreshMarkers(ev.state, ev.lastExhume != null);
   currentPower = ev.power ?? null;
   updateTokenTints(ev.state);
   updatePlates(ev.state);
   if (ev.lastChargeEvent) {
     const container = viewSide(ev.lastChargeEvent.player) === "p1" ? gemsMe : gemsThem;
     flashGems(container, ev.lastChargeEvent.delta > 0 ? "flare" : "spend");
+  }
+  // Soul Harvest changes the SECOND bank on the same broadcast (a capture
+  // against a necromancer pays both sides; lastChargeEvent above carries
+  // only the actor's delta) — mirror its flare path so the victim's gems
+  // light the moment their stone dies.
+  if (ev.lastSoulHarvest) {
+    const container = viewSide(ev.lastSoulHarvest.player) === "p1" ? gemsMe : gemsThem;
+    flashGems(container, ev.lastSoulHarvest.delta > 0 ? "flare" : "spend");
   }
   if (ev.flip !== null) {
     const mine = ev.state.currentPlayer === (myRole ?? "p1");
@@ -3780,6 +3986,7 @@ const GUIDE_SPREADS: [string, string][] = [
        <li data-goto="4"><span>The Archer</span><i></i><b>IV</b></li>
        <li data-goto="5"><span>The Mage</span><i></i><b>V</b></li>
        <li data-goto="6"><span>The Warrior</span><i></i><b>VI</b></li>
+       <li data-goto="7"><span>The Necromancer</span><i></i><b>VII</b></li>
      </ol>`,
     `<h2>How to Read This Book</h2>
      <p>Tap any entry in the contents to open its chapter directly.</p>
@@ -3849,7 +4056,7 @@ const GUIDE_SPREADS: [string, string][] = [
      fills your <span class="gold">charge</span> — up to two banked at once.
      Spend a charge to fire your class's active power, offered as a button
      beside your coins whenever you can afford it.</p>`,
-    `<div class="runner">Master Killer &middot; the three classes</div>
+    `<div class="runner">Master Killer &middot; the four classes</div>
      <ul>
        <li><b>The Archer</b> strikes from range — free Snipes on the water,
        Pushes and the heavy Charged Shot to knock enemies home.</li>
@@ -3857,6 +4064,8 @@ const GUIDE_SPREADS: [string, string][] = [
        and Re-flips a bad roll, twice a turn with a full bank.</li>
        <li><b>The Warrior</b> walks through wards — breaks them on contact,
        sweeps the lane with Charge, shelters behind Bulwark.</li>
+       <li><b>The Necromancer</b> profits from every loss — banks a soul for
+       each stone sent home and raises the dead back onto the board.</li>
      </ul>
      <p>Each class keeps its own chapter in this book — and each hides an
      <span class="gold">ultimate</span>, earned by landing on shield tiles
@@ -3945,6 +4154,32 @@ const GUIDE_SPREADS: [string, string][] = [
        enemy stone caught between where it started and where it lands,
        Warded or not. Break a Ward along the way and the landing stone
        stands safe from capture until it next moves.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>The Necromancer</h2>
+     <ul>
+       <li><b>Soul Harvest</b> (passive, free): every one of your stones an
+       enemy sends home banks you a charge as it dies — one soul per stone,
+       so a double capture pays twice. Aggression against the Necromancer
+       is never free.</li>
+       <li><b>Raise Dead</b> (active, 1 charge): call a stone back from
+       your hand onto tile ${RAISE_POSITION + 1} — your flip stands, and
+       the risen stone may even be the one that moves. Rising is no
+       landing: no extra turn, no charge, no shield streak.</li>
+     </ul>`,
+    `<div class="runner">The Necromancer &middot; continued</div>
+     <ul>
+       <li><b>Dark Resurrection</b> (active, spends both charges): the same
+       rite with the whole bank behind it — the stone rises on tile
+       ${DARK_RESURRECTION_POSITION + 1} instead, the last tile before
+       shared water, trading every charge you hold for the head start.</li>
+       <li><b>Exhume</b> (active, spends your ultimate): land on a shield
+       tile three times running and death honors no finish line — drag one
+       of the opponent's ESCAPED stones back aboard at tile
+       ${EXHUME_RETURN_POSITION + 1}, or the nearest free tile behind it,
+       to sail the home stretch all over again. The one power in the game
+       that can undo an escape.</li>
      </ul>`,
   ],
 ];
@@ -4310,7 +4545,7 @@ setInterval(() => {
 const dockDemoParam =
   location.hostname === "localhost" ? new URLSearchParams(location.search).get("dockdemo") : null;
 if (dockDemoParam !== null) {
-  const cls: PlayerClass = ["archer", "mage", "warrior"].includes(dockDemoParam)
+  const cls: PlayerClass = ["archer", "mage", "warrior", "necromancer"].includes(dockDemoParam)
     ? (dockDemoParam as PlayerClass)
     : "warrior";
   menuEl.classList.remove("show");
@@ -4339,6 +4574,11 @@ if (dockDemoParam !== null) {
       bulwarkTargets: [0, 1, 2],
       bulwarkedTokenIds: [],
       reflipsUsedThisTurn: d.reflips,
+      // Necromancer demo pools mirror the server's gating: raise needs a
+      // charge, exhume the ultimate (nothing on other classes' rounds).
+      raiseTargets: cls === "necromancer" && d.charges > 0 ? [2, 3] : [],
+      darkRaiseTargets: cls === "necromancer" && d.charges > 0 ? [2, 3] : [],
+      exhumeTargets: cls === "necromancer" && d.ult ? [4] : [],
     };
     currentPowerMoves =
       cls === "warrior"

@@ -331,11 +331,97 @@ export const BULWARK_REINFORCED_TURNS = 4;
  *  simulation trace that picked this design. */
 export const BULWARK_REINFORCED_SAVES = 2;
 
+/** Necromancer's Raise Dead: where a plain (1-charge) cast places the raised
+ *  reserve token — the entry tile of the caster's own private lane. Raising
+ *  is a PLACEMENT, not a landing: it never grants an extra turn, a charge,
+ *  or shield-streak progress, and (unlike every other charge spend except
+ *  Re-flip) it does NOT end the turn — the caster still flips and moves,
+ *  and the raised token may itself be the mover. That non-turn-ending
+ *  design is deliberately load-bearing (it's what makes a raise worth a
+ *  charge at all — a normal entry move already exists) and deliberately
+ *  risky: this codebase's one extra-action experiment (Push granting an
+ *  extra turn) blew out to 95/5 (see applyPush's history note), so if the
+ *  necromancer mirrors or vs-warrior sims blow out, "Raise ends the turn"
+ *  is the designated one-line nerf. NOT YET SIMULATED — first balance pass
+ *  happens when the class joins batch-random-master-killer-games.ts. */
+export const RAISE_POSITION = 0;
+
+/** Necromancer's Dark Resurrection — the full-bank (CHARGE_CAP) Raise:
+ *  places the token HERE instead, the last private-lane tile before the
+ *  contested row, trading the whole bank for 3 tiles of travel. Same
+ *  Reinforced-Bulwark shape (one action, `dark` flag doubles the effect).
+ *  Incidentally a shield TILE — mechanically moot for a placement in a
+ *  private lane (nothing can capture there, and placement grants no
+ *  landing benefits — see RAISE_POSITION). No explicit once-per-turn
+ *  counter is needed for any Raise combination: a second plain cast is
+ *  blocked by the first token now occupying RAISE_POSITION, and any
+ *  plain+dark pairing costs more than CHARGE_CAP can hold.
+ *  (First balance pass, 5000 games/matchup: 3 is the ceiling, not a knob
+ *  with headroom. The only legal escalation is 12 — the private lane
+ *  resumes at 12-14, and getRaiseTargets's own-token-only occupancy check
+ *  stays sound on any private tile, while 4-11 are contested and would
+ *  need enemy-collision logic this lever doesn't cover — and 12 was TRIED
+ *  and is a catastrophic blowout: placing past the whole contested
+ *  gauntlet turns Soul Harvest into "every second death funds a
+ *  near-escape" and every necromancer matchup collapsed — 97.8/2.2 vs
+ *  archer, 90.0/10.0 vs mage, 96.2/3.8 vs warrior. Do not retry 12 (or
+ *  13/14, strictly worse) without redesigning Soul Harvest first. The
+ *  3 tiles at this setting ARE worth the second charge, though: a bot
+ *  policy preferring plain raises over dark ones dropped every
+ *  necromancer matchup by 3-6 points — see scoreRaiseDead in
+ *  master-killer-bot.ts for that trace.)
+ *  (Second balance pass, 5000 games/matchup: 12 was re-tried PAIRED with
+ *  the designated "Raise ends the turn" nerf — both raise variants
+ *  implemented as turn-ending, the full applyBulwark shape — on the
+ *  theory that two levers pointing too far in opposite directions might
+ *  meet in the middle. They don't: 93.6/6.4 vs archer, 77.5/22.5 vs
+ *  mage, 88.4/11.6 vs warrior, still a blowout. A tile-12 placement is a
+ *  guaranteed eventual escape (nothing in the game can touch a private-
+ *  lane token), so paying a turn per cast just slows the certainty
+ *  without breaking it — games SHORTENED to ~55 turns. The do-not-retry
+ *  note above stands even with the nerf attached; the ends-turn
+ *  machinery was reverted with it, so applyRaiseDead's non-turn-ending
+ *  contract is unchanged.) */
+export const DARK_RESURRECTION_POSITION = 3;
+
+/** Necromancer's Exhume ultimate: the board position an ESCAPED enemy token
+ *  is dragged back to — the only mechanic in the game that touches the win
+ *  condition itself, which is exactly the drama the shield-streak gate's
+ *  rarity (Rain of Arrows fires ~1-in-100 games at the same streak) is
+ *  meant to pay for. 11 = the last contested tile: the victim re-runs only
+ *  the home stretch, the gentlest meaningful setting. Lower is crueler and
+ *  sim-adjustable. If the occupancy walk (see applyExhume) has to step
+ *  back, it can never in practice leave the contested row: at most 7
+ *  blockers (opponent's 3 other tokens + the caster's 4) over 8 contested
+ *  tiles guarantees a free one, so the private-lane arm of the collision
+ *  check only matters if this constant is ever retuned below 4.
+ *  (First balance pass, 5000 games/matchup: TRIED 4 — the cruelest
+ *  contested-row setting, the victim re-runs the entire shared row —
+ *  against 11, with the shipped scoreRaiseDead policy on both sides:
+ *  indistinguishable at this sample size (mage-vs-necromancer 69.0/31.0
+ *  at 4 vs 69.3/30.7 at 11; every other necromancer matchup moved ~1pt,
+ *  inside noise). The lever's reach is capped by Exhume's FIRE RATE, not
+ *  its cruelty — exhume/g sits at 0.07-0.16 (ULTIMATE_STREAK gates it),
+ *  so even the maximum setting touches too few games to register. KEPT
+ *  at 11, the gentlest meaningful setting: an unmeasurable win isn't
+ *  worth spending the drama budget of the game's one win-condition-
+ *  touching mechanic. Revisit only if a future pass raises the fire
+ *  rate.)
+ *  (Second balance pass: the fire rate DID rise — the necromancer's
+ *  standard-tier shield-landing bonus (see master-killer-bot.ts's
+ *  MK_STD_NECRO_SHIELD_EXTRA) lifted exhume/g from 0.04 to 0.06-0.11
+ *  across the necromancer matchups, and a streak-chasing escalation
+ *  probe reached 0.21 in the mirror — but even doubled-to-quintupled,
+ *  the rate is still an order of magnitude short of one-per-game, and
+ *  the 35/65-bar arithmetic (<=1pt of win-rate reach at these rates)
+ *  is unchanged. Same verdict: keep 11.) */
+export const EXHUME_RETURN_POSITION = 11;
+
 // ============================================================================
 // TYPES
 // ============================================================================
 
-export type PlayerClass = "archer" | "mage" | "warrior";
+export type PlayerClass = "archer" | "mage" | "warrior" | "necromancer";
 
 export interface PowerState {
   classes: Record<PlayerId, PlayerClass>;
@@ -431,7 +517,17 @@ export type PowerAction =
        *  BULWARK_REINFORCED_TURNS. Optional and additive: absent/false is
        *  the plain 1-charge cast, unchanged. */
       reinforced?: boolean;
-    };
+    }
+  | {
+      kind: "raiseDead";
+      /** One of the caster's own RESERVE token ids — see getRaiseTargets. */
+      tokenId: number;
+      /** Dark Resurrection: spend the FULL bank (CHARGE_CAP) to place at
+       *  DARK_RESURRECTION_POSITION instead of RAISE_POSITION. Optional and
+       *  additive, same shape as bulwark's `reinforced`. */
+      dark?: boolean;
+    }
+  | { kind: "exhume"; targetTokenId: number };
 
 // ============================================================================
 // STATE
@@ -583,6 +679,30 @@ function addCharge(power: PowerState, player: PlayerId): PowerState {
 
 export function grantZeroFlipCharge(power: PowerState, mover: PlayerId): PowerState {
   return addCharge(power, mover);
+}
+
+/** Necromancer's Soul Harvest (passive): every one of the necromancer's own
+ *  tokens sent home by an enemy action banks the NECROMANCER a charge —
+ *  deaths feed the class, so aggression against it is never free. The
+ *  capturer still earns their normal capture charge on top; a death simply
+ *  pays both sides of the table when the victim is a necromancer. One
+ *  charge PER TOKEN (a Warpath double = two souls) rather than per event —
+ *  each death is a soul — with CHARGE_CAP clamping the difference to
+ *  near-nothing in practice via addCharge's existing no-op-at-cap.
+ *
+ *  Must be called at EVERY send-home site, and only for real send-homes:
+ *  resolveTurn (landing captures, Snipe, Charge sweeps, Rain of Arrows all
+ *  ride finalCaptures through it), applyPush and applyChargedShot (their
+ *  sendsHome branch only — a partial on-board shove is not a death),
+ *  applyBlinkStrike, and applyWarpath. Gated on the VICTIM's class in here
+ *  so every call site stays a one-line unconditional call that can't drift.
+ *  Captures are enemy-only by construction at all of those sites, so the
+ *  victim is always otherPlayerId(mover). */
+function grantSoulHarvest(power: PowerState, victim: PlayerId, count: number): PowerState {
+  if (count <= 0 || power.classes[victim] !== "necromancer") return power;
+  let next = power;
+  for (let i = 0; i < count; i++) next = addCharge(next, victim);
+  return next;
 }
 
 // ============================================================================
@@ -865,6 +985,8 @@ function resolveTurn(
   if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
+  // Soul Harvest: no-op unless the victim is a necromancer — see its doc.
+  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), finalCaptures.length);
 
   const extraTurn = landsOnShield;
   const nextState: GameState = {
@@ -1039,7 +1161,11 @@ export function applyPush(
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
     safeTokens,
   };
-  if (sendsHome) spentPower = addCharge(spentPower, mover);
+  if (sendsHome) {
+    spentPower = addCharge(spentPower, mover);
+    // Soul Harvest: a send-home is a death; a partial shove (below) is not.
+    spentPower = grantSoulHarvest(spentPower, otherPlayerId(mover), 1);
+  }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
   // shield-tile landing — currentPlayer stays the mover) was meant to stop
@@ -1127,7 +1253,11 @@ export function applyChargedShot(
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
     safeTokens,
   };
-  if (sendsHome) spentPower = addCharge(spentPower, mover);
+  if (sendsHome) {
+    spentPower = addCharge(spentPower, mover);
+    // Soul Harvest: same send-home-only rule as Push's — see grantSoulHarvest.
+    spentPower = grantSoulHarvest(spentPower, otherPlayerId(mover), 1);
+  }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
   const nextState: GameState = {
     tokens,
@@ -1228,6 +1358,7 @@ export function applyBlinkStrike(
     ultimateReady: { ...power.ultimateReady, [mover]: false },
   };
   nextPower = addCharge(nextPower, mover);
+  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), 1);
   const nextState: GameState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -1305,6 +1436,8 @@ export function applyWarpath(
     ultimateReady: { ...power.ultimateReady, [mover]: false },
   };
   nextPower = addCharge(nextPower, mover);
+  // Soul Harvest pays per token — a Warpath double-capture is two souls.
+  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), allCaptures.length);
   const nextState: GameState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -1528,4 +1661,150 @@ export function tickBulwarkForReflip(
 ): { power: PowerState; blockedIds: number[] } {
   const blocked = getBulwarkBlockedIds(state, power, flip);
   return { power: blocked.length > 0 ? consumeBulwarkBlocks(power, blocked) : power, blockedIds: blocked };
+}
+
+// ============================================================================
+// NECROMANCER — the class that treats the reserve as a graveyard. Passive:
+// Soul Harvest (see grantSoulHarvest, wired into every send-home site).
+// Actives: Raise Dead (1 charge, reserve token to RAISE_POSITION, does NOT
+// end the turn — Re-flip's precedent) and its full-bank Dark Resurrection
+// variant (CHARGE_CAP, to DARK_RESURRECTION_POSITION — Reinforced Bulwark's
+// `reinforced`-flag shape, as `dark`). Ultimate: Exhume (shield-streak
+// banked via the existing ultimateReady flow, same as Blink Strike/Warpath)
+// — drags an ESCAPED enemy token back onto the board. Nothing here adds
+// PowerState fields: Soul Harvest is an event-time grant and both actives
+// are instant, so the class's whole persistent footprint is the `classes`
+// entry itself.
+// ============================================================================
+
+/** Necromancer's Raise Dead: valid "targets" are the caster's own RESERVE
+ *  tokens (position -1). All reserve tokens are interchangeable — the list
+ *  exists so the tap-a-token UI and the server's validation share one
+ *  source of truth, same trust model as every other target getter. Empty
+ *  when the destination tile is occupied by the caster's OWN token — the
+ *  destination is private-lane by construction (RAISE_POSITION and
+ *  DARK_RESURRECTION_POSITION are both in the 0-3 row), so only own tokens
+ *  can ever block; an enemy token whose position merely shares the numeric
+ *  index sits on a different physical square (the private-lane rule Snipe's
+ *  isContested guard exists for). Affordability (plain: >= 1 charge, dark:
+ *  the full CHARGE_CAP bank) is a dispatch-layer/UI gate per the Bulwark
+ *  precedent, NOT baked in here. */
+export function getRaiseTargets(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+  dark = false,
+): number[] {
+  const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
+  if (state.tokens.some((t) => t.owner === mover && t.position === dest)) return [];
+  return state.tokens.filter((t) => t.owner === mover && t.position === -1).map((t) => t.id);
+}
+
+/** Necromancer's Raise Dead: spends 1 charge (or the full bank when `dark`)
+ *  to place a reserve token directly on RAISE_POSITION (or
+ *  DARK_RESURRECTION_POSITION). Does NOT end the turn — the caller keeps
+ *  the SAME flip and recomputes legal moves against the new board, exactly
+ *  the Re-flip contract (and like Re-flip, no resetTurnFlags: it's still
+ *  the same turn). currentPlayer/lastFlip/extraTurn all pass through
+ *  untouched. A placement is not a landing: no charge grant, no extra
+ *  turn, no shield-streak advance — and no streak BREAK either, again
+ *  matching Re-flip (only turn-ending non-landing actions break a streak).
+ *  The raised token carries no stale protection state by construction:
+ *  safeTokens/bulwarked entries are cleared at capture time (resolveTurn),
+ *  and never-boarded tokens never had any. Like every pure apply* here,
+ *  no affordability self-guard — the caller already verified it. */
+export function applyRaiseDead(
+  state: GameState,
+  power: PowerState,
+  tokenId: number,
+  mover: PlayerId,
+  dark = false,
+): { state: GameState; power: PowerState } {
+  const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
+  const cost = dark ? CHARGE_CAP : 1;
+  const tokens = state.tokens.map((t) => (t.id === tokenId ? { ...t, position: dest } : t));
+  const spent: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
+  };
+  return { state: { ...state, tokens }, power: spent };
+}
+
+/** Necromancer's Exhume ultimate: valid targets are the opponent's ESCAPED
+ *  tokens (position >= PATH_LENGTH_PER_PLAYER) — empty if none have
+ *  escaped yet, the same "structurally nothing to do" empty-pool shape as
+ *  Blink Strike with no on-board token. Nothing protects an escaped token:
+ *  shield tiles and Ward derive from board position (both exclude escaped
+ *  positions already), transient safety cannot survive the escaping move
+ *  itself (resolveTurn clears the mover's), and a stale Bulwark entry is
+ *  deliberately ignored here AND stripped on the way back (see
+ *  applyExhume) — death claims all. ultimateReady gating stays at the
+ *  dispatch layer, same as Blink Strike/Warpath. */
+export function getExhumeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  void power; // uniform target-getter signature; nothing in PowerState gates this pool
+  const foe = otherPlayerId(mover);
+  return state.tokens
+    .filter((t) => t.owner === foe && t.position >= PATH_LENGTH_PER_PLAYER)
+    .map((t) => t.id);
+}
+
+/** Necromancer's Exhume: drags the escaped target back to
+ *  EXHUME_RETURN_POSITION, walking backward one tile at a time past any
+ *  occupied square — same collision semantics as computeKnockbackLanding
+ *  (own-owner tokens collide anywhere on the target's path; cross-owner
+ *  only on a contested tile), reimplemented as a walk rather than reusing
+ *  that function because a knockback resolves ONE candidate tile to
+ *  home-or-not, while Exhume keeps searching for the nearest free tile
+ *  (it must never itself send the token home or capture — it's a return,
+ *  not an attack). The walk can't leave the contested row in practice
+ *  (see EXHUME_RETURN_POSITION's doc), and if it ever underflowed, -1 is
+ *  the reserve — a harmless degenerate fallback, not a crash. Spends
+ *  ultimateReady (never a charge), grants nothing (no capture happened),
+ *  ends the turn with no extra-turn interaction, and leaves the shield
+ *  streak alone — all exactly matching its Blink Strike/Warpath siblings.
+ *  Strips any stale bulwarked/bulwarkSaves entry the token carried off the
+ *  board so it can't ride back as free un-recast protection (same leak
+ *  resolveTurn already guards against for captured tokens). Returns
+ *  `returnedTo` so the server can announce/animate the landing tile
+ *  without re-deriving the walk client-side. */
+export function applyExhume(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; returnedTo: number } {
+  const target = state.tokens.find((t) => t.id === targetTokenId)!;
+  let landing = EXHUME_RETURN_POSITION;
+  while (landing >= 0) {
+    const contested = BOARD_LAYOUT[landing].isContested;
+    const occupied = state.tokens.some(
+      (t) => t.id !== target.id && t.position === landing && (t.owner === target.owner || contested),
+    );
+    if (!occupied) break;
+    landing--;
+  }
+
+  const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
+  let bulwarked = power.bulwarked;
+  let bulwarkSaves = power.bulwarkSaves;
+  if (bulwarked[targetTokenId] !== undefined) {
+    bulwarked = { ...bulwarked };
+    bulwarkSaves = { ...bulwarkSaves };
+    delete bulwarked[targetTokenId];
+    delete bulwarkSaves[targetTokenId];
+  }
+  const nextPower: PowerState = {
+    ...power,
+    bulwarked,
+    bulwarkSaves,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), returnedTo: landing };
 }

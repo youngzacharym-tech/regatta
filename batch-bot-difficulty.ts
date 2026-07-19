@@ -35,10 +35,14 @@ import {
   applyBulwark,
   applyCharge,
   applyChargedShot,
+  applyExhume,
   applyPowerMove,
   applyPush,
+  applyRaiseDead,
   applyReflip,
   applyWarpath,
+  breakShieldStreak,
+  CHARGE_CAP,
   getLegalPowerMoves,
   grantZeroFlipCharge,
   initialPowerState,
@@ -73,7 +77,7 @@ const HARD_VS_STANDARD_MIN = 55;
  *  hard-vs-standard, from the other side. */
 const STANDARD_VS_EASY_MIN = 55;
 
-const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior"];
+const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior", "necromancer"];
 const PAIRINGS: [BotDifficulty, BotDifficulty, number][] = [
   // [stronger, weaker, min stronger win%]
   ["standard", "easy", STANDARD_VS_EASY_MIN],
@@ -106,7 +110,8 @@ function playClassic(p1Tier: BotDifficulty, p2Tier: BotDifficulty): PlayerId | n
 // ---------------------------------------------------------------------------
 // Master Killer: the exact takeTurn shape batch-random-master-killer-games.ts
 // drives (zero-flip charge on the flip commit, Bulwark ticks, the bounded
-// reflip-then-redecide loop), with a per-seat difficulty threaded through.
+// reflip/raise-then-redecide loop — a Raise keeps the SAME flip per
+// applyRaiseDead's contract), with a per-seat difficulty threaded through.
 // ---------------------------------------------------------------------------
 
 function takeTurnMK(
@@ -121,16 +126,30 @@ function takeTurnMK(
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
 
-  for (let i = 0; action?.kind === "reflip" && i <= REFLIPS_PER_TURN; i++) {
-    power = applyReflip(power, mover);
-    flip = flipCoins();
-    if (flip === 0) power = grantZeroFlipCharge(power, mover);
+  for (
+    let i = 0;
+    (action?.kind === "reflip" || action?.kind === "raiseDead") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
+    i++
+  ) {
+    if (action.kind === "reflip") {
+      power = applyReflip(power, mover);
+      flip = flipCoins();
+      if (flip === 0) power = grantZeroFlipCharge(power, mover);
+    } else {
+      const r = applyRaiseDead(state, power, action.tokenId, mover, action.dark ?? false);
+      state = r.state;
+      power = r.power;
+    }
     moves = getLegalPowerMoves(state, power, flip);
     power = tickBulwarkForReflip(state, power, flip).power;
     action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
   }
 
-  if (action === null || action.kind === "reflip") return { state: applyNoMove(state), power };
+  if (action === null || action.kind === "reflip" || action.kind === "raiseDead") {
+    // Skip breaks a live shield streak, matching room-engine's auto-skip
+    // (see batch-random-master-killer-games.ts's dead-end branch).
+    return { state: applyNoMove(state), power: breakShieldStreak(power, mover) };
+  }
   switch (action.kind) {
     case "move": {
       const r = applyPowerMove(state, power, action.move, mover, Math.random);
@@ -154,6 +173,10 @@ function takeTurnMK(
     }
     case "bulwark":
       return applyBulwark(state, power, action.tokenId, mover, action.reinforced ?? false);
+    case "exhume": {
+      const r = applyExhume(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
   }
 }
 

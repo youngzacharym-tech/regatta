@@ -120,6 +120,18 @@ function playOne(
               "reflip commit missing lastReflip",
             );
           }
+          if (action.kind === "raiseDead") {
+            // Same contract for the Necromancer's turn-keeping act: the
+            // raise commit must announce itself (the client's Raise! proc
+            // and the hand-to-board animation key on this field) and keep
+            // the flip alive for the recomputed move list.
+            const newest = doc.events[doc.events.length - 1];
+            assert(
+              newest?.kind === "state" && newest.lastRaise?.tokenId === action.tokenId,
+              "raise commit missing lastRaise",
+            );
+            assert(doc.currentFlip !== null, "raise commit dropped the flip");
+          }
         }
         return;
       }
@@ -180,6 +192,12 @@ runMatchup("archer vs warrior", "masterKiller", "archer", "warrior");
 runMatchup("mage mirror", "masterKiller", "mage", "mage");
 runMatchup("mage vs warrior", "masterKiller", "mage", "warrior");
 runMatchup("warrior mirror", "masterKiller", "warrior", "warrior");
+// Necromancer matchups drive the engine surface no other harness reaches:
+// applyMkRaise's act-then-redecide cycle (flip preserved, moves recomputed),
+// validateUsePower's raiseDead/exhume branches through the human path, and
+// the lastRaise/lastExhume/lastSoulHarvest announcements.
+runMatchup("necromancer mirror", "masterKiller", "necromancer", "necromancer");
+runMatchup("necro vs warrior", "masterKiller", "necromancer", "warrior");
 // Difficulty smoke: small runs at easy and hard so the transport invariants
 // (seq monotonic, JSON round-trip — difficulty is a plain string, Redis-safe;
 // termination under MAX_STEPS, which also bounds hard-tier think time) cover

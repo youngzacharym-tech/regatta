@@ -204,6 +204,24 @@ export type ServerMessage =
          *  table-state, same visibility as safeTokens (drives the client's
          *  tint, same idea as isWarded/hasTransientSafety). */
         bulwarkedTokenIds: number[];
+        /** Valid Raise Dead targets (the caster's own reserve token ids)
+         *  for the CURRENT player, if they're a Necromancer with a charge
+         *  and it's their turn — empty otherwise. Computed for the plain
+         *  cast's destination gate; Dark Resurrection reads its own list
+         *  below. Both are still re-validated server-side. */
+        raiseTargets?: number[];
+        /** Dark Resurrection's own target list — the same reserve-token
+         *  pool as raiseTargets but gated on ITS destination tile, which
+         *  can be free when the plain cast's is blocked (and vice versa).
+         *  Same population rule as raiseTargets (Necromancer with a
+         *  charge, their turn); affordability (the full bank) stays the
+         *  client gem's own gate, like Reinforced Bulwark's. ADDITIVE:
+         *  older servers omit it. */
+        darkRaiseTargets?: number[];
+        /** Valid Exhume targets (the opponent's ESCAPED token ids) for the
+         *  CURRENT player, if they're a Necromancer with ultimateReady and
+         *  it's their turn — empty otherwise. */
+        exhumeTargets?: number[];
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
        *  (no token of the pusher's own moves), so it gets its own "how did
@@ -254,6 +272,26 @@ export type ServerMessage =
        *  refunded) even though a re-flip DID happen and the client owes an
        *  announcement. Server-computed, never re-derived client-side. */
       lastReflip?: { player: PlayerId } | null;
+      /** Master Killer mode only: Necromancer's Raise Dead just resolved
+       *  on this broadcast. Same turn-continues lifecycle as lastReflip —
+       *  the flip is unchanged and the move list was recomputed against
+       *  the board the raised token now stands on. `dark` is additive:
+       *  true when the cast was the full-bank Dark Resurrection. */
+      lastRaise?: { tokenId: number; dark?: boolean } | null;
+      /** Master Killer mode only: Necromancer's Exhume ultimate. Non-null
+       *  exactly on the broadcast where it resolved. `returnedTo` is the
+       *  tile the occupancy walk actually landed the dragged token on —
+       *  server-computed, never re-derived client-side, same reasoning as
+       *  lastUltimate. */
+      lastExhume?: { targetTokenId: number; returnedTo: number } | null;
+      /** Master Killer mode only: Soul Harvest paid the VICTIM on this
+       *  broadcast — the necromancer's charge gain from their own tokens
+       *  being sent home. Deliberately separate from lastChargeEvent,
+       *  which carries only ONE player's delta: a capture against a
+       *  necromancer changes BOTH banks in a single broadcast (the actor's
+       *  side stays in lastChargeEvent, unchanged). Computed server-side
+       *  as a before/after diff, never re-derived client-side. */
+      lastSoulHarvest?: { player: PlayerId; delta: number } | null;
     }
   | {
       type: "gameOver";
@@ -319,7 +357,16 @@ export type ClientMessage =
         /** `reinforced` is additive: true spends the full charge bank on
          *  the doubled (Reinforced) Bulwark; absent/false is the plain
          *  1-charge cast, unchanged. */
-        | { kind: "bulwark"; tokenId: number; reinforced?: boolean };
+        | { kind: "bulwark"; tokenId: number; reinforced?: boolean }
+        /** `tokenId` is one of the caster's OWN reserve tokens (from
+         *  power.raiseTargets — or power.darkRaiseTargets for the dark
+         *  cast — same target-id trust model as push). `dark` is additive,
+         *  Reinforced Bulwark's shape: true spends the full charge bank on
+         *  Dark Resurrection (the deeper placement); anything but `true`
+         *  is the plain 1-charge Raise (the server coerces, never echoes
+         *  a raw value). */
+        | { kind: "raiseDead"; tokenId: number; dark?: boolean }
+        | { kind: "exhume"; targetTokenId: number };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

@@ -342,6 +342,9 @@ var ULTIMATE_STREAK = 3;
 var BULWARK_TURNS = 2;
 var BULWARK_REINFORCED_TURNS = 4;
 var BULWARK_REINFORCED_SAVES = 2;
+var RAISE_POSITION = 0;
+var DARK_RESURRECTION_POSITION = 3;
+var EXHUME_RETURN_POSITION = 11;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
@@ -416,6 +419,12 @@ function addCharge(power, player) {
 }
 function grantZeroFlipCharge(power, mover) {
   return addCharge(power, mover);
+}
+function grantSoulHarvest(power, victim, count) {
+  if (count <= 0 || power.classes[victim] !== "necromancer") return power;
+  let next = power;
+  for (let i = 0; i < count; i++) next = addCharge(next, victim);
+  return next;
 }
 function getLegalPowerMoves(state, power, flip) {
   if (state.winner !== null) return [];
@@ -567,6 +576,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
   if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
+  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), finalCaptures.length);
   const extraTurn = landsOnShield;
   const nextState = {
     tokens,
@@ -646,7 +656,10 @@ function applyPush(state, power, targetTokenId, mover) {
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
     safeTokens
   };
-  if (sendsHome) spentPower = addCharge(spentPower, mover);
+  if (sendsHome) {
+    spentPower = addCharge(spentPower, mover);
+    spentPower = grantSoulHarvest(spentPower, otherPlayerId(mover), 1);
+  }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
     tokens,
@@ -677,7 +690,10 @@ function applyChargedShot(state, power, targetTokenId, mover) {
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
     safeTokens
   };
-  if (sendsHome) spentPower = addCharge(spentPower, mover);
+  if (sendsHome) {
+    spentPower = addCharge(spentPower, mover);
+    spentPower = grantSoulHarvest(spentPower, otherPlayerId(mover), 1);
+  }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
     tokens,
@@ -729,6 +745,7 @@ function applyBlinkStrike(state, power, targetTokenId, mover) {
     ultimateReady: { ...power.ultimateReady, [mover]: false }
   };
   nextPower = addCharge(nextPower, mover);
+  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), 1);
   const nextState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -779,6 +796,7 @@ function applyWarpath(state, power, targetTokenId, mover) {
     ultimateReady: { ...power.ultimateReady, [mover]: false }
   };
   nextPower = addCharge(nextPower, mover);
+  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), allCaptures.length);
   const nextState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -899,9 +917,69 @@ function tickBulwarkForReflip(state, power, flip) {
   const blocked = getBulwarkBlockedIds(state, power, flip);
   return { power: blocked.length > 0 ? consumeBulwarkBlocks(power, blocked) : power, blockedIds: blocked };
 }
+function getRaiseTargets(state, power, mover, dark = false) {
+  const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
+  if (state.tokens.some((t) => t.owner === mover && t.position === dest)) return [];
+  return state.tokens.filter((t) => t.owner === mover && t.position === -1).map((t) => t.id);
+}
+function applyRaiseDead(state, power, tokenId, mover, dark = false) {
+  const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
+  const cost = dark ? CHARGE_CAP : 1;
+  const tokens = state.tokens.map((t) => t.id === tokenId ? { ...t, position: dest } : t);
+  const spent = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - cost }
+  };
+  return { state: { ...state, tokens }, power: spent };
+}
+function getExhumeTargets(state, power, mover) {
+  void power;
+  const foe = otherPlayerId(mover);
+  return state.tokens.filter((t) => t.owner === foe && t.position >= PATH_LENGTH_PER_PLAYER).map((t) => t.id);
+}
+function applyExhume(state, power, targetTokenId, mover) {
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  let landing = EXHUME_RETURN_POSITION;
+  while (landing >= 0) {
+    const contested = BOARD_LAYOUT[landing].isContested;
+    const occupied = state.tokens.some(
+      (t) => t.id !== target.id && t.position === landing && (t.owner === target.owner || contested)
+    );
+    if (!occupied) break;
+    landing--;
+  }
+  const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  let bulwarked = power.bulwarked;
+  let bulwarkSaves = power.bulwarkSaves;
+  if (bulwarked[targetTokenId] !== void 0) {
+    bulwarked = { ...bulwarked };
+    bulwarkSaves = { ...bulwarkSaves };
+    delete bulwarked[targetTokenId];
+    delete bulwarkSaves[targetTokenId];
+  }
+  const nextPower = {
+    ...power,
+    bulwarked,
+    bulwarkSaves,
+    ultimateReady: { ...power.ultimateReady, [mover]: false }
+  };
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), returnedTo: landing };
+}
 
 // master-killer-bot.ts
-function scoreMove(state, m, extraCaptures, rand) {
+var MK_STD_NECRO_SHIELD_EXTRA = 250;
+var MK_STD_NECRO_RACE_SCALE = 10;
+var MK_STD_NECRO_CAPTURE_SCALE = 1.6;
+var MK_STD_NECRO_CAP_UNBLOCK_RAISE = 800;
+var MK_STD_NECRO_UNBLOCK_MOVE = 200;
+function scoreMove(state, m, extraCaptures, rand, shieldExtra = 0, raceScale = 1, captureScale = 1) {
   let score = 0;
   const allCaptures = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
   if (m.causesWin) score += 1e3;
@@ -909,9 +987,9 @@ function scoreMove(state, m, extraCaptures, rand) {
     const victimProgress = Math.max(
       ...allCaptures.map((id) => state.tokens.find((t) => t.id === id)?.position ?? 0)
     );
-    score += 400 + victimProgress * 10 + (allCaptures.length - 1) * 150;
+    score += (400 + victimProgress * 10 + (allCaptures.length - 1) * 150) * captureScale;
   }
-  if (m.landsOnShield) score += 250;
+  if (m.landsOnShield) score += 250 + shieldExtra;
   if (m.to === PATH_LENGTH_PER_PLAYER) score += 300;
   if (m.from === -1) score += 60;
   const fromContested = m.from >= 0 && BOARD_LAYOUT[m.from]?.isContested;
@@ -923,7 +1001,7 @@ function scoreMove(state, m, extraCaptures, rand) {
     );
     if (threatened) score -= 80;
   }
-  score += m.to;
+  score += m.to * raceScale;
   score += rand() * 20;
   return score;
 }
@@ -989,9 +1067,32 @@ function scoreReflip(currentMoveCount, flip, rand) {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
   return -1;
 }
+function scoreRaiseDead(state, dark, rand) {
+  const mover = state.currentPlayer;
+  let onBoard = 0;
+  let foeOnBoard = 0;
+  let reserve = 0;
+  for (const t of state.tokens) {
+    if (t.owner === mover && t.position === -1) reserve++;
+    if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
+    if (t.owner === mover) onBoard++;
+    else foeOnBoard++;
+  }
+  let score;
+  if (dark) {
+    score = 900 + 20 * Math.max(0, foeOnBoard - onBoard) + 12 * (reserve - 1);
+  } else {
+    score = 60 + 90 * (1 - onBoard) + 20 * Math.max(0, foeOnBoard - onBoard) + 12 * (reserve - 1);
+  }
+  score += rand() * 20;
+  return score;
+}
+function scoreExhume(rand) {
+  return 600 + rand() * 20;
+}
 function pickBotPowerAction(state, power, moves, flip, rand = Math.random, difficulty = "standard") {
   if (difficulty === "easy") return pickEasyPowerAction(state, power, moves, flip, rand);
-  if (difficulty === "hard") return pickHardPowerAction(state, power, moves, rand);
+  if (difficulty === "hard") return pickHardPowerAction(state, power, moves, flip, rand);
   return pickStandardPowerAction(state, power, moves, flip, rand);
 }
 function pickStandardPowerAction(state, power, moves, flip, rand) {
@@ -1000,8 +1101,17 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
   const charges = power.charges[mover];
   let best = null;
   let bestScore = -Infinity;
+  const necro = cls === "necromancer";
+  const shieldExtra = necro ? MK_STD_NECRO_SHIELD_EXTRA : 0;
+  const raceScale = necro ? MK_STD_NECRO_RACE_SCALE : 1;
+  const captureScale = necro ? MK_STD_NECRO_CAPTURE_SCALE : 1;
+  const darkRaiseTargets = necro && charges === CHARGE_CAP ? getRaiseTargets(state, power, mover, true) : [];
+  const capBlocked = necro && charges === CHARGE_CAP && darkRaiseTargets.length === 0 && state.tokens.some((t) => t.owner === mover && t.position === -1);
   for (const m of moves) {
-    const score = scoreMove(state, m, [], rand);
+    let score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale);
+    if (capBlocked && MK_STD_NECRO_UNBLOCK_MOVE > 0 && m.from === DARK_RESURRECTION_POSITION) {
+      score += MK_STD_NECRO_UNBLOCK_MOVE;
+    }
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "move", move: m };
@@ -1076,6 +1186,33 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       }
     }
   }
+  if (cls === "necromancer" && charges >= 1) {
+    const raiseTargets = getRaiseTargets(state, power, mover);
+    if (raiseTargets.length > 0) {
+      const score = capBlocked && MK_STD_NECRO_CAP_UNBLOCK_RAISE > 0 && !moves.some((m) => m.from === DARK_RESURRECTION_POSITION) ? MK_STD_NECRO_CAP_UNBLOCK_RAISE + rand() * 20 : scoreRaiseDead(state, false, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "raiseDead", tokenId: raiseTargets[0] };
+      }
+    }
+    if (darkRaiseTargets.length > 0) {
+      const score = scoreRaiseDead(state, true, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "raiseDead", tokenId: darkRaiseTargets[0], dark: true };
+      }
+    }
+  }
+  if (cls === "necromancer" && power.ultimateReady[mover]) {
+    const exhumeTargets = getExhumeTargets(state, power, mover);
+    if (exhumeTargets.length > 0) {
+      const score = scoreExhume(rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "exhume", targetTokenId: exhumeTargets[0] };
+      }
+    }
+  }
   return best;
 }
 function enumerateCandidates(state, power, moves) {
@@ -1113,6 +1250,18 @@ function enumerateCandidates(state, power, moves) {
       for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id, reinforced: true });
     }
   }
+  if (cls === "necromancer" && charges >= 1) {
+    const raiseTargets = getRaiseTargets(state, power, mover);
+    if (raiseTargets.length > 0) out.push({ kind: "raiseDead", tokenId: raiseTargets[0] });
+    if (charges === CHARGE_CAP) {
+      const darkTargets = getRaiseTargets(state, power, mover, true);
+      if (darkTargets.length > 0) out.push({ kind: "raiseDead", tokenId: darkTargets[0], dark: true });
+    }
+  }
+  if (cls === "necromancer" && power.ultimateReady[mover]) {
+    const exhumeTargets = getExhumeTargets(state, power, mover);
+    if (exhumeTargets.length > 0) out.push({ kind: "exhume", targetTokenId: exhumeTargets[0] });
+  }
   return out;
 }
 function pickEasyPowerAction(state, power, moves, flip, rand) {
@@ -1130,6 +1279,13 @@ var MK_EVAL_THREAT_BASE = 40;
 var MK_EVAL_THREAT_PER_TILE = 6;
 var MK_EVAL_CHARGE = 24;
 var MK_EVAL_ULTIMATE = 70;
+var MK_EVAL_NECRO_CHARGE = 4;
+var MK_EVAL_NECRO_RESERVE = 4;
+var MK_EVAL_EXHUME_HELD = 20;
+var MK_EVAL_PLAIN_RAISE_HOLDBACK = 40;
+var MK_EVAL_DARK_RAISE_BIAS = 30;
+var MK_EVAL_NECRO_THREAT_SCALE = 0.15;
+var MK_EVAL_NECRO_PER_TILE = 12;
 var MK_EVAL_STREAK = 12;
 var MK_EVAL_BULWARK = 12;
 var MK_WIN_VALUE = 1e6;
@@ -1142,23 +1298,30 @@ function mkEvalSide(state, power, player) {
       score += MK_EVAL_ESCAPED;
       continue;
     }
-    if (t.position < 0) continue;
-    score += MK_EVAL_PER_TILE * t.position;
+    if (t.position < 0) {
+      if (power.classes[player] === "necromancer") score += MK_EVAL_NECRO_RESERVE;
+      continue;
+    }
+    score += (power.classes[player] === "necromancer" ? MK_EVAL_NECRO_PER_TILE : MK_EVAL_PER_TILE) * t.position;
     const tile = BOARD_LAYOUT[t.position];
     if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
     if (tile.isContested && tile.type !== "shield" && !isWarded(state, power, t) && !isBulwarked(power, t) && !power.safeTokens.has(t.id)) {
+      const threatScale = power.classes[player] === "necromancer" ? MK_EVAL_NECRO_THREAT_SCALE : 1;
       for (const e of state.tokens) {
         if (e.owner === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER) continue;
         const gap = t.position - e.position;
         if (gap >= 1 && gap <= 4) {
-          score -= (MK_EVAL_THREAT_BASE + MK_EVAL_THREAT_PER_TILE * t.position) * FLIP_WEIGHTS[gap] / FLIP_WEIGHT_TOTAL;
+          score -= threatScale * (MK_EVAL_THREAT_BASE + MK_EVAL_THREAT_PER_TILE * t.position) * FLIP_WEIGHTS[gap] / FLIP_WEIGHT_TOTAL;
         }
       }
     }
     if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
   }
-  score += MK_EVAL_CHARGE * power.charges[player];
-  if (power.ultimateReady[player]) score += MK_EVAL_ULTIMATE;
+  score += (power.classes[player] === "necromancer" ? MK_EVAL_NECRO_CHARGE : MK_EVAL_CHARGE) * power.charges[player];
+  if (power.ultimateReady[player]) {
+    const necroWithExhumeTarget = power.classes[player] === "necromancer" && state.tokens.some((t) => t.owner !== player && t.position >= PATH_LENGTH_PER_PLAYER);
+    score += necroWithExhumeTarget ? MK_EVAL_EXHUME_HELD : MK_EVAL_ULTIMATE;
+  }
   score += MK_EVAL_STREAK * power.shieldStreak[player];
   return score;
 }
@@ -1246,9 +1409,28 @@ function mkSimulate(state, power, c, mover) {
       return applyWarpath(state, power, c.targetTokenId, mover);
     case "bulwark":
       return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
+    case "raiseDead":
+      return applyRaiseDead(state, power, c.tokenId, mover, c.dark ?? false);
+    case "exhume":
+      return applyExhume(state, power, c.targetTokenId, mover);
   }
 }
-function pickHardPowerAction(state, power, moves, rand) {
+function mkRaiseValue(state, power, c, flip, me) {
+  const r = applyRaiseDead(state, power, c.tokenId, me, c.dark ?? false);
+  if (flip === 0) return evaluateMK(r.state, r.power, me);
+  const moves = getLegalPowerMoves(r.state, r.power, flip);
+  if (moves.length === 0) return evaluateMK(r.state, r.power, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin ? MK_WIN_VALUE : (() => {
+      const q = applyPowerMove(r.state, r.power, m, me, SIM_RAND);
+      return mkValueAfterAction(q.state, q.power, me);
+    })();
+    if (v > best) best = v;
+  }
+  return best;
+}
+function pickHardPowerAction(state, power, moves, flip, rand) {
   const mover = state.currentPlayer;
   const candidates = enumerateCandidates(state, power, moves);
   if (candidates.length === 0) return null;
@@ -1260,6 +1442,10 @@ function pickHardPowerAction(state, power, moves, rand) {
       value = MK_WIN_VALUE;
     } else if (c.kind === "reflip") {
       value = mkReflipValue(state, power, mover);
+    } else if (c.kind === "raiseDead") {
+      value = mkRaiseValue(state, power, c, flip, mover);
+      if (!c.dark) value -= MK_EVAL_PLAIN_RAISE_HOLDBACK;
+      else value += MK_EVAL_DARK_RAISE_BIAS;
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);
@@ -1285,7 +1471,7 @@ var CHAT_MAX = 40;
 var CHAT_TEXT_MAX = 200;
 var OPPONENT_AWAY_MS = 2e4;
 var OPPONENT_LEFT_MS = 12e4;
-var MK_CLASSES = ["archer", "mage", "warrior"];
+var MK_CLASSES = ["archer", "mage", "warrior", "necromancer"];
 function toWirePower(p) {
   return { ...p, safeTokens: [...p.safeTokens] };
 }
@@ -1324,6 +1510,12 @@ function publicPower(doc) {
     warpathTargets: doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover] ? getWarpathTargets(doc.state, p, mover) : [],
     bulwarkTargets: doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1 ? getBulwarkTargets(doc.state, p, mover) : [],
     bulwarkedTokenIds: Object.keys(doc.mk.bulwarked).map(Number),
+    raiseTargets: doc.mk.classes[mover] === "necromancer" && doc.mk.charges[mover] >= 1 ? getRaiseTargets(doc.state, p, mover) : [],
+    // Same >= 1 gate as raiseTargets (not the full-bank one) so the two
+    // lists appear together and the client can tell "reserve is empty"
+    // from "destination blocked"; affordability stays the gem's own gate.
+    darkRaiseTargets: doc.mk.classes[mover] === "necromancer" && doc.mk.charges[mover] >= 1 ? getRaiseTargets(doc.state, p, mover, true) : [],
+    exhumeTargets: doc.mk.classes[mover] === "necromancer" && doc.mk.ultimateReady[mover] ? getExhumeTargets(doc.state, p, mover) : [],
     reflipsUsedThisTurn: p.reflipsUsedThisTurn
   };
 }
@@ -1368,6 +1560,9 @@ function stateEventOf(doc) {
     lastUltimate: doc.lastUltimate,
     lastChargeSweep: doc.lastChargeSweep ?? null,
     lastReflip: doc.lastReflip ?? null,
+    lastRaise: doc.lastRaise ?? null,
+    lastExhume: doc.lastExhume ?? null,
+    lastSoulHarvest: doc.lastSoulHarvest ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason
@@ -1401,6 +1596,9 @@ function freshMatchFields(variant) {
     lastBulwark: null,
     lastBulwarkBlock: null,
     lastReflip: null,
+    lastRaise: null,
+    lastExhume: null,
+    lastSoulHarvest: null,
     rescueAttempted: false
   };
 }
@@ -1496,7 +1694,9 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
-      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced ?? false) };
+      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced === true) };
+      if (a.kind === "raiseDead") return { doc: applyMkRaise(doc, seat, a.tokenId, a.dark === true, now) };
+      if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
       const move = doc.currentPowerMoves[a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
     }
@@ -1542,12 +1742,28 @@ function validateUsePower(doc, seat, a) {
       return null;
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
-      if (a.reinforced) {
+      if (a.reinforced === true) {
         if (doc.mk.charges[seat] !== CHARGE_CAP) return "Reinforced Bulwark needs a full charge bank";
       } else if (doc.mk.charges[seat] < 1) {
         return "No charge available";
       }
       if (!getBulwarkTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Bulwark target";
+      return null;
+    case "raiseDead":
+      if (cls !== "necromancer") return "Only a Necromancer can Raise Dead";
+      if (a.dark === true) {
+        if (doc.mk.charges[seat] !== CHARGE_CAP) return "Dark Resurrection needs a full charge bank";
+      } else if (doc.mk.charges[seat] < 1) {
+        return "No charge available";
+      }
+      if (doc.currentFlip === null) return "No flip yet";
+      if (!getRaiseTargets(doc.state, p(), seat, a.dark === true).includes(a.tokenId))
+        return "Invalid Raise Dead target";
+      return null;
+    case "exhume":
+      if (cls !== "necromancer") return "Only a Necromancer can Exhume";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (!getExhumeTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Exhume target";
       return null;
     case "charge":
       if (cls !== "warrior") return "Only a Warrior can Charge";
@@ -1569,14 +1785,20 @@ var CLEAR_SLOTS = {
   lastUltimate: null,
   lastChargeSweep: null,
   lastReflip: null,
+  lastRaise: null,
+  lastExhume: null,
+  lastSoulHarvest: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null
 };
 function applyMkMove(doc, seat, move, now, rand) {
   const chargesBefore = doc.mk.charges[seat];
+  const foe = otherSeat(seat);
+  const foeChargesBefore = doc.mk.charges[foe];
   const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
+  const foeDelta = r.power.charges[foe] - foeChargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
   const caps = move.captures.length + move.bonusCaptures.length + rainHit;
   let next = {
@@ -1590,14 +1812,18 @@ function applyMkMove(doc, seat, move, now, rand) {
     lastMove: move,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastSoulHarvest: foeDelta !== 0 ? { player: foe, delta: foeDelta } : null,
     lastRainOfArrows: r.rainOfArrows
   };
   return commitFrame(next, now, stateEventOf(next));
 }
 function applyMkCharge(doc, seat, move, now, rand) {
   const chargesBefore = doc.mk.charges[seat];
+  const foe = otherSeat(seat);
+  const foeChargesBefore = doc.mk.charges[foe];
   const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
+  const foeDelta = r.power.charges[foe] - foeChargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
   const caps = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
   let next = {
@@ -1611,6 +1837,7 @@ function applyMkCharge(doc, seat, move, now, rand) {
     lastMove: move,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastSoulHarvest: foeDelta !== 0 ? { player: foe, delta: foeDelta } : null,
     lastRainOfArrows: r.rainOfArrows,
     lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures }
   };
@@ -1618,6 +1845,8 @@ function applyMkCharge(doc, seat, move, now, rand) {
 }
 function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
   const chargesBefore = doc.mk.charges[seat];
+  const foe = otherSeat(seat);
+  const foeChargesBefore = doc.mk.charges[foe];
   const power = fromWirePower(doc.mk);
   let r;
   let slots = {};
@@ -1649,8 +1878,15 @@ function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
       r = applyBulwark(doc.state, power, tokenId, seat, reinforced);
       slots = { lastBulwark: { tokenId, reinforced } };
       break;
+    case "exhume": {
+      const rr = applyExhume(doc.state, power, tokenId, seat);
+      r = rr;
+      slots = { lastExhume: { targetTokenId: tokenId, returnedTo: rr.returnedTo } };
+      break;
+    }
   }
   const delta = r.power.charges[seat] - chargesBefore;
+  const foeDelta = r.power.charges[foe] - foeChargesBefore;
   let next = {
     ...doc,
     ...CLEAR_SLOTS,
@@ -1661,7 +1897,8 @@ function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
     currentPowerMoves: null,
     captures: capsGained ? { ...doc.captures, [seat]: doc.captures[seat] + capsGained } : doc.captures,
     lastMovePlayer: seat,
-    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastSoulHarvest: foeDelta !== 0 ? { player: foe, delta: foeDelta } : null
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1670,6 +1907,7 @@ function applyMkReflip(doc, seat, now, rand) {
   let power = applyReflip(fromWirePower(doc.mk), seat);
   const flip = flipCoins(rand);
   if (flip === 0) power = grantZeroFlipCharge(power, seat);
+  const currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
   const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
   power = bulwarkResult.power;
   const delta = power.charges[seat] - chargesBefore;
@@ -1678,7 +1916,7 @@ function applyMkReflip(doc, seat, now, rand) {
     ...CLEAR_SLOTS,
     mk: toWirePower(power),
     currentFlip: flip,
-    currentPowerMoves: getLegalPowerMoves(doc.state, power, flip),
+    currentPowerMoves,
     lastMovePlayer: doc.lastMovePlayer,
     lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
@@ -1686,6 +1924,33 @@ function applyMkReflip(doc, seat, now, rand) {
     // A re-rolled zero still ends in the auto-skip path, which announces the
     // NET delta computed here — don't re-derive from zeroFlipChargeBefore.
     zeroFlipChargeBefore: null
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+function applyMkRaise(doc, seat, tokenId, dark, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const flip = doc.currentFlip;
+  const raised = applyRaiseDead(doc.state, fromWirePower(doc.mk), tokenId, seat, dark);
+  const currentPowerMoves = getLegalPowerMoves(raised.state, raised.power, flip);
+  const bulwarkResult = tickBulwarkForReflip(raised.state, raised.power, flip);
+  const power = bulwarkResult.power;
+  const delta = power.charges[seat] - chargesBefore;
+  let next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: raised.state,
+    mk: toWirePower(power),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastRaise: { tokenId, dark },
+    // A raise during a zero flip spends AFTER the flip commit banked the
+    // grant's baseline: shift the baseline down by the same spend so the
+    // auto-skip commit still announces exactly the grant (see the flip-zero
+    // branch in tickOnce), not grant-minus-spend.
+    zeroFlipChargeBefore: doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - (dark ? CHARGE_CAP : 1) : null
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1711,8 +1976,14 @@ function autoSkipDelay(doc) {
   const mover = doc.state.currentPlayer;
   const isBot = doc.vsCpu && mover === "p2";
   if (isBot) return AUTO_SKIP_DELAY_MS;
-  if (doc.variant === "masterKiller" && doc.mk && doc.mk.classes[mover] === "mage" && canReflipAgain(fromWirePower(doc.mk), mover)) {
-    return AUTO_SKIP_WITH_RESCUE_MS;
+  if (doc.variant === "masterKiller" && doc.mk) {
+    const p = fromWirePower(doc.mk);
+    if (doc.mk.classes[mover] === "mage" && canReflipAgain(p, mover)) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    if (doc.mk.classes[mover] === "necromancer" && doc.currentFlip !== null && doc.currentFlip !== 0 && (doc.mk.charges[mover] >= 1 && getRaiseTargets(doc.state, p, mover).length > 0 || doc.mk.charges[mover] === CHARGE_CAP && getRaiseTargets(doc.state, p, mover, true).length > 0)) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
   }
   return AUTO_SKIP_DELAY_MS;
 }
@@ -1843,6 +2114,10 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
       return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
+    case "raiseDead":
+      return applyMkRaise(doc, seat, action.tokenId, action.dark ?? false, now);
+    case "exhume":
+      return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
   }
 }
 function commitTurnFlip(doc, now, rand) {
