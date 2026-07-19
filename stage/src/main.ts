@@ -1911,11 +1911,10 @@ const DOCK_RING_TINTS: Record<PlayerClass, number> = {
   archer: 0x3ddc65,
   mage: 0xb45cff,
   warrior: 0x3f83ff,
-  // Spectral ash-violet — deliberately desaturated and ghostly so it can't
-  // be mistaken for the mage's saturated purple. Must stay in lockstep with
-  // index.html's data-class="necromancer" blocks; the final tint is a Kasen
-  // taste call.
-  necromancer: 0x9d8fd6,
+  // Blood red — necro theme is red, Kasen's 2026-07-19 canon call (portrait
+  // and skull token lead; the ash-violet placeholder retired with it). Must
+  // stay in lockstep with index.html's data-class="necromancer" blocks.
+  necromancer: 0xd94a45,
 };
 /** What the ribbon asks the player to do, per armed ability. */
 const RIBBON_COPY: Record<ArmedKind, string> = {
