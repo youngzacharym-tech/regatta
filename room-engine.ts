@@ -49,6 +49,7 @@ import {
   applyBulwark,
   applyCharge as mkApplyCharge,
   applyChargedShot as mkApplyChargedShot,
+  applyCorpseExplosion,
   applyExhume,
   applyPowerMove,
   applyPush as mkApplyPush,
@@ -61,6 +62,7 @@ import {
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
+  getCorpseExplosionTargets,
   getExhumeTargets,
   getLegalPowerMoves,
   getPushTargets,
@@ -203,6 +205,9 @@ export interface PublicPower {
    *  castable right now) — the client's gem gate and spawn preview, the
    *  server's own validation, and the bot all read the same oracle. */
   reviveSpawnTile: number | null;
+  /** Corpse Explosion's victim list for the CURRENT player (empty = not
+   *  castable) — the dock gate and the blast preview highlight. */
+  corpseExplosionTargets: number[];
   exhumeTargets: number[];
   /** How many Re-flips the CURRENT player has already fired this turn —
    *  drives the client's Re-flip button gate (charges alone can't: a Mage
@@ -275,6 +280,10 @@ export type RoomEvent =
        *  server-side in applyMkMove (corpse token moved from reserve by
        *  its owner), same authority rule as every announcement here. */
       lastCorpseDenied?: { tokenId: number } | null;
+      /** Necromancer's Corpse Explosion resolved on this commit: the
+       *  epicenter tile and who the blast struck / sent home —
+       *  server-computed, drives the blast announcement + activity log. */
+      lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
       /** Necromancer's Exhume ultimate just resolved on this commit — same
        *  lifecycle as lastUltimate. `returnedTo` is the tile the occupancy
        *  walk actually landed the dragged token on (server-computed, never
@@ -359,6 +368,9 @@ export interface RoomDoc {
   /** See RoomEvent's doc: set on the commit where the corpse's owner
    *  re-entered the marked token, denying the Revive. */
   lastCorpseDenied?: { tokenId: number } | null;
+  /** See RoomEvent's doc: set on the commit where a Corpse Explosion
+   *  resolved. */
+  lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
   /** See RoomEvent's doc: set only on the commit where an Exhume resolved. */
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
 }
@@ -388,6 +400,9 @@ export type RoomActionInput =
          *  determines what rises and where (getReviveSpawnTile is the
          *  shared legality oracle). */
         | { kind: "revive" }
+        /** Corpse Explosion: no payload — the marked corpse is the
+         *  epicenter; getCorpseExplosionTargets is the shared oracle. */
+        | { kind: "corpseExplosion" }
         | { kind: "exhume"; targetTokenId: number };
     }
   | { op: "newMatch" }
@@ -503,6 +518,8 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
     thrall: { p1: doc.mk.thrall?.p1 ?? null, p2: doc.mk.thrall?.p2 ?? null },
     reviveSpawnTile:
       doc.mk.classes[mover] === "necromancer" ? getReviveSpawnTile(doc.state, p, mover) : null,
+    corpseExplosionTargets:
+      doc.mk.classes[mover] === "necromancer" ? getCorpseExplosionTargets(doc.state, p, mover) : [],
     exhumeTargets:
       doc.mk.classes[mover] === "necromancer" && doc.mk.ultimateReady[mover]
         ? getExhumeTargets(doc.state, p, mover)
@@ -564,6 +581,7 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastRevive: doc.lastRevive ?? null,
     lastThrallExpired: doc.lastThrallExpired ?? null,
     lastCorpseDenied: doc.lastCorpseDenied ?? null,
+    lastCorpseExplosion: doc.lastCorpseExplosion ?? null,
     lastExhume: doc.lastExhume ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
@@ -589,7 +607,7 @@ export function freshMatchFields(
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
-  | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastExhume" | "rescueAttempted"
+  | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume" | "rescueAttempted"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -618,6 +636,7 @@ export function freshMatchFields(
     lastRevive: null,
     lastThrallExpired: null,
     lastCorpseDenied: null,
+    lastCorpseExplosion: null,
     lastExhume: null,
     rescueAttempted: false,
   };
@@ -753,6 +772,7 @@ export function applyAction(
       // validateUsePower gated on (which coerces identically).
       if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced === true) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
+      if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
@@ -830,6 +850,11 @@ function validateUsePower(
       // up, full soul bank — is getReviveSpawnTile's single shared oracle.
       if (getReviveSpawnTile(doc.state, p(), seat) === null) return "Revive not castable";
       return null;
+    case "corpseExplosion":
+      if (cls !== "necromancer") return "Only a Necromancer can detonate a corpse";
+      if (getCorpseExplosionTargets(doc.state, p(), seat).length === 0)
+        return "Corpse Explosion not castable";
+      return null;
     case "exhume":
       if (cls !== "necromancer") return "Only a Necromancer can Exhume";
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
@@ -862,6 +887,7 @@ const CLEAR_SLOTS = {
   lastRevive: null,
   lastThrallExpired: null,
   lastCorpseDenied: null,
+  lastCorpseExplosion: null,
   lastExhume: null,
   wasSkipped: false,
   skippedPlayer: null,
@@ -1064,6 +1090,27 @@ function applyMkRevive(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Corpse Explosion ends the turn (Push's shape): its own commit fn only
+ *  because the blast's announce payload is richer than applyMkSimple's
+ *  one-token slots. */
+function applyMkCorpseExplosion(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyCorpseExplosion(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastCorpseExplosion: { tile: r.tile, struckTokenIds: r.struckTokenIds, sentHomeIds: r.sentHomeIds },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 // ============================================================================
 // PHASE RESOLUTION (delay-0 transitions, chained from actions and ticks)
 // ============================================================================
@@ -1113,7 +1160,8 @@ function autoSkipDelay(doc: RoomDoc): number {
       doc.mk.classes[mover] === "necromancer" &&
       doc.currentFlip !== null &&
       doc.currentFlip !== 0 &&
-      getReviveSpawnTile(doc.state, p, mover) !== null
+      (getReviveSpawnTile(doc.state, p, mover) !== null ||
+        getCorpseExplosionTargets(doc.state, p, mover).length > 0)
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
@@ -1274,6 +1322,8 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
     case "revive":
       return applyMkRevive(doc, seat, now);
+    case "corpseExplosion":
+      return applyMkCorpseExplosion(doc, seat, now);
     case "exhume":
       return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
   }

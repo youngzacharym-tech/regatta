@@ -219,6 +219,9 @@ export type ServerMessage =
          *  denied, thrall already up, or soul bank short). THE client-side
          *  gem gate — server-validated against the same shared oracle. */
         reviveSpawnTile?: number | null;
+        /** Corpse Explosion's victim list for the CURRENT player (empty =
+         *  not castable) — the dock gate and blast preview. */
+        corpseExplosionTargets?: number[];
         /** Valid Exhume targets (the opponent's ESCAPED token ids) for the
          *  CURRENT player, if they're a Necromancer with ultimateReady and
          *  it's their turn — empty otherwise. */
@@ -288,6 +291,9 @@ export type ServerMessage =
        *  banked Revive is denied. Server-derived, same authority rule as
        *  every announcement here. */
       lastCorpseDenied?: { tokenId: number } | null;
+      /** Master Killer mode only: a Corpse Explosion resolved on this
+       *  broadcast — epicenter tile plus who was struck / sent home. */
+      lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
       /** Master Killer mode only: Necromancer's Exhume ultimate. Non-null
        *  exactly on the broadcast where it resolved. `returnedTo` is the
        *  tile the occupancy walk actually landed the dragged token on —
@@ -365,6 +371,9 @@ export type ClientMessage =
          *  power.reviveSpawnTile being non-null; the server re-validates
          *  against the same shared oracle. */
         | { kind: "revive" }
+        /** Corpse Explosion: no payload — the marked corpse is the
+         *  epicenter; the client gates on power.corpseExplosionTargets. */
+        | { kind: "corpseExplosion" }
         | { kind: "exhume"; targetTokenId: number };
     }
   | {

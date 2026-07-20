@@ -37,6 +37,7 @@ export type ProcIconId =
   | "bulwarkReinforced"
   | "bulwarkBlock"
   | "revive"
+  | "corpseExplosion"
   | "thrallExpired"
   | "corpseDenied"
   | "exhume"
@@ -242,6 +243,24 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M24 2 L26 6.8 L31 9 L26 11.2 L24 16 L22 11.2 L17 9 L22 6.8 Z" fill="${GOLD}"/>` +
       `<circle cx="34" cy="15" r="1.3" fill="${GOLD}"/>` +
       `<circle cx="13.5" cy="15" r="1.1" fill="${GOLD}"/>`,
+  ),
+
+  // Corpse Explosion: the grave blown open — the stone split in two, debris
+  // and soul-motes thrown wide. Distinct from revive's clean eruption star:
+  // this one is violence, not a rising.
+  corpseExplosion: wrap(
+    GROUND +
+      // The stone, split and leaning apart.
+      `<path d="M14 44 L14 24 C14 18 18 14 22 14 L22 44 Z" ${MAIN} ${BODY}/>` +
+      `<path d="M27 44 L27 14 C31 14 35 18 35 24 L35 44 Z" ${MAIN} ${BODY}/>` +
+      // Debris thrown from the breach.
+      `<path d="M24.5 10 L22 4" ${DETAIL}/>` +
+      `<path d="M28 9 L32 3" ${DETAIL}/>` +
+      `<path d="M20 10 L15 5.5" ${DETAIL}/>` +
+      // Soul-motes scattering wide, not rising.
+      `<circle cx="8" cy="16" r="1.5" fill="${GOLD}"/>` +
+      `<circle cx="41" cy="13" r="1.6" fill="${GOLD}"/>` +
+      `<circle cx="44" cy="24" r="1.1" fill="${GOLD}"/>`,
   ),
 
   // Thrall's crumble: the headstone with a descending chevron — the

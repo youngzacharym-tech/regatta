@@ -27,6 +27,7 @@ import {
   applyBulwark,
   applyCharge,
   applyChargedShot,
+  applyCorpseExplosion,
   applyExhume,
   applyPowerMove,
   applyPush,
@@ -41,6 +42,7 @@ import {
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
+  getCorpseExplosionTargets,
   getExhumeTargets,
   getLegalPowerMoves,
   getPushTargets,
@@ -372,6 +374,33 @@ function scoreReflip(currentMoveCount: number, flip: number, rand: () => number)
   return -1; // never worth it over an already-legal move otherwise
 }
 
+/** Score Necromancer's Corpse Explosion: the corpse's CHEAP spend, priced
+ *  against the thrall it forgoes. The blast is worth casting when it
+ *  actually removes bodies (send-homes) or scatters a crowd; a single soft
+ *  shove is worth less than holding the corpse toward Revive (the bank
+ *  refills to full on the next kill anyway, so the real cost of waiting is
+ *  denial risk, which Soul Claim mostly covers while the bank is full).
+ *  Send-homes priced near a capture (they deny the same tempo, minus the
+ *  bounty the blast deliberately doesn't pay); soft shoves modest. First
+ *  rework-pass values — sweep against the bars. */
+function scoreCorpseExplosion(state: GameState, power: PowerState, victims: number[], rand: () => number): number {
+  const mover = state.currentPlayer;
+  let score = 0;
+  for (const id of victims) {
+    const t = state.tokens.find((tok) => tok.id === id)!;
+    const landing = // mirror applyCorpseExplosion's per-victim physics for the estimate
+      t.position - 1 < 4 && possessorOf(power, t.id) !== null
+        ? -1
+        : state.tokens.some(
+            (o) => o.id !== t.id && o.position === t.position - 1 && (o.owner === t.owner || (t.position - 1 >= 4 && t.position - 1 <= 11)),
+          )
+          ? -1
+          : t.position - 1;
+    score += landing === -1 ? 380 + t.position * 8 : 90;
+  }
+  return score + rand() * 20;
+}
+
 /** Score Necromancer's Revive (the rework's single active — the old Raise
  *  Dead / Dark Resurrection scorer and its three balance-pass traces died
  *  with the old kit; see git history for the full archaeology). */
@@ -569,6 +598,16 @@ function pickStandardPowerAction(
         best = { kind: "revive" };
       }
     }
+    // Corpse Explosion competes with Revive for the same corpse — its
+    // oracle is its own gate (cost, corpse validity, at least one victim).
+    const blastVictims = getCorpseExplosionTargets(state, power, mover);
+    if (blastVictims.length > 0) {
+      const score = scoreCorpseExplosion(state, power, blastVictims, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "corpseExplosion" };
+      }
+    }
   }
 
   if (cls === "necromancer" && power.ultimateReady[mover]) {
@@ -639,6 +678,9 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   if (cls === "necromancer" && getReviveSpawnTile(state, power, mover) !== null) {
     // One candidate, no payload — the corpse determines everything.
     out.push({ kind: "revive" });
+  }
+  if (cls === "necromancer" && getCorpseExplosionTargets(state, power, mover).length > 0) {
+    out.push({ kind: "corpseExplosion" });
   }
   if (cls === "necromancer" && power.ultimateReady[mover]) {
     // Same one-candidate collapse: every escaped token is equally escaped.
@@ -962,6 +1004,8 @@ function mkSimulate(
       return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
     case "revive":
       return applyRevive(state, power, mover);
+    case "corpseExplosion":
+      return applyCorpseExplosion(state, power, mover);
     case "exhume":
       return applyExhume(state, power, c.targetTokenId, mover);
   }

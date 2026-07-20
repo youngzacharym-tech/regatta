@@ -394,6 +394,23 @@ export const THRALL_TURNS = 3;
  *  named constant so a future partial-cost experiment is one edit. */
 export const REVIVE_COST = 3;
 
+/** Corpse Explosion (added 2026-07-20, Kasen's second playtest round: the
+ *  class needs a spend BELOW the full bank — with Revive as the only cast,
+ *  charges 1-2 were pure waiting): detonate the marked corpse instead of
+ *  raising it. Every UNPROTECTED enemy stone within
+ *  CORPSE_EXPLOSION_RADIUS of the grave on the contested row is knocked
+ *  back 1 tile along its own path (standard collision math — a blocked
+ *  landing is a send-home). The blast DESECRATES: its send-homes pay no
+ *  soul bounty and mark no corpses (chain explosions were the obvious
+ *  blowout; the thrall keeps chain necromancy as its exclusive), and the
+ *  corpse is consumed either way. Ends the turn and breaks the shield
+ *  streak (Push's precedent — an attack, not a placement; Revive keeps
+ *  the kit's one turn-keeping act). The same corpse now has TWO spends —
+ *  burn it for tempo at 2, or hold the full bank for the thrall at
+ *  REVIVE_COST — which is the decision the kit was missing. */
+export const CORPSE_EXPLOSION_COST = 2;
+export const CORPSE_EXPLOSION_RADIUS = 1;
+
 /** Necromancer's Exhume ultimate: the board position an ESCAPED enemy token
  *  is dragged back to — the only mechanic in the game that touches the win
  *  condition itself, which is exactly the drama the shield-streak gate's
@@ -549,6 +566,10 @@ export type PowerAction =
    *  getReviveSpawnTile, the drift-proof single source shared by the
    *  server's validation, the bot, and the client's gem gate. */
   | { kind: "revive" }
+  /** Necromancer's Corpse Explosion: no target either — the marked corpse
+   *  is the epicenter and getCorpseExplosionTargets is the shared oracle
+   *  (empty pool = not castable). */
+  | { kind: "corpseExplosion" }
   | { kind: "exhume"; targetTokenId: number };
 
 // ============================================================================
@@ -1881,6 +1902,95 @@ export function applyRevive(
     thrall: { ...power.thrall, [mover]: { tokenId: corpse.tokenId, turnsLeft: THRALL_TURNS } },
   };
   return { state: { ...state, tokens }, power: nextPower, raisedTokenId: corpse.tokenId, raisedTo: tile };
+}
+
+/** Necromancer's Corpse Explosion: the blast's victim list, and THE
+ *  legality oracle (Charged Shot's bake-it-in precedent — affordability is
+ *  uniform, and an empty pool means "not castable" everywhere: server
+ *  validation, bot, dock gate). Requires the same raisable corpse Revive
+ *  does (marked, its token still in reserve) and CORPSE_EXPLOSION_COST
+ *  banked — but NOT a free thrall slot, and not the full bank. Victims:
+ *  enemy stones (by EFFECTIVE owner — the caster's own thrall is family;
+ *  an enemy necromancer's thrall is fair game) on contested tiles within
+ *  CORPSE_EXPLOSION_RADIUS of the grave, excluding everything protected
+ *  (shield tile, Ward, Bulwark — the cheapest-per-target attack in the
+ *  game gets no pierces). Empty when nothing would be struck: a blast
+ *  with no victims is a misclick, not a choice. */
+export function getCorpseExplosionTargets(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): number[] {
+  if (power.charges[mover] < CORPSE_EXPLOSION_COST) return [];
+  const corpse = power.corpse[mover];
+  if (!corpse) return [];
+  const body = state.tokens.find((t) => t.id === corpse.tokenId);
+  if (!body || body.position !== -1) return []; // dead-lettered: soul reclaimed
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) !== mover)
+    .filter((t) => t.position >= 4 && t.position <= 11)
+    .filter((t) => Math.abs(t.position - corpse.tile) <= CORPSE_EXPLOSION_RADIUS)
+    .filter((t) => !isProtected(state, power, t))
+    .map((t) => t.id);
+}
+
+/** Necromancer's Corpse Explosion: spends CORPSE_EXPLOSION_COST, consumes
+ *  the corpse, and knocks every oracle victim back 1 along its own path —
+ *  computeKnockbackLanding's standard collision semantics, so a blocked
+ *  landing (or a thrall bounced below the row) is a send-home. Desecration
+ *  rule: blast send-homes pay NO bounty and mark NO corpse (see
+ *  CORPSE_EXPLOSION_COST's doc — chain explosions stay impossible), and
+ *  unlike Push there is no send-home refund: the flat 2 is the whole
+ *  price. A struck enemy THRALL that goes home dies for real
+ *  (clearThrallIfCaptured). Ends the turn, breaks the caster's shield
+ *  streak — Push's exact shape. Victims resolve nearest-the-grave first
+ *  (deterministic, and an inner victim vacating its tile never blocks an
+ *  outer one's knockback into it). Returns the struck/sent-home lists so
+ *  the server can announce the blast without re-deriving it. */
+export function applyCorpseExplosion(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; struckTokenIds: number[]; sentHomeIds: number[]; tile: number } {
+  const corpse = power.corpse[mover]!;
+  const victims = getCorpseExplosionTargets(state, power, mover)
+    .map((id) => state.tokens.find((t) => t.id === id)!)
+    .sort((a, b) => Math.abs(a.position - corpse.tile) - Math.abs(b.position - corpse.tile));
+
+  let tokens = state.tokens;
+  const sentHomeIds: number[] = [];
+  let working: GameState = state;
+  for (const victim of victims) {
+    const current = working.tokens.find((t) => t.id === victim.id)!;
+    const landing = computeKnockbackLanding(working, power, current, 1);
+    if (landing === -1) sentHomeIds.push(victim.id);
+    tokens = working.tokens.map((t) => (t.id === victim.id ? { ...t, position: landing } : t));
+    working = { ...working, tokens };
+  }
+
+  let nextPower: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - CORPSE_EXPLOSION_COST },
+    corpse: { ...power.corpse, [mover]: null },
+  };
+  nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
+  nextPower = clearCapturedBulwarks(nextPower, sentHomeIds); // unreachable while Bulwark blocks the blast, but a reserve trip must never carry protection — same guard as every send-home path
+  nextPower = breakShieldStreak(nextPower, mover); // never lands the mover on a shield
+
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(nextPower),
+    struckTokenIds: victims.map((v) => v.id),
+    sentHomeIds,
+    tile: corpse.tile,
+  };
 }
 
 /** Thrall bookkeeping for the START of a brand-new turn — the

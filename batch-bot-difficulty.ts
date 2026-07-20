@@ -35,6 +35,7 @@ import {
   applyBulwark,
   applyCharge,
   applyChargedShot,
+  applyCorpseExplosion,
   applyExhume,
   applyPowerMove,
   applyPush,
@@ -178,6 +179,10 @@ function takeTurnMK(
     }
     case "bulwark":
       return applyBulwark(state, power, action.tokenId, mover, action.reinforced ?? false);
+    case "corpseExplosion": {
+      const r = applyCorpseExplosion(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
     case "exhume": {
       const r = applyExhume(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };

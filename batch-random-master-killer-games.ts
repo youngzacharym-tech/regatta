@@ -21,6 +21,7 @@ import {
   applyBulwark,
   applyCharge,
   applyChargedShot,
+  applyCorpseExplosion,
   applyExhume,
   applyPowerMove,
   applyPush,
@@ -66,6 +67,8 @@ interface GameResult {
     bulwarkReinforced: number; // full-bank Reinforced Bulwark casts (subset of bulwark)
     bulwarkBlock: number;
     revive: number; // full-soul-bank Revive casts (thralls raised)
+    corpseExplosion: number; // 2-soul blasts (the corpse's cheap spend)
+    explosionSendsHome: number; // blast victims sent all the way home
     thrallKill: number; // captures made BY a thrall (the chain-necromancy engine)
     corpseDeny: number; // corpse voided by the victim re-entering the marked token
     thrallExpired: number; // thralls that crumbled at full duration (vs being killed)
@@ -255,6 +258,16 @@ function takeTurn(
         usage: { ...turnUsage, bulwark: 1, ...(action.reinforced ? { bulwarkReinforced: 1 } : {}) },
       };
     }
+    case "corpseExplosion": {
+      const r = applyCorpseExplosion(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 0,
+        usage: { ...turnUsage, corpseExplosion: 1, ...(r.sentHomeIds.length > 0 ? { explosionSendsHome: r.sentHomeIds.length } : {}) },
+      };
+    }
     case "exhume": {
       // A return, never an attack: no capture, no sweep — sweepSize stays 0.
       const r = applyExhume(state, power, action.targetTokenId, mover);
@@ -283,6 +296,8 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     bulwarkReinforced: 0,
     bulwarkBlock: 0,
     revive: 0,
+    corpseExplosion: 0,
+    explosionSendsHome: 0,
     thrallKill: 0,
     corpseDeny: 0,
     thrallExpired: 0,
@@ -313,6 +328,8 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     // Revives arrive as counts, not flags (the non-turn-ending loop shape),
     // so add rather than the boolean ++ style.
     usage.revive += r.usage.revive ?? 0;
+    if (r.usage.corpseExplosion) usage.corpseExplosion++;
+    usage.explosionSendsHome += r.usage.explosionSendsHome ?? 0;
     if (r.usage.thrallKill) usage.thrallKill++;
     if (r.usage.corpseDeny) usage.corpseDeny++;
     if (r.usage.thrallExpired) usage.thrallExpired++;
@@ -379,6 +396,8 @@ for (const [a, b] of matchups) {
   const avgBulwarkReinforced = mean(results.map((r) => r.usage.bulwarkReinforced));
   const avgBulwarkBlock = mean(results.map((r) => r.usage.bulwarkBlock));
   const avgRevive = mean(results.map((r) => r.usage.revive));
+  const avgExplosion = mean(results.map((r) => r.usage.corpseExplosion));
+  const avgExplosionHome = mean(results.map((r) => r.usage.explosionSendsHome));
   const avgThrallKill = mean(results.map((r) => r.usage.thrallKill));
   const avgCorpseDeny = mean(results.map((r) => r.usage.corpseDeny));
   const avgThrallExpired = mean(results.map((r) => r.usage.thrallExpired));
@@ -391,7 +410,8 @@ for (const [a, b] of matchups) {
       `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
       `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
       `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}` +
-      `  revive/g=${avgRevive.toFixed(2)}  thrallKill/g=${avgThrallKill.toFixed(3)}  corpseDeny/g=${avgCorpseDeny.toFixed(3)}` +
+      `  revive/g=${avgRevive.toFixed(2)}  explode/g=${avgExplosion.toFixed(3)}  explodeHome/g=${avgExplosionHome.toFixed(3)}` +
+      `  thrallKill/g=${avgThrallKill.toFixed(3)}  corpseDeny/g=${avgCorpseDeny.toFixed(3)}` +
       `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}`,
   );
 }

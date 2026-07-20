@@ -29,6 +29,7 @@ import {
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
+  CORPSE_EXPLOSION_COST,
   EXHUME_RETURN_POSITION,
   isWarded,
   NECRO_CHARGE_CAP,
@@ -1749,6 +1750,7 @@ let currentPower: {
   corpse?: Record<PlayerId, { tokenId: number; tile: number } | null>;
   thrall?: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
   reviveSpawnTile?: number | null;
+  corpseExplosionTargets?: number[];
   exhumeTargets?: number[];
   /** Optional (older servers omit them): raw lifecycle numbers behind
    *  bulwarkedTokenIds and the streak — surfaced for the activity log's
@@ -1918,6 +1920,12 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "necromancer",
     desc: `Raise the enemy stone you last killed as your THRALL, on the very tile it died. For ${THRALL_TURNS} of your turns it fights for you — it moves on your flips, kills like any stone, and its blade ignores the Mage's Ward — but it can never leave shared water, and then it crumbles home. Your flip stands: the risen dead may be the one that moves.`,
   },
+  corpseExplosion: {
+    name: "Corpse Explosion",
+    cost: `${CORPSE_EXPLOSION_COST} souls`,
+    klass: "necromancer",
+    desc: "Detonate the marked corpse instead of raising it: every unprotected enemy stone beside the grave is blasted one tile back — a blocked landing sends it all the way home. The blast desecrates the corpse (no thrall, no souls from its kills), and shields, Wards, and Bulwarks all turn it. The same grave, two rites: burn it now, or raise it at a full bank.",
+  },
   exhume: {
     name: "Exhume",
     cost: "Ultimate · 3 shield landings in a row",
@@ -2022,6 +2030,7 @@ const DOCK_COST: Record<string, number> = {
   blinkStrike: 0,
   warpath: 0,
   revive: REVIVE_COST,
+  corpseExplosion: CORPSE_EXPLOSION_COST,
   exhume: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
@@ -2035,6 +2044,7 @@ const DOCK_NAMES: Record<string, string> = {
   blinkStrike: "Blink Strike",
   warpath: "Warpath",
   revive: "Revive",
+  corpseExplosion: "Explosion",
   exhume: "Exhume",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
@@ -2051,7 +2061,11 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean }[]> = {
   ],
   // Revive is the class's one active (the old Raise pair retired with the
   // rework). Soul Harvest is passive and gets no slot, same rule as Snipe.
-  necromancer: [{ ability: "revive" }, { ability: "exhume", ult: true }],
+  necromancer: [
+    { ability: "corpseExplosion" },
+    { ability: "revive" },
+    { ability: "exhume", ult: true },
+  ],
 };
 /** Ground-ring tint while targeting — the caster's class color (the ring
  *  texture is drawn white so this is a plain material recolor, see tick()). */
@@ -2165,6 +2179,12 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
     // decomposes WHY it's null into a teachable reason, in the order the
     // player can actually act on: free the slot, mark a corpse, fill the
     // soul bank.
+    case "corpseExplosion": {
+      if ((p.corpseExplosionTargets ?? []).length > 0) return { state: "ready" };
+      if (!p.corpse?.[mySide]) return { state: "noafford", reason: "No corpse — kill to mark one" };
+      if (charges < CORPSE_EXPLOSION_COST) return { state: "noafford", reason: `Need ${CORPSE_EXPLOSION_COST} souls` };
+      return { state: "noafford", reason: "No enemies near the grave" };
+    }
     case "revive": {
       if ((p.reviveSpawnTile ?? null) !== null) return { state: "ready" };
       if (p.thrall?.[mySide]) return { state: "noafford", reason: "Your thrall still serves" };
@@ -2227,6 +2247,7 @@ function updateDock(active?: boolean) {
     p.warpathTargets.join(),
     p.bulwarkTargets.join(),
     p.reviveSpawnTile ?? "",
+    (p.corpseExplosionTargets ?? []).join(),
     JSON.stringify(p.corpse ?? null),
     JSON.stringify(p.thrall ?? null),
     (p.exhumeTargets ?? []).join(),
@@ -2435,6 +2456,12 @@ dockEl.addEventListener("click", (e) => {
     flashDockButton(ability, "fired");
     return;
   }
+  if (ability === "corpseExplosion") {
+    // Instant: the marked corpse is the epicenter — nothing to aim.
+    sendToServer({ type: "usePower", action: { kind: "corpseExplosion" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
   if (armed?.kind === ability) disarm(); // re-tap the armed gem = cancel
   else armAbility(ability as ArmedKind);
 });
@@ -2492,6 +2519,102 @@ function isMyMugUnderPointer(clientX: number, clientY: number): boolean {
   return Math.hypot(clientX - sx, clientY - sy) < 110;
 }
 
+// ---------------------------------------------------------------------------
+// Status cards — the Hearthstone rule: every mark on the board explains
+// itself on a tap. Tapping a stone that ISN'T an actionable move target (or
+// tapping the grave decal) pops the same card the dock's gems use, filled
+// with that status's copy and its LIVE numbers (thrall turns left, Bulwark
+// turns/saves). Kasen's 2026-07-20 report: "you never know what the icons
+// mean or what's happening."
+// ---------------------------------------------------------------------------
+let infoCardTimer = 0;
+function showInfoCardAt(clientX: number, clientY: number, info: { name: string; cost: string; desc: string; klass: string }) {
+  abilityTipName.textContent = info.name;
+  abilityTipCost.textContent = info.cost;
+  abilityTipDesc.textContent = info.desc;
+  abilityTipPips.classList.remove("show");
+  abilityTipWarn.classList.remove("show");
+  abilityTip.dataset.class = info.klass;
+  const half = 160;
+  const x = Math.min(Math.max(clientX, half + 8), window.innerWidth - half - 8);
+  abilityTip.style.left = `${x}px`;
+  abilityTip.style.bottom = `${window.innerHeight - clientY + 24}px`;
+  abilityTip.classList.add("show");
+  clearTimeout(infoCardTimer);
+  infoCardTimer = window.setTimeout(hideAbilityTip, 4500);
+}
+
+/** Raycast over ALL visible stones (not just eligible ones). */
+function findAnyTokenUnderPointer(clientX: number, clientY: number): number | null {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const list = markers.map((_, i) => i).filter((i) => markers[i].mesh.visible);
+  const meshes = list.map((i) => markers[i].mesh);
+  const hits = raycaster.intersectObjects(meshes, false);
+  return hits.length ? list[meshes.indexOf(hits[0].object as THREE.Mesh)] : null;
+}
+
+/** The tapped grave decal's owner, if any. */
+function findCorpseDecalUnderPointer(clientX: number, clientY: number): PlayerId | null {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const visible = corpseDecals.filter((m) => m.visible);
+  const hits = raycaster.intersectObjects(visible, false);
+  if (!hits.length) return null;
+  return corpseDecals.indexOf(hits[0].object as THREE.Mesh) === 0 ? "p1" : "p2";
+}
+
+/** The explainer for whatever status the tapped stone wears, live numbers
+ *  included — null for an unmarked stone. */
+function statusCardFor(idx: number): { name: string; cost: string; desc: string; klass: string } | null {
+  const mark = statusMarks.find((m) => m.idx === idx);
+  if (!mark || !currentPower) return null;
+  const tokenId = idx; // token ids are array-ordered 0-7 by construction
+  switch (mark.kind) {
+    case "thrall": {
+      const side = (["p1", "p2"] as PlayerId[]).find((p) => currentPower!.thrall?.[p]?.tokenId === tokenId);
+      const th = side ? currentPower.thrall?.[side] : null;
+      const mine = side === (myRole ?? "p1");
+      const n = th?.turnsLeft ?? 0;
+      return {
+        name: "Thrall",
+        cost: `serves ${n} more turn${n === 1 ? "" : "s"}`,
+        klass: "necromancer",
+        desc: `This fallen stone fights for ${mine ? "YOU" : "the enemy Necromancer"}: it moves on ${mine ? "your" : "their"} coin flips, kills like any stone, and its blade ignores the Mage's Ward. It can never leave shared water — when its service ends it crumbles back to its owner's hand. Kill it early to end the possession.`,
+      };
+    }
+    case "ward":
+      return {
+        name: "Warded",
+        cost: "while the Mage holds a full bank",
+        klass: "mage",
+        desc: "The Mage's most-advanced stone is shielded: it cannot be captured or targeted — except by a Warrior's Ward Breaker, a thrall's blade, or an ultimate. The Ward falls the moment the Mage spends below a full bank.",
+      };
+    case "bulwark": {
+      const turns = currentPower.bulwarkTurns?.[tokenId];
+      const saves = currentPower.bulwarkSavesLeft?.[tokenId];
+      return {
+        name: saves !== undefined ? "Reinforced Bulwark" : "Bulwark",
+        cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left${saves !== undefined ? ` · ${saves} save${saves === 1 ? "" : "s"}` : ""}`,
+        klass: "warrior",
+        desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
+      };
+    }
+    case "shieldTile":
+      return {
+        name: "Shield Tile",
+        cost: "safe ground",
+        klass: "warrior",
+        desc: "A stone standing here cannot be captured, and LANDING here grants an extra turn plus a charge. Chain three shield landings in a row to awaken your ultimate.",
+      };
+  }
+  return null;
+}
+
 canvas.addEventListener("pointerdown", (e) => {
   if (viewingHistory()) {
     // Board taps are dead while scrubbing — pulse the banner as the answer.
@@ -2542,7 +2665,31 @@ canvas.addEventListener("pointerdown", (e) => {
     return;
   }
   const tokenId = findEligibleMeshUnderPointer(e.clientX, e.clientY);
-  if (tokenId === null) return;
+  if (tokenId === null) {
+    // Not an actionable stone — every MARK explains itself on a tap:
+    // statuses first (they sit on stones), then the grave decal.
+    hideAbilityTip();
+    const idx = findAnyTokenUnderPointer(e.clientX, e.clientY);
+    const card = idx !== null ? statusCardFor(idx) : null;
+    if (card) {
+      showInfoCardAt(e.clientX, e.clientY, card);
+      return;
+    }
+    const graveSide = findCorpseDecalUnderPointer(e.clientX, e.clientY);
+    if (graveSide) {
+      const mine = graveSide === (myRole ?? "p1");
+      showInfoCardAt(e.clientX, e.clientY, {
+        name: "Marked Corpse",
+        cost: mine ? "your kill lies here" : "the enemy's kill lies here",
+        klass: "necromancer",
+        desc: mine
+          ? "The stone you killed here is marked. Spend 2 souls on Corpse Explosion to blast everything beside this grave, or a full bank of 3 on Revive to raise it as your thrall — right on this tile. While your bank is full, its owner cannot bring it back."
+          : "The enemy Necromancer killed a stone here and marked its corpse. If their soul bank dips below full, re-enter that stone from your hand to reclaim the soul — otherwise expect an explosion from this grave, or the corpse rising against you.",
+      });
+      return;
+    }
+    return;
+  }
   const moveIdx = moveIndexByToken.get(tokenId);
   if (moveIdx === undefined) return;
   sendToServer({ type: "chooseMove", moveIndex: moveIdx });
@@ -3038,6 +3185,7 @@ function announceFromState(msg: {
   lastRevive?: { tokenId: number; tile: number } | null;
   lastThrallExpired?: { tokenId: number } | null;
   lastCorpseDenied?: { tokenId: number } | null;
+  lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
@@ -3099,6 +3247,9 @@ function announceFromState(msg: {
     const necro = denier === "p1" ? "p2" : "p1";
     if (classOf(necro) === "necromancer") showProc("necromancer", "Soul Reclaimed", "corpseDenied");
   }
+  if (msg.lastCorpseExplosion && msg.lastMovePlayer && classOf(msg.lastMovePlayer) === "necromancer") {
+    showProc("necromancer", "Corpse Explosion!", "corpseExplosion");
+  }
 
   // Bulwark actually blocking a capture is its own signal, independent of
   // lastMovePlayer (it fires the instant a fresh flip reveals the block —
@@ -3130,6 +3281,20 @@ function announceFromState(msg: {
         "shield",
       );
     }
+    return;
+  }
+
+  if (msg.lastCorpseExplosion && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const struck = msg.lastCorpseExplosion.struckTokenIds.length;
+    const home = msg.lastCorpseExplosion.sentHomeIds.length;
+    showAnnouncement(
+      `${subject} detonated the corpse on ${tileDisplay(msg.lastCorpseExplosion.tile)} — ` +
+        `${struck} stone${struck === 1 ? "" : "s"} blasted${home > 0 ? `, ${home} sent home` : ""}` +
+        `${chargeFor(msg.lastMovePlayer)}`,
+      "shield",
+    );
     return;
   }
 
@@ -3269,8 +3434,16 @@ function announceFromState(msg: {
         "capture",
         "A capture! Land on an enemy stone in shared water and it's sent home to start its journey over. Stones on your own shore are always safe.",
       );
+      // Necromancer kills narrate the corpse (Hearthstone rule: the board
+      // never changes silently) — the marker just appeared on the death
+      // tile, and the announcement says so.
+      const necroKill =
+        msg.lastMovePlayer &&
+        classOf(msg.lastMovePlayer) === "necromancer" &&
+        (msg as { power?: { corpse?: Record<PlayerId, unknown> } }).power?.corpse?.[msg.lastMovePlayer];
       showAnnouncement(
-        `${subject} captured ${target} token${totalCaptures > 1 ? "s" : ""} on ${tileDisplay(m.to)}${suffix}`,
+        `${subject} captured ${target} token${totalCaptures > 1 ? "s" : ""} on ${tileDisplay(m.to)}` +
+          `${necroKill ? " — corpse marked" : ""}${suffix}`,
         "capture",
       );
       return;
@@ -3424,6 +3597,15 @@ function replayEvent(ev: RoomEvent) {
   announceFromState(ev);
   refreshMarkers(ev.state, ev.lastExhume != null);
   currentPower = ev.power ?? null;
+  // Thrall countdown telegraph: the moment a possession enters its LAST
+  // turn, say so — the crumble should never feel like a surprise.
+  for (const side of ["p1", "p2"] as PlayerId[]) {
+    const turnsNow = ev.power?.thrall?.[side]?.turnsLeft ?? null;
+    if (turnsNow === 1 && (prevThrallTurns[side] ?? 0) > 1) {
+      showProc("necromancer", "Thrall Fades — Last Turn", "thrallExpired");
+    }
+    prevThrallTurns[side] = turnsNow;
+  }
   updateTokenTints(ev.state);
   updatePlates(ev.state);
   if (ev.lastChargeEvent) {
@@ -3440,6 +3622,9 @@ function replayEvent(ev: RoomEvent) {
     }
   }
 }
+
+/** Last seen thrall turns per side — drives the last-turn telegraph. */
+const prevThrallTurns: Record<PlayerId, number | null> = { p1: null, p2: null };
 
 /** Apply the response's CURRENT overlay — idempotent, interactive state. */
 function applyOverlay(v: RoomResponse) {
@@ -3637,6 +3822,7 @@ function summarizeEvent(ev: StateEvent): string {
   if (ev.lastRainOfArrows)
     return ev.lastRainOfArrows.targetTokenId === null ? "Rain of Arrows — no target" : "Rain of Arrows";
   if (ev.lastRevive) return `Revive — thrall rises on ${tileDisplay(ev.lastRevive.tile)}`;
+  if (ev.lastCorpseExplosion) return `Corpse Explosion on ${tileDisplay(ev.lastCorpseExplosion.tile)}`;
   if (ev.lastChargeSweep) return `Charge — sweep of ${ev.lastChargeSweep.sweptTokenIds.length}`;
   if (ev.lastPush) return "Push";
   if (ev.lastChargedShot) return "Charged Shot";
@@ -3699,6 +3885,10 @@ function describeEffects(i: number): string[] {
     );
   if (ev.lastThrallExpired)
     fx.push(`<b>Thrall crumbles</b>: ${ownedLabel(ev.lastThrallExpired.tokenId)} returns to reserve`);
+  if (ev.lastCorpseExplosion)
+    fx.push(
+      `<b>Corpse Explosion</b> on ${tileDisplay(ev.lastCorpseExplosion.tile)}: struck ${ev.lastCorpseExplosion.struckTokenIds.map((id) => ownedLabel(id)).join(", ") || "nothing"}${ev.lastCorpseExplosion.sentHomeIds.length > 0 ? ` — ${ev.lastCorpseExplosion.sentHomeIds.map((id) => ownedLabel(id)).join(", ")} sent home` : ""}`,
+    );
   if (ev.lastCorpseDenied)
     fx.push(`<b>Soul reclaimed</b>: ${ownedLabel(ev.lastCorpseDenied.tokenId)} re-entered — the Revive is denied`);
   if (ev.lastPush) fx.push(`<b>Push</b>: ${ownedLabel(ev.lastPush.targetTokenId)} knocked back`);
@@ -4656,6 +4846,11 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Soul Claim</b>: while you hold a full soul bank, the marked
        body cannot re-enter from the enemy's hand — the soul is yours
        until you spend it. Let the bank lapse and they may reclaim it.</li>
+       <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} souls):
+       detonate the marked corpse instead of raising it — every unprotected
+       enemy stone beside the grave is blasted a tile back, all the way
+       home if nothing's free behind it. The blast desecrates the corpse:
+       no thrall, and its casualties yield no souls.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
@@ -4840,7 +5035,9 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
     items: [
       "<b>The Necromancer, reforged.</b> His kills now bank <b>3 souls</b> and mark the fallen enemy's corpse on the tile where it died. Fill all three gems — the round third one is the <b>Soul Gem</b>, and only a kill can light it — then cast <b>Revive</b>: the corpse rises as your <b>thrall</b> and fights for YOU for three of your turns.",
       "<b>Chain necromancy.</b> A thrall's kills pay full souls and mark fresh corpses. Keep killing and the graveyard keeps giving.",
+      "<b>Corpse Explosion.</b> The grave's second rite: spend 2 souls to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
       "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
+      "<b>Tap anything glowing.</b> Every mark on the board now explains itself — tap a thrall, a Ward, a Bulwark, a shield tile, or the grave itself for a card telling you exactly what it does and how long it lasts.",
       "<b>The dead feel no magic.</b> A thrall's blade ignores the Mage's Ward. Shields and Bulwarks still stop it.",
       "<b>Reinforced Bulwark holds the line.</b> Fixed: it no longer wears down from an archer merely LOOKING at it — only true blocks spend its saves.",
       "<b>Mirror duels read clean.</b> When both captains bring the same class, your rival's stones wear a cold slate sheen.",

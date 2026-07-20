@@ -346,6 +346,8 @@ var SOUL_BOUNTY_CHARGES = 3;
 var NECRO_CHARGE_CAP = 3;
 var THRALL_TURNS = 3;
 var REVIVE_COST = 3;
+var CORPSE_EXPLOSION_COST = 2;
+var CORPSE_EXPLOSION_RADIUS = 1;
 var EXHUME_RETURN_POSITION = 11;
 function initialPowerState() {
   return {
@@ -926,6 +928,50 @@ function applyRevive(state, power, mover) {
   };
   return { state: { ...state, tokens }, power: nextPower, raisedTokenId: corpse.tokenId, raisedTo: tile };
 }
+function getCorpseExplosionTargets(state, power, mover) {
+  if (power.charges[mover] < CORPSE_EXPLOSION_COST) return [];
+  const corpse = power.corpse[mover];
+  if (!corpse) return [];
+  const body = state.tokens.find((t) => t.id === corpse.tokenId);
+  if (!body || body.position !== -1) return [];
+  return state.tokens.filter((t) => effectiveOwner(power, t) !== mover).filter((t) => t.position >= 4 && t.position <= 11).filter((t) => Math.abs(t.position - corpse.tile) <= CORPSE_EXPLOSION_RADIUS).filter((t) => !isProtected(state, power, t)).map((t) => t.id);
+}
+function applyCorpseExplosion(state, power, mover) {
+  const corpse = power.corpse[mover];
+  const victims = getCorpseExplosionTargets(state, power, mover).map((id) => state.tokens.find((t) => t.id === id)).sort((a, b) => Math.abs(a.position - corpse.tile) - Math.abs(b.position - corpse.tile));
+  let tokens = state.tokens;
+  const sentHomeIds = [];
+  let working = state;
+  for (const victim of victims) {
+    const current = working.tokens.find((t) => t.id === victim.id);
+    const landing = computeKnockbackLanding(working, power, current, 1);
+    if (landing === -1) sentHomeIds.push(victim.id);
+    tokens = working.tokens.map((t) => t.id === victim.id ? { ...t, position: landing } : t);
+    working = { ...working, tokens };
+  }
+  let nextPower = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - CORPSE_EXPLOSION_COST },
+    corpse: { ...power.corpse, [mover]: null }
+  };
+  nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
+  nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
+  nextPower = breakShieldStreak(nextPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(nextPower),
+    struckTokenIds: victims.map((v) => v.id),
+    sentHomeIds,
+    tile: corpse.tile
+  };
+}
 function tickThrallForNewTurn(state, power) {
   const mover = state.currentPlayer;
   const th = power.thrall[mover];
@@ -1087,6 +1133,21 @@ function scoreReflip(currentMoveCount, flip, rand) {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
   return -1;
 }
+function scoreCorpseExplosion(state, power, victims, rand) {
+  const mover = state.currentPlayer;
+  let score = 0;
+  for (const id of victims) {
+    const t = state.tokens.find((tok) => tok.id === id);
+    const landing = (
+      // mirror applyCorpseExplosion's per-victim physics for the estimate
+      t.position - 1 < 4 && possessorOf(power, t.id) !== null ? -1 : state.tokens.some(
+        (o) => o.id !== t.id && o.position === t.position - 1 && (o.owner === t.owner || t.position - 1 >= 4 && t.position - 1 <= 11)
+      ) ? -1 : t.position - 1
+    );
+    score += landing === -1 ? 380 + t.position * 8 : 90;
+  }
+  return score + rand() * 20;
+}
 function scoreRevive(state, power, spawnTile, rand) {
   const mover = state.currentPlayer;
   let threatened = 0;
@@ -1201,6 +1262,14 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
         best = { kind: "revive" };
       }
     }
+    const blastVictims = getCorpseExplosionTargets(state, power, mover);
+    if (blastVictims.length > 0) {
+      const score = scoreCorpseExplosion(state, power, blastVictims, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "corpseExplosion" };
+      }
+    }
   }
   if (cls === "necromancer" && power.ultimateReady[mover]) {
     const exhumeTargets = getExhumeTargets(state, power, mover);
@@ -1251,6 +1320,9 @@ function enumerateCandidates(state, power, moves) {
   }
   if (cls === "necromancer" && getReviveSpawnTile(state, power, mover) !== null) {
     out.push({ kind: "revive" });
+  }
+  if (cls === "necromancer" && getCorpseExplosionTargets(state, power, mover).length > 0) {
+    out.push({ kind: "corpseExplosion" });
   }
   if (cls === "necromancer" && power.ultimateReady[mover]) {
     const exhumeTargets = getExhumeTargets(state, power, mover);
@@ -1420,6 +1492,8 @@ function mkSimulate(state, power, c, mover) {
       return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
     case "revive":
       return applyRevive(state, power, mover);
+    case "corpseExplosion":
+      return applyCorpseExplosion(state, power, mover);
     case "exhume":
       return applyExhume(state, power, c.targetTokenId, mover);
   }
@@ -1553,6 +1627,7 @@ function publicPower(doc) {
     },
     thrall: { p1: doc.mk.thrall?.p1 ?? null, p2: doc.mk.thrall?.p2 ?? null },
     reviveSpawnTile: doc.mk.classes[mover] === "necromancer" ? getReviveSpawnTile(doc.state, p, mover) : null,
+    corpseExplosionTargets: doc.mk.classes[mover] === "necromancer" ? getCorpseExplosionTargets(doc.state, p, mover) : [],
     exhumeTargets: doc.mk.classes[mover] === "necromancer" && doc.mk.ultimateReady[mover] ? getExhumeTargets(doc.state, p, mover) : [],
     reflipsUsedThisTurn: p.reflipsUsedThisTurn
   };
@@ -1601,6 +1676,7 @@ function stateEventOf(doc) {
     lastRevive: doc.lastRevive ?? null,
     lastThrallExpired: doc.lastThrallExpired ?? null,
     lastCorpseDenied: doc.lastCorpseDenied ?? null,
+    lastCorpseExplosion: doc.lastCorpseExplosion ?? null,
     lastExhume: doc.lastExhume ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
@@ -1638,6 +1714,7 @@ function freshMatchFields(variant) {
     lastRevive: null,
     lastThrallExpired: null,
     lastCorpseDenied: null,
+    lastCorpseExplosion: null,
     lastExhume: null,
     rescueAttempted: false
   };
@@ -1736,6 +1813,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
       if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced === true) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
+      if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
       const move = doc.currentPowerMoves[a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
@@ -1794,6 +1872,11 @@ function validateUsePower(doc, seat, a) {
       if (doc.currentFlip === null) return "No flip yet";
       if (getReviveSpawnTile(doc.state, p(), seat) === null) return "Revive not castable";
       return null;
+    case "corpseExplosion":
+      if (cls !== "necromancer") return "Only a Necromancer can detonate a corpse";
+      if (getCorpseExplosionTargets(doc.state, p(), seat).length === 0)
+        return "Corpse Explosion not castable";
+      return null;
     case "exhume":
       if (cls !== "necromancer") return "Only a Necromancer can Exhume";
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
@@ -1822,6 +1905,7 @@ var CLEAR_SLOTS = {
   lastRevive: null,
   lastThrallExpired: null,
   lastCorpseDenied: null,
+  lastCorpseExplosion: null,
   lastExhume: null,
   wasSkipped: false,
   skippedPlayer: null,
@@ -1981,6 +2065,23 @@ function applyMkRevive(doc, seat, now) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
+function applyMkCorpseExplosion(doc, seat, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const r = applyCorpseExplosion(doc.state, fromWirePower(doc.mk), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastCorpseExplosion: { tile: r.tile, struckTokenIds: r.struckTokenIds, sentHomeIds: r.sentHomeIds }
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
 function maybeResolveClassPick(doc, now) {
   if (doc.phase !== "classPick" || !doc.mk) return doc;
   if (!doc.classesPicked.p1 || !doc.classesPicked.p2 && !doc.vsCpu) return doc;
@@ -2008,7 +2109,7 @@ function autoSkipDelay(doc) {
     if (doc.mk.classes[mover] === "mage" && canReflipAgain(p, mover)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
-    if (doc.mk.classes[mover] === "necromancer" && doc.currentFlip !== null && doc.currentFlip !== 0 && getReviveSpawnTile(doc.state, p, mover) !== null) {
+    if (doc.mk.classes[mover] === "necromancer" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getReviveSpawnTile(doc.state, p, mover) !== null || getCorpseExplosionTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
   }
@@ -2143,6 +2244,8 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
     case "revive":
       return applyMkRevive(doc, seat, now);
+    case "corpseExplosion":
+      return applyMkCorpseExplosion(doc, seat, now);
     case "exhume":
       return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
   }

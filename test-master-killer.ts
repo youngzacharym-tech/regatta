@@ -17,6 +17,7 @@ import {
   CHARGE_SWEEP_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
+  CORPSE_EXPLOSION_COST,
   EXHUME_RETURN_POSITION,
   NECRO_CHARGE_CAP,
   PUSH_DISTANCE,
@@ -30,6 +31,7 @@ import {
   applyBulwark,
   applyCharge,
   applyChargedShot,
+  applyCorpseExplosion,
   applyExhume,
   applyPowerMove,
   applyPush,
@@ -44,6 +46,7 @@ import {
   getBulwarkBlockedIds,
   getBulwarkTargets,
   getChargedShotTargets,
+  getCorpseExplosionTargets,
   getExhumeTargets,
   getLegalPowerMoves,
   getPushTargets,
@@ -1851,6 +1854,77 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Ward pierce: announced as a ward break", !!pierce && pierce.breaksWard === true);
     const living = getLegalPowerMoves(s, pw, 4).find((mv) => mv.tokenId === 0 && mv.to === 9);
     check("Ward pierce: the necromancer's LIVING stones stay blocked", living === undefined, JSON.stringify(living));
+  }
+
+  // --- Corpse Explosion: the 2-soul corpse spend ---------------------------
+  {
+    // Corpse marked on tile 8; enemies at 7, 8-adjacent 9, and far 11.
+    const ready: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }, { p1: CORPSE_EXPLOSION_COST }),
+      corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+    };
+    const s = state("p1", { 5: 9, 6: 11 });
+    check(
+      "Explosion: strikes the unprotected enemy beside the grave",
+      getCorpseExplosionTargets(s, ready, "p1").includes(5),
+    );
+    check(
+      "Explosion: reaches only CORPSE_EXPLOSION_RADIUS from the grave",
+      !getCorpseExplosionTargets(s, ready, "p1").includes(6),
+    );
+    check("Explosion: refused without a corpse", getCorpseExplosionTargets(s, { ...ready, corpse: { p1: null, p2: null } }, "p1").length === 0);
+    check(
+      "Explosion: refused below its cost",
+      getCorpseExplosionTargets(s, { ...ready, charges: { p1: CORPSE_EXPLOSION_COST - 1, p2: 0 } }, "p1").length === 0,
+    );
+    const sDenied = state("p1", { 4: 1, 5: 9 });
+    check("Explosion: refused once the corpse token re-enters", getCorpseExplosionTargets(sDenied, ready, "p1").length === 0);
+    check("Explosion: empty pool when nothing stands near the grave", getCorpseExplosionTargets(state("p1", {}), ready, "p1").length === 0);
+    // Unlike Revive, an ACTIVE thrall doesn't block the blast (different slot).
+    const midThrall: PowerState = { ...ready, thrall: { p1: { tokenId: 7, turnsLeft: 1 }, p2: null } };
+    const sMid = state("p1", { 5: 9, 7: 5 });
+    check("Explosion: castable while a thrall serves", getCorpseExplosionTargets(sMid, midThrall, "p1").includes(5));
+    check("Explosion: the caster's own thrall is family, never a victim", !getCorpseExplosionTargets(sMid, midThrall, "p1").includes(7));
+    // Protections all hold: shield tile 7, Ward, Bulwark.
+    const shielded = state("p1", { 5: 7 });
+    const corpseAt7: PowerState = { ...ready, corpse: { p1: { tokenId: 4, tile: 8 }, p2: null } };
+    check("Explosion: a shield tile shelters its occupant", !getCorpseExplosionTargets(shielded, corpseAt7, "p1").includes(5));
+    const pwWard: PowerState = {
+      ...power({ p1: "necromancer", p2: "mage" }, { p1: CORPSE_EXPLOSION_COST, p2: CHARGE_CAP }),
+      corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+    };
+    check("Explosion: Ward turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 9 }), pwWard, "p1").includes(5));
+    const pwBul: PowerState = { ...ready, bulwarked: { 5: 2 } };
+    check("Explosion: Bulwark turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 9 }), pwBul, "p1").includes(5));
+
+    // Apply: knockback, send-home on collision, flat cost, desecration.
+    const sApply = state("p1", { 5: 9, 6: 8 }); // 6 at the grave itself: 8->7 shield tile landing? 8-1=7 free -> lands ON the shield tile (legal landing, protection is for capture)
+    const rA = applyCorpseExplosion(sApply, ready, "p1");
+    check("Explosion: victims knocked back one tile", rA.state.tokens.find((t) => t.id === 5)!.position === 8);
+    check("Explosion: spends its flat cost", rA.power.charges.p1 === 0, `p1=${rA.power.charges.p1}`);
+    check("Explosion: consumes the corpse", rA.power.corpse.p1 === null);
+    check("Explosion: ends the turn", rA.state.currentPlayer === "p2");
+    check("Explosion: reports the epicenter", rA.tile === 8);
+    check("Explosion: desecration — no corpse minted by the blast", rA.power.corpse.p1 === null);
+    // Collision send-home: enemy at 9 with its own stone at 8 -> 9-1=8 occupied -> home.
+    const sCollide = state("p1", { 5: 9, 6: 8 });
+    const rC = applyCorpseExplosion(sCollide, ready, "p1");
+    // (6 resolves first — nearest the grave — vacating 8 backward to 7, so 5 lands on 8.)
+    check("Explosion: nearest-first resolution lets outer victims fill vacated tiles", rC.state.tokens.find((t) => t.id === 5)!.position === 8);
+    const sWall = state("p1", { 0: 8, 5: 9 }); // MY stone holds 8: enemy at 9 has nowhere -> home
+    const rW = applyCorpseExplosion(sWall, ready, "p1");
+    check("Explosion: a blocked landing is a send-home", rW.state.tokens.find((t) => t.id === 5)!.position === -1);
+    check("Explosion: blast send-homes pay no bounty", rW.power.charges.p1 === 0, `p1=${rW.power.charges.p1}`);
+    check("Explosion: the blast breaks a live shield streak", applyCorpseExplosion(sApply, { ...ready, shieldStreak: { p1: 2, p2: 0 } }, "p1").power.shieldStreak.p1 === 0);
+    // Mirror: the ENEMY's thrall (my own body) blasted home dies for real.
+    const mirrorPw: PowerState = {
+      ...power({ p1: "necromancer", p2: "necromancer" }, { p1: CORPSE_EXPLOSION_COST }),
+      corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+      thrall: { p1: null, p2: { tokenId: 0, turnsLeft: 2 } },
+    };
+    const sMirror = state("p1", { 0: 9, 1: 8 }); // my body 0 possessed by p2 at 9; my stone 1 walls tile 8
+    const rM = applyCorpseExplosion(sMirror, mirrorPw, "p1");
+    check("Explosion: an enemy thrall blasted home dies for real", rM.state.tokens.find((t) => t.id === 0)!.position === -1 && rM.power.thrall.p2 === null);
   }
 
   // --- Thrall movement: the necromancer's fifth stone, chained to the row -
