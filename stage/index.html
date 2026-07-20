@@ -797,6 +797,38 @@
         display: none; justify-content: center; align-items: center;
       }
       #guide-overlay.show { display: flex; }
+      /* Captain's Notices — the update log. Same dimmed-tavern treatment as
+         the guide; sits ABOVE the menu (z 210) since its whole job is to
+         greet returning players before they pick a mode. */
+      #update-overlay {
+        position: fixed; inset: 0; z-index: 210;
+        background: rgba(8, 6, 4, 0.72);
+        display: none; justify-content: center; align-items: center;
+      }
+      #update-overlay.show { display: flex; }
+      #update-card { width: min(560px, 92vw); max-height: 84vh; display: flex; flex-direction: column; }
+      #update-entries {
+        overflow-y: auto; margin: 12px 0 16px; text-align: left; padding-right: 6px;
+        -webkit-overflow-scrolling: touch;
+      }
+      .update-entry + .update-entry {
+        margin-top: 18px; padding-top: 14px;
+        border-top: 1px solid rgba(232, 200, 126, 0.25);
+      }
+      .update-date {
+        font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
+        color: #b89a63;
+      }
+      .update-name { font-size: 17px; font-weight: 700; color: #e8c87e; margin: 2px 0 8px; }
+      .update-entry ul { margin: 0; padding-left: 18px; }
+      .update-entry li { font-size: 13.5px; line-height: 1.5; color: #e6dcc8; margin: 6px 0; }
+      .update-entry li b { color: #f0d9a4; }
+      #menu-whatsnew {
+        background: none; border: none; cursor: pointer;
+        color: #b89a63; font: inherit; font-size: 12.5px; letter-spacing: 0.06em;
+        margin-top: 8px; text-decoration: underline dotted;
+      }
+      #menu-whatsnew:hover { color: #e8c87e; }
       #guide-book {
         position: relative;
         width: min(760px, 92vw); height: min(480px, 80vh);
@@ -1428,6 +1460,15 @@
         <div id="guide-dots"></div>
       </div>
     </div>
+    <div id="update-overlay">
+      <div class="card gilt-card" id="update-card">
+        <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
+        <h1 class="gilt-title">CAPTAIN'S NOTICES</h1>
+        <div class="tagline">what's new at the tavern</div>
+        <div id="update-entries"></div>
+        <button class="mode gilt-btn primary" id="update-close">Set Sail</button>
+      </div>
+    </div>
     <div id="proc" aria-hidden="true">
       <div class="proc-text"></div>
       <div class="proc-icon"></div>
@@ -1494,6 +1535,7 @@
         </div>
         <div class="menu-error" id="menu-error"></div>
         <button id="menu-install">⬇  Install Master Killer</button>
+        <button id="menu-whatsnew" type="button">🕯 What's new</button>
         <div class="credit">
           Board &amp; pieces sculpted by
           <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>

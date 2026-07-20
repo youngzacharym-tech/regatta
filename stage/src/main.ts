@@ -4825,6 +4825,84 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
   window.addEventListener("appinstalled", hideInstall);
 }
 
+// ---------------------------------------------------------------------------
+// Captain's Notices — the update log. Studio-style version notes, shown ONCE
+// per release when a player opens the game to the menu (remembered in
+// localStorage by the newest entry's id), and reopenable any time from the
+// menu's "What's new" line. Entries are newest-first; the copy is
+// player-facing tavern voice, telling people what to LOOK FOR, not a diff.
+// ---------------------------------------------------------------------------
+const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-07-20-dead-fight-back",
+    date: "July 20, 2026",
+    title: "The Dead Fight Back",
+    items: [
+      "<b>The Necromancer, reforged.</b> His kills now bank <b>3 souls</b> and mark the fallen enemy's corpse on the tile where it died. Fill all three gems — the round third one is the <b>Soul Gem</b>, and only a kill can light it — then cast <b>Revive</b>: the corpse rises as your <b>thrall</b> and fights for YOU for three of your turns.",
+      "<b>Chain necromancy.</b> A thrall's kills pay full souls and mark fresh corpses. Keep killing and the graveyard keeps giving.",
+      "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
+      "<b>The dead feel no magic.</b> A thrall's blade ignores the Mage's Ward. Shields and Bulwarks still stop it.",
+      "<b>Reinforced Bulwark holds the line.</b> Fixed: it no longer wears down from an archer merely LOOKING at it — only true blocks spend its saves.",
+      "<b>Mirror duels read clean.</b> When both captains bring the same class, your rival's stones wear a cold slate sheen.",
+      "<b>Smoother sailing.</b> Token animations no longer stutter in busy games (archers, that was you).",
+      "<b>A sharper ship's log.</b> The Activity Log now counts stones 1–4 the way you do.",
+    ],
+  },
+  {
+    id: "2026-07-19-graveyard-opens",
+    date: "July 19, 2026",
+    title: "The Graveyard Opens",
+    items: [
+      "<b>A fourth captain takes the table:</b> the Necromancer arrives, skull sigil and all.",
+      "<b>The ship's log:</b> tap the scroll on the rail for a full game log — rewind any moment and watch it replay.",
+      "<b>The tavern sips less oil:</b> big battery and performance work for long sessions on iPad.",
+    ],
+  },
+];
+const UPDATE_SEEN_KEY = "regattaUpdateSeen";
+const updateOverlay = document.getElementById("update-overlay") as HTMLDivElement;
+const updateEntries = document.getElementById("update-entries") as HTMLDivElement;
+
+function showUpdateLog() {
+  updateEntries.innerHTML = UPDATE_LOG.map(
+    (e) =>
+      `<div class="update-entry"><div class="update-date">${e.date}</div>` +
+      `<div class="update-name">${e.title}</div>` +
+      `<ul>${e.items.map((i) => `<li>${i}</li>`).join("")}</ul></div>`,
+  ).join("");
+  updateEntries.scrollTop = 0;
+  updateOverlay.classList.add("show");
+}
+function closeUpdateLog() {
+  updateOverlay.classList.remove("show");
+  // Dismissal = read: this release stops prompting on future opens.
+  try {
+    localStorage.setItem(UPDATE_SEEN_KEY, UPDATE_LOG[0].id);
+  } catch {
+    /* private mode etc. — they'll just see it again */
+  }
+}
+(document.getElementById("update-close") as HTMLButtonElement).addEventListener("click", closeUpdateLog);
+updateOverlay.addEventListener("click", (e) => {
+  if (e.target === updateOverlay) closeUpdateLog();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && updateOverlay.classList.contains("show")) closeUpdateLog();
+});
+(document.getElementById("menu-whatsnew") as HTMLButtonElement).addEventListener("click", showUpdateLog);
+
+/** Prompt exactly once per release, and only over the menu — a player
+ *  deep-linking into a live room is never interrupted mid-join. */
+function promptUpdateLogIfNew() {
+  let seen: string | null = null;
+  try {
+    seen = localStorage.getItem(UPDATE_SEEN_KEY);
+  } catch {
+    /* fall through to showing */
+  }
+  if (seen !== UPDATE_LOG[0].id) showUpdateLog();
+}
+
 // Startup routing: resume a live seat if we have one (page reload), else
 // follow a ?room=CODE deep link, else show the mode menu.
 {
@@ -4838,6 +4916,7 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
   } else {
     menuEl.classList.add("show");
     hud.textContent = "Pick a game mode";
+    promptUpdateLogIfNew();
   }
 }
 
@@ -4902,7 +4981,8 @@ function tick() {
     menuEl.classList.contains("show") ||
     winScreen.classList.contains("show") ||
     classpickEl.classList.contains("show") ||
-    guideOverlay.classList.contains("show");
+    guideOverlay.classList.contains("show") ||
+    updateOverlay.classList.contains("show");
   const budgetMs = sceneKinetic() ? 0 : overlayUp ? 62 : 30;
   if (budgetMs > 0 && now - lastRenderAt < budgetMs) return;
   lastRenderAt = now;
