@@ -1914,6 +1914,30 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "warrior",
     desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and Bulwarks.",
   },
+  snipe: {
+    name: "Snipe",
+    cost: "Passive · always on",
+    klass: "archer",
+    desc: "Every landing in shared water also fells an unprotected enemy stone exactly one tile ahead of where you land — a free second capture, no charge, no aiming. Shields, Wards, and Bulwarks turn it.",
+  },
+  rainOfArrows: {
+    name: "Rain of Arrows",
+    cost: "Ultimate · fires on its own",
+    klass: "archer",
+    desc: "Chain three shield-tile landings in a row and the sky answers: the moment the third lands, arrows strike one random enemy in shared water down through every protection. No aiming, no spending — it simply happens.",
+  },
+  ward: {
+    name: "Ward",
+    cost: "Passive · while your bank is full",
+    klass: "mage",
+    desc: "While you hold a full charge bank, your most-advanced stone is shielded: it cannot be captured or targeted. Spend below full and the Ward falls until the bank refills. Warriors, thralls, and ultimates pierce it.",
+  },
+  wardBreaker: {
+    name: "Ward Breaker",
+    cost: "Passive · always on",
+    klass: "warrior",
+    desc: "Wards mean nothing to you: landing on a Warded enemy breaks the Ward and captures it all the same, and your Charge sweep cuts through Warded stones too. Shield tiles and Bulwarks still hold.",
+  },
   revive: {
     name: "Revive",
     cost: `${REVIVE_COST} souls · keeps your turn`,
@@ -2032,6 +2056,11 @@ const DOCK_COST: Record<string, number> = {
   revive: REVIVE_COST,
   corpseExplosion: CORPSE_EXPLOSION_COST,
   exhume: 0,
+  snipe: 0,
+  rainOfArrows: 0,
+  ward: 0,
+  wardBreaker: 0,
+  soulHarvest: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
 const DOCK_NAMES: Record<string, string> = {
@@ -2046,22 +2075,42 @@ const DOCK_NAMES: Record<string, string> = {
   revive: "Revive",
   corpseExplosion: "Explosion",
   exhume: "Exhume",
+  snipe: "Snipe",
+  rainOfArrows: "Rain of Arrows",
+  ward: "Ward",
+  wardBreaker: "Ward Breaker",
+  soulHarvest: "Soul Harvest",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
  *  so the goal is visible from turn one. Archer's ult (Rain of Arrows) is
  *  passive and gets no slot. */
-const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean }[]> = {
-  archer: [{ ability: "push" }, { ability: "chargedShot" }],
-  mage: [{ ability: "reflip" }, { ability: "blinkStrike", ult: true }],
+const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?: boolean }[]> = {
+  // EVERY class shows its FULL kit — passives included, leading the arc, and
+  // the archer's auto-firing ultimate too (Kasen 2026-07-20: "you shouldn't
+  // have to check your rulebook to be reminded of how to play your
+  // character"). Passive slots never cast: a tap opens their card, and
+  // their glow reflects the passive's LIVE condition (Ward lit only at a
+  // full bank; Rain of Arrows lit one shield landing from firing).
+  archer: [
+    { ability: "snipe", passive: true },
+    { ability: "push" },
+    { ability: "chargedShot" },
+    { ability: "rainOfArrows", ult: true, passive: true },
+  ],
+  mage: [
+    { ability: "ward", passive: true },
+    { ability: "reflip" },
+    { ability: "blinkStrike", ult: true },
+  ],
   warrior: [
+    { ability: "wardBreaker", passive: true },
     { ability: "charge" },
     { ability: "bulwark" },
     { ability: "bulwarkReinforced" },
     { ability: "warpath", ult: true },
   ],
-  // Revive is the class's one active (the old Raise pair retired with the
-  // rework). Soul Harvest is passive and gets no slot, same rule as Snipe.
   necromancer: [
+    { ability: "soulHarvest", passive: true },
     { ability: "corpseExplosion" },
     { ability: "revive" },
     { ability: "exhume", ult: true },
@@ -2121,7 +2170,7 @@ function buildDock(cls: PlayerClass) {
     wrap.style.setProperty("--ax", Math.sin(rad).toFixed(4));
     wrap.style.setProperty("--ay", (-Math.cos(rad)).toFixed(4));
     const btn = document.createElement("button");
-    btn.className = slot.ult ? "dock-btn ult" : "dock-btn";
+    btn.className = `dock-btn${slot.ult ? " ult" : ""}${slot.passive ? " passive" : ""}`;
     btn.dataset.ability = slot.ability;
     const cost = DOCK_COST[slot.ability];
     btn.innerHTML =
@@ -2260,6 +2309,22 @@ function updateDock(active?: boolean) {
 
   for (const btn of dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn")) {
     const ability = btn.dataset.ability!;
+    if (btn.classList.contains("passive")) {
+      // Live-condition glow: Ward only while the bank is full; Rain of
+      // Arrows when one shield landing from firing; the always-on
+      // passives simply stay lit.
+      const streak = p.shieldStreak?.[mySide] ?? 0;
+      const on =
+        ability === "ward"
+          ? charges === CHARGE_CAP
+          : ability === "rainOfArrows"
+            ? streak >= 2
+            : true;
+      btn.classList.toggle("on", on);
+      btn.dataset.state = "passive";
+      btn.dataset.reason = "";
+      continue;
+    }
     const s = abilityState(ability, charges, reflipsUsed);
     // Off-turn the dock is glanceable, not judgmental: the whole row dims
     // (.off) and the per-button ready/noafford treatments stand down.
@@ -2419,9 +2484,15 @@ dockEl.addEventListener("click", (e) => {
     suppressDockClick = false;
     return; // that was a peek release, not a cast
   }
+  const ability = btn.dataset.ability!;
+  if (btn.classList.contains("passive")) {
+    // Passives never cast — a tap IS the explainer (works off-turn too).
+    hideAbilityTip();
+    showAbilityTip(ability, btn);
+    return;
+  }
   if (dockEl.classList.contains("off")) return; // glanceable, never tappable
   hideAbilityTip();
-  const ability = btn.dataset.ability!;
   if (btn.dataset.state !== "ready") {
     // Can't cast: headshake + the reason, so the gate teaches itself.
     flashDockButton(ability, "shake");
@@ -5038,6 +5109,7 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
       "<b>Corpse Explosion.</b> The grave's second rite: spend 2 souls to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
       "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
       "<b>Tap anything glowing.</b> Every mark on the board now explains itself — tap a thrall, a Ward, a Bulwark, a shield tile, or the grave itself for a card telling you exactly what it does and how long it lasts.",
+      "<b>Your whole kit, always in view.</b> Passives now sit around your avatar with the rest of your abilities — tap any gem to read it. The Mage's Ward gem glows only while the Ward is truly up; the Archer's Rain of Arrows lights when it's one shield landing from firing.",
       "<b>The dead feel no magic.</b> A thrall's blade ignores the Mage's Ward. Shields and Bulwarks still stop it.",
       "<b>Reinforced Bulwark holds the line.</b> Fixed: it no longer wears down from an archer merely LOOKING at it — only true blocks spend its saves.",
       "<b>Mirror duels read clean.</b> When both captains bring the same class, your rival's stones wear a cold slate sheen.",

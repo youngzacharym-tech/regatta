@@ -429,6 +429,20 @@
         box-shadow: 0 0 0 2px var(--wood-dark), 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 0 10px rgba(0, 0, 0, 0.55);
       }
       .dock-btn.ult .dock-gem { width: 64px; height: 64px; }
+      /* Passive slots — the always-there half of the kit (Kasen 2026-07-20:
+         the whole character sheet lives around the avatar). Smaller plaque,
+         darker glass, no pips; a tap opens the card instead of casting —
+         even off-turn. `.on` = the passive's live condition holds (Ward at
+         a full bank, Rain of Arrows one landing from firing; the always-on
+         passives stay lit). */
+      .dock-btn.passive .dock-gem {
+        width: 48px; height: 48px;
+        background: radial-gradient(circle at 38% 30%, #241c12, #100c07 78%) padding-box, var(--gold-rim) border-box;
+      }
+      .dock-btn.passive .dock-icon { width: 26px; height: 26px; opacity: 0.45; filter: drop-shadow(0 1px 2px #000); }
+      .dock-btn.passive.on .dock-icon { opacity: 1; filter: drop-shadow(0 0 6px var(--gem-glow)) drop-shadow(0 1px 2px #000); }
+      .dock-btn.passive.on .dock-gem { box-shadow: 0 0 0 2px var(--wood-dark), 0 0 10px 2px var(--gem-glow), inset 0 0 8px rgba(0, 0, 0, 0.6); }
+      .dock-btn.passive.ult .dock-gem { width: 52px; height: 52px; }
       /* Gem icons are the proc-icons.ts SVG set — subject strokes ride
          currentColor, gold accents stay frame-gold. */
       .dock-icon {
