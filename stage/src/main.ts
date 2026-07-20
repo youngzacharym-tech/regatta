@@ -1971,7 +1971,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces — ${CHARGED_SHOT_WARD_DISTANCE} if Warded, the one shot that can reach a Warded stone. Send it home and one charge comes back.`,
   },
   charge: {
-    name: "Charge",
+    name: "Cleave",
     cost: "1 charge",
     klass: "warrior",
     desc: "Turn this move into a sweep: one enemy stone between your start and landing is captured too, Warded or not.",
@@ -1980,7 +1980,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bulwark",
     cost: "1 charge",
     klass: "warrior",
-    desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate still punches through. Fades after a few turns, or the moment it saves the stone.",
+    desc: "Shield one of your own stones: it can't be captured or swept by a Cleave — though an ultimate still punches through. Fades after a few turns, or the moment it saves the stone.",
   },
   bulwarkReinforced: {
     name: "Reinforced Bulwark",
@@ -2022,7 +2022,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Ward Breaker",
     cost: "Passive · always on",
     klass: "warrior",
-    desc: "Wards mean nothing to you: landing on a Warded enemy breaks the Ward and captures it all the same, and your Charge sweep cuts through Warded stones too. Shield tiles and Bulwarks still hold.",
+    desc: "Wards mean nothing to you: landing on a Warded enemy breaks the Ward and captures it all the same, and your Cleave cuts through Warded stones too. Shield tiles and Bulwarks still hold.",
   },
   revive: {
     name: "Revive",
@@ -2153,7 +2153,7 @@ const DOCK_NAMES: Record<string, string> = {
   reflip: "Re-flip",
   push: "Push",
   chargedShot: "Charged Shot",
-  charge: "Charge",
+  charge: "Cleave",
   bulwark: "Bulwark",
   bulwarkReinforced: "Reinforced",
   blinkStrike: "Blink Strike",
@@ -2217,7 +2217,7 @@ const DOCK_RING_TINTS: Record<PlayerClass, number> = {
 const RIBBON_COPY: Record<ArmedKind, string> = {
   push: "tap a glowing enemy stone",
   chargedShot: "tap a glowing enemy stone",
-  charge: "tap one of your glowing stones to sweep",
+  charge: "tap one of your glowing stones to Cleave",
   bulwark: "tap one of your stones to shield",
   bulwarkReinforced: "tap one of your stones",
   blinkStrike: "tap an enemy to strike",
@@ -3565,7 +3565,7 @@ function announceFromState(msg: {
     // the queue an overwrite would mean "show both," so it's explicit now).
     if (k) {
       if (msg.lastRainOfArrows) showProc(k, "Rain of Arrows!", "rainOfArrows");
-      else if (msg.lastChargeSweep) showProc(k, "Charge!", "charge");
+      else if (msg.lastChargeSweep) showProc(k, "Cleave!", "charge");
       else if ("bonusCaptures" in m && m.bonusCaptures.length > 0) showProc(k, "Snipe!", "snipe");
       else if ("breaksWard" in m && m.breaksWard) showProc(k, "Ward Breaker!", "wardBreaker");
     }
@@ -3994,7 +3994,7 @@ function summarizeEvent(ev: StateEvent): string {
     return ev.lastRainOfArrows.targetTokenId === null ? "Rain of Arrows — no target" : "Rain of Arrows";
   if (ev.lastRevive) return `Revive — thrall rises on ${tileDisplay(ev.lastRevive.tile)}`;
   if (ev.lastCorpseExplosion) return `Corpse Explosion on ${tileDisplay(ev.lastCorpseExplosion.tile)}`;
-  if (ev.lastChargeSweep) return `Charge — sweep of ${ev.lastChargeSweep.sweptTokenIds.length}`;
+  if (ev.lastChargeSweep) return `Cleave — swept ${ev.lastChargeSweep.sweptTokenIds.length}`;
   if (ev.lastPush) return "Push";
   if (ev.lastChargedShot) return "Charged Shot";
   if (ev.lastBulwark) return ev.lastBulwark.reinforced ? "Reinforced Bulwark cast" : "Bulwark cast";
@@ -4067,8 +4067,8 @@ function describeEffects(i: number): string[] {
   if (ev.lastChargeSweep)
     fx.push(
       ev.lastChargeSweep.sweptTokenIds.length > 0
-        ? `<b>Charge sweep</b>: swept ${ev.lastChargeSweep.sweptTokenIds.map((id) => ownedLabel(id)).join(", ")}`
-        : `<b>Charge</b>: sweep took no extra stones`,
+        ? `<b>Cleave</b>: swept ${ev.lastChargeSweep.sweptTokenIds.map((id) => ownedLabel(id)).join(", ")}`
+        : `<b>Cleave</b>: the sweep took no extra stones`,
     );
   if (ev.lastRainOfArrows)
     fx.push(
@@ -4981,7 +4981,7 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
        stone and the Ward breaks — captured all the same.</li>
-       <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
+       <li><b>Cleave</b> (active, 1 charge): make your move a sweep — one
        enemy stone in shared water between where you started and where you
        land is captured too, Warded or not.</li>
        <li>The Warrior is the one class no Ward can stop cold — everyone
@@ -4990,7 +4990,7 @@ const GUIDE_SPREADS: [string, string][] = [
     `<div class="runner">The Warrior &middot; continued</div>
      <ul>
        <li><b>Bulwark</b> (active, 1 charge): raise a shield over one of
-       YOUR OWN stones — it cannot be captured or swept by Charge, and a
+       YOUR OWN stones — it cannot be captured or swept by a Cleave, and a
        Push can only shove it, never send it home. An enemy ultimate still
        punches through. It fades after a few of your turns unused, or the
        instant it saves the stone.</li>
@@ -5209,6 +5209,7 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
       "<b>Corpse Explosion.</b> The grave's second rite: spend 2 souls to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
       "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
       "<b>Tap anything glowing.</b> Every mark on the board now explains itself — tap a thrall, a Ward, a Bulwark, a shield tile, or the grave itself for a card telling you exactly what it does and how long it lasts.",
+      "<b>The Warrior's Charge is now CLEAVE.</b> Same sweep, honest name: no more spending charges to cast Charge.",
       "<b>A claimed stone tells you so.</b> When the enemy Necromancer holds your fallen stone's soul, the piece waiting in your hand wears their cold shackle-ring — tap it to see why it can't be played and what breaks the claim.",
       "<b>The graveyard reads at a glance.</b> Corpses are little gravestones now (no more X), and possession runs on temperature: YOUR thrall wears a warm red shackle-ring with a floating turns-left counter, the enemy's glows cold blue — even in a Necromancer mirror you always know whose dead are whose.",
       "<b>Your whole kit, always in view.</b> Passives now sit around your avatar with the rest of your abilities — tap any gem to read it. The Mage's Ward gem glows only while the Ward is truly up; the Archer's Rain of Arrows lights when it's one shield landing from firing.",
