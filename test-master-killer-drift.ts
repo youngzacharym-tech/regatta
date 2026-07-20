@@ -52,6 +52,10 @@ const NEUTRAL_POWER: PowerState = {
   // (reinforced-Bulwark bookkeeping).
   bulwarked: {},
   bulwarkSaves: {},
+  // Necromancer-only state, inert in a Warrior-vs-Warrior fixture: no
+  // corpse to revive, no thrall for effectiveOwner to reassign.
+  corpse: { p1: null, p2: null },
+  thrall: { p1: null, p2: null },
 };
 
 function sharedFieldsMatch(a: Move, b: PowerMove): boolean {

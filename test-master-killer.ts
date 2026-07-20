@@ -17,13 +17,14 @@ import {
   CHARGE_SWEEP_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
-  DARK_RESURRECTION_POSITION,
   EXHUME_RETURN_POSITION,
+  NECRO_CHARGE_CAP,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
-  RAISE_POSITION,
   REFLIPS_PER_TURN,
+  REVIVE_COST,
+  THRALL_TURNS,
   ULTIMATE_STREAK,
   applyBlinkStrike,
   applyBulwark,
@@ -32,12 +33,13 @@ import {
   applyExhume,
   applyPowerMove,
   applyPush,
-  applyRaiseDead,
   applyReflip,
+  applyRevive,
   applyWarpath,
   breakShieldStreak,
   canReflipAgain,
   consumeBulwarkBlocks,
+  effectiveOwner,
   getBlinkStrikeTargets,
   getBulwarkBlockedIds,
   getBulwarkTargets,
@@ -46,14 +48,16 @@ import {
   getLegalPowerMoves,
   getPushTargets,
   getRainOfArrowsTargets,
-  getRaiseTargets,
+  getReviveSpawnTile,
   getWarpathTargets,
+  grantZeroFlipCharge,
   initialPowerState,
   isWarded,
   resetTurnFlags,
   tickBulwarkExpiry,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
+  tickThrallForNewTurn,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -1121,23 +1125,23 @@ function check(name: string, cond: boolean, detail?: string) {
       getBulwarkBlockedIds(sSweepOnly, pwSweepWithCharge, 4).includes(4),
     );
 
-    // Send-home-Push-only threat: same affordability gating.
+    // Send-home Push immunity is a STATIC property, never a save-consuming
+    // "block" (2026-07-20, Kasen's field report — the old reveal-time
+    // accounting let a full-bank archer melt a Reinforced Bulwark by
+    // standing in range; see getBulwarkBlockedIds's doc). The target simply
+    // never enters the pool, and no save is spent at any charge level.
     const sPushOnly = state("p1", { 4: 6, 5: 6 - PUSH_DISTANCE }); // p2 token4 Bulwarked; own-token collision at the landing tile
-    const pwPushNoCharge: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: 0 }),
-      bulwarked: { 4: 3 },
-    };
-    check(
-      "Bulwark: a send-home-Push-only threat is NOT 'blocked' when the Archer has 0 charges",
-      !getBulwarkBlockedIds(sPushOnly, pwPushNoCharge, 1).includes(4),
-    );
     const pwPushWithCharge: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
       bulwarked: { 4: 3 },
     };
     check(
-      "Bulwark: a send-home-Push threat DOES count as blocked once the Archer can afford it",
-      getBulwarkBlockedIds(sPushOnly, pwPushWithCharge, 1).includes(4),
+      "Bulwark: send-home Push immunity keeps the target out of the pool",
+      !getPushTargets(sPushOnly, pwPushWithCharge, "p1").includes(4),
+    );
+    check(
+      "Bulwark: send-home Push immunity is static — never a save-consuming block",
+      !getBulwarkBlockedIds(sPushOnly, pwPushWithCharge, 1).includes(4),
     );
   }
 }
@@ -1606,27 +1610,41 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- getBulwarkBlockedIds also recognizes a Charged-Shot-only threat,
-  //     mirroring the Push branch exactly (same affordability gating, this
-  //     ability's own charges === CHARGE_CAP instead of >= 1) ---------------
+  // --- Charged Shot's send-home immunity: static, never save-consuming
+  //     (2026-07-20, Kasen's field report — the old reveal-time accounting
+  //     melted a Reinforced Bulwark one save per flip against a camped
+  //     full-bank archer, no shot ever fired; see getBulwarkBlockedIds) ----
   {
     const posHome = 9;
     const sChargedShotOnly = state("p1", { 4: posHome, 5: posHome - CHARGED_SHOT_DISTANCE });
-    const pwNoCap: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP - 1 }),
-      bulwarked: { 4: 3 },
-    };
-    check(
-      "Bulwark: a send-home-Charged-Shot-only threat is NOT 'blocked' below the full charge cap",
-      !getBulwarkBlockedIds(sChargedShotOnly, pwNoCap, 1).includes(4),
-    );
     const pwAtCap: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
       bulwarked: { 4: 3 },
+      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
     };
     check(
-      "Bulwark: a send-home-Charged-Shot threat DOES count as blocked once the Archer is at the full charge cap",
-      getBulwarkBlockedIds(sChargedShotOnly, pwAtCap, 1).includes(4),
+      "Bulwark: a would-send-home Charged Shot keeps the target out of the pool",
+      !getChargedShotTargets(sChargedShotOnly, pwAtCap, "p1").includes(4),
+    );
+    check(
+      "Bulwark: Charged Shot send-home immunity is static — never a save-consuming block",
+      !getBulwarkBlockedIds(sChargedShotOnly, pwAtCap, 1).includes(4),
+    );
+    // The melt regression itself: three archer flips at full bank, no shot
+    // fired — the Reinforced Bulwark must not lose a single save.
+    let pw = pwAtCap;
+    for (let i = 0; i < 3; i++) pw = tickBulwarkForReflip(sChargedShotOnly, pw, 1).power;
+    check(
+      "Reinforced Bulwark: does NOT melt from a camped full-bank archer",
+      pw.bulwarked[4] !== undefined && pw.bulwarkSaves[4] === BULWARK_REINFORCED_SAVES,
+      JSON.stringify({ bulwarked: pw.bulwarked, saves: pw.bulwarkSaves }),
+    );
+    // A SOFT shove stays available: same shot with a clear landing is in
+    // the pool (the tool that still moves a reinforced stone).
+    const sSoft = state("p1", { 4: posHome });
+    check(
+      "Bulwark: a soft Charged Shot shove is still offered against a reinforced stone",
+      getChargedShotTargets(sSoft, pwAtCap, "p1").includes(4),
     );
   }
 
@@ -1654,168 +1672,325 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Necromancer: Soul Harvest / Raise Dead / Dark Resurrection / Exhume
+// Necromancer (Revive rework): Soul Harvest bounty / corpse / Revive /
+// thrall possession / Exhume
 // ---------------------------------------------------------------------------
 {
-  // --- Soul Harvest: a landing capture pays the victim a soul on top of
-  //     the capturer's normal charge -------------------------------------
+  // --- Soul Harvest: a qualifying kill pays the BOUNTY and leaves a corpse -
   {
     const s = state("p1", { 0: 6, 4: 8 });
-    const pw = power({ p1: "archer", p2: "necromancer" });
+    const pw = power({ p1: "necromancer", p2: "archer" });
     const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
-    check("Soul Harvest: landing-capture setup is legal", !!m && m.captures.includes(4), JSON.stringify(m));
+    check("Bounty: landing-capture setup is legal", !!m && m.captures.includes(4), JSON.stringify(m));
     if (m) {
       const r = applyPowerMove(s, pw, m, "p1");
-      check("Soul Harvest: capture grants the necromancer victim a charge", r.power.charges.p2 === 1, `p2=${r.power.charges.p2}`);
-      check("Soul Harvest: capturer still earns their normal capture charge", r.power.charges.p1 === 1, `p1=${r.power.charges.p1}`);
+      check("Bounty: a kill fills the whole soul bank", r.power.charges.p1 === NECRO_CHARGE_CAP, `p1=${r.power.charges.p1}`);
+      check("Bounty: corpse marker set on the death tile", r.power.corpse.p1?.tokenId === 4 && r.power.corpse.p1?.tile === 8, JSON.stringify(r.power.corpse.p1));
+      check("Bounty: the victim banks nothing (death-income is gone)", r.power.charges.p2 === 0, `p2=${r.power.charges.p2}`);
+      check("Bounty: the killed token goes home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
     }
 
-    // Control: a non-necromancer victim banks nothing — the existing
-    // economy is byte-identical for the original three classes.
+    // Clamp at the soul cap, and the freshest kill overwrites the corpse.
+    const pwClamp: PowerState = { ...pw, charges: { p1: 2, p2: 0 }, corpse: { p1: { tokenId: 5, tile: 9 }, p2: null } };
+    if (m) {
+      const r = applyPowerMove(s, pwClamp, m, "p1");
+      check("Bounty: clamped at NECRO_CHARGE_CAP", r.power.charges.p1 === NECRO_CHARGE_CAP, `p1=${r.power.charges.p1}`);
+      check("Bounty: a newer kill overwrites the corpse", r.power.corpse.p1?.tokenId === 4 && r.power.corpse.p1?.tile === 8, JSON.stringify(r.power.corpse.p1));
+    }
+
+    // Control: a non-necromancer capturer keeps the classic 1-charge economy
+    // and never tracks a corpse.
     const pwCtl = power({ p1: "archer", p2: "warrior" });
     const mCtl = getLegalPowerMoves(s, pwCtl, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
     if (mCtl) {
       const r = applyPowerMove(s, pwCtl, mCtl, "p1");
-      check("Soul Harvest: non-necromancer victim banks nothing", r.power.charges.p2 === 0, `p2=${r.power.charges.p2}`);
+      check("Bounty: non-necromancer capturer earns the classic single charge", r.power.charges.p1 === 1, `p1=${r.power.charges.p1}`);
+      check("Bounty: non-necromancer capturer tracks no corpse", r.power.corpse.p1 === null);
     }
   }
 
-  // --- Soul Harvest pays per token (landing capture + Snipe = two souls),
-  //     and addCharge's cap clamps it ------------------------------------
+  // --- Soul gem: generic income can never fill the third pip --------------
   {
-    const s = state("p1", { 0: 6, 4: 8, 5: 9 });
-    const pw = power({ p1: "archer", p2: "necromancer" });
-    const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
-    check("Soul Harvest: snipe setup takes both tokens", !!m && m.captures.includes(4) && m.bonusCaptures.includes(5), JSON.stringify(m));
+    const pwTwo = power({ p1: "necromancer" }, { p1: 2 });
+    check("Soul gem: a zero-flip charge stops at two", grantZeroFlipCharge(pwTwo, "p1").charges.p1 === 2);
+
+    // Non-capturing shield landing at two charges: still two.
+    const s = state("p1", { 0: 4 });
+    const m = getLegalPowerMoves(s, pwTwo, 3).find((mv) => mv.tokenId === 0 && mv.to === 7);
+    check("Soul gem: shield-landing setup is legal", !!m && m.landsOnShield, JSON.stringify(m));
+    if (m) {
+      const r = applyPowerMove(s, pwTwo, m, "p1");
+      check("Soul gem: a shield landing cannot fill the third pip", r.power.charges.p1 === 2, `p1=${r.power.charges.p1}`);
+    }
+    // Below the generic cap the same income still flows normally.
+    const pwOne = power({ p1: "necromancer" }, { p1: 1 });
+    if (m) {
+      const r = applyPowerMove(s, pwOne, m, "p1");
+      check("Soul gem: generic income below two still flows", r.power.charges.p1 === 2, `p1=${r.power.charges.p1}`);
+    }
+  }
+
+  // --- Mirror reclaim: killing YOUR OWN possessed body is not a soul ------
+  {
+    // p2 (necromancer) possesses p1's token 0; p1 (also necromancer)
+    // captures it back. Effective ownership makes the capture legal; real
+    // ownership makes it a reclaim: classic charge, no corpse, no bounty.
+    const s = state("p1", { 0: 8, 1: 6 });
+    const pw: PowerState = {
+      ...power({ p1: "necromancer", p2: "necromancer" }),
+      thrall: { p1: null, p2: { tokenId: 0, turnsLeft: 2 } },
+    };
+    check("Reclaim: possessed own token reads as the enemy's", effectiveOwner(pw, s.tokens.find((t) => t.id === 0)!) === "p2");
+    const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 1 && mv.to === 8);
+    check("Reclaim: capturing your own possessed body is legal", !!m && m.captures.includes(0), JSON.stringify(m));
     if (m) {
       const r = applyPowerMove(s, pw, m, "p1");
-      check("Soul Harvest: two deaths = two souls", r.power.charges.p2 === 2, `p2=${r.power.charges.p2}`);
-      const pwNearCap = power({ p1: "archer", p2: "necromancer" }, { p2: CHARGE_CAP - 1 });
-      const r2 = applyPowerMove(s, pwNearCap, m, "p1");
-      check("Soul Harvest: clamped at CHARGE_CAP", r2.power.charges.p2 === CHARGE_CAP, `p2=${r2.power.charges.p2}`);
+      check("Reclaim: pays the classic single charge, not the bounty", r.power.charges.p1 === 1, `p1=${r.power.charges.p1}`);
+      check("Reclaim: leaves no corpse", r.power.corpse.p1 === null);
+      check("Reclaim: the enemy's thrall entry falls", r.power.thrall.p2 === null);
+      check("Reclaim: the body returns to ITS OWNER'S reserve", r.state.tokens.find((t) => t.id === 0)!.position === -1);
     }
   }
 
-  // --- Soul Harvest on Push: send-home is a death, a partial shove isn't -
+  // --- Revive legality: getReviveSpawnTile's full matrix ------------------
   {
-    // Target on 4 with its own token on 3: the 1-tile push collides and
-    // sends it home. Pusher's refund and victim's soul both land.
-    const s = state("p1", { 0: 6, 4: 4, 5: 3 });
-    const pw = power({ p1: "archer", p2: "necromancer" }, { p1: 1 });
-    check("Soul Harvest: push setup targets the necromancer token", getPushTargets(s, pw, "p1").includes(4));
-    const r = applyPush(s, pw, 4, "p1");
-    check("Soul Harvest: push send-home is a death", r.power.charges.p2 === 1, `p2=${r.power.charges.p2}`);
-    check("Soul Harvest: pusher's send-home refund unaffected", r.power.charges.p1 === 1, `p1=${r.power.charges.p1}`);
-    check("Soul Harvest: push actually sent the token home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    const s = state("p1", { 0: 5 });
+    const ready: PowerState = {
+      ...power({ p1: "necromancer" }, { p1: REVIVE_COST }),
+      corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+    };
+    check("Revive: castable with corpse + full soul bank", getReviveSpawnTile(s, ready, "p1") === 8);
+    check("Revive: refused below the full soul bank", getReviveSpawnTile(s, { ...ready, charges: { p1: 2, p2: 0 } }, "p1") === null);
+    check("Revive: refused with no corpse", getReviveSpawnTile(s, { ...ready, corpse: { p1: null, p2: null } }, "p1") === null);
+    check(
+      "Revive: refused while a thrall is already up",
+      getReviveSpawnTile(s, { ...ready, thrall: { p1: { tokenId: 5, turnsLeft: 1 }, p2: null } }, "p1") === null,
+    );
+    // The denial counterplay: the victim re-entered the corpse token, the
+    // soul is reclaimed — the stale marker dead-letters.
+    const sDenied = state("p1", { 0: 5, 4: 1 });
+    check("Revive: refused once the corpse token re-enters", getReviveSpawnTile(sDenied, ready, "p1") === null);
 
-    const s2 = state("p1", { 0: 9, 4: 6 });
-    const pw2 = power({ p1: "archer", p2: "necromancer" }, { p1: 1 });
-    const r2 = applyPush(s2, pw2, 4, "p1");
-    check("Soul Harvest: a partial shove is not a death", r2.power.charges.p2 === 0, `p2=${r2.power.charges.p2}`);
+    // Spawn walk: corpse tile occupied -> nearest free tile BEHIND it.
+    const sBehind = state("p1", { 0: 8, 5: 7 });
+    check("Revive: spawn walks backward past occupied tiles", getReviveSpawnTile(sBehind, ready, "p1") === 6, `got ${getReviveSpawnTile(sBehind, ready, "p1")}`);
+    // Fully packed behind: falls forward. 7 tokens cover 4-10; 11 is free.
+    const sPacked = state("p1", { 0: 4, 1: 5, 2: 6, 3: 7, 5: 8, 6: 9, 7: 10 });
+    check("Revive: spawn falls forward when everything behind is packed", getReviveSpawnTile(sPacked, ready, "p1") === 11, `got ${getReviveSpawnTile(sPacked, ready, "p1")}`);
   }
 
-  // --- Soul Harvest on Charged Shot send-home ---------------------------
+  // --- Revive apply: non-turn-ending placement, possession begins ---------
   {
-    // Target on 5; its own token at 5 - CHARGED_SHOT_DISTANCE collides.
-    const s = state("p1", { 0: 9, 4: 5, 5: 5 - CHARGED_SHOT_DISTANCE });
-    const pw = power({ p1: "archer", p2: "necromancer" }, { p1: CHARGE_CAP });
-    check("Soul Harvest: charged-shot setup targets the token", getChargedShotTargets(s, pw, "p1").includes(4));
-    const r = applyChargedShot(s, pw, 4, "p1");
-    check("Soul Harvest: charged-shot send-home is a death", r.power.charges.p2 === 1, `p2=${r.power.charges.p2}`);
-    check("Soul Harvest: charged shot sent the token home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
-  }
-
-  // --- Soul Harvest on the ultimates ------------------------------------
-  {
-    const s = state("p1", { 0: 5, 4: 8 });
-    const pw: PowerState = { ...power({ p1: "mage", p2: "necromancer" }), ultimateReady: { p1: true, p2: false } };
-    const r = applyBlinkStrike(s, pw, 4, "p1");
-    check("Soul Harvest: Blink Strike death pays a soul", r.power.charges.p2 === 1, `p2=${r.power.charges.p2}`);
-
-    // Warpath: primary + swept = two souls.
-    const s2 = state("p1", { 0: 4, 4: 9, 5: 6 });
-    const pw2: PowerState = { ...power({ p1: "warrior", p2: "necromancer" }), ultimateReady: { p1: true, p2: false } };
-    const r2 = applyWarpath(s2, pw2, 4, "p1");
-    check("Soul Harvest: Warpath swept the mid-lane token", r2.sweptTokenIds.includes(5), JSON.stringify(r2.sweptTokenIds));
-    check("Soul Harvest: Warpath double = two souls", r2.power.charges.p2 === CHARGE_CAP, `p2=${r2.power.charges.p2}`);
-  }
-
-  // --- Necromancer's own move generation is vanilla (no Snipe, no Charge) -
-  {
-    const s = state("p1", { 0: 6, 4: 9 });
-    const pw = power({ p1: "necromancer" });
-    const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
-    check("Necromancer: vanilla move generation", !!m && m.bonusCaptures.length === 0 && !m.chargeAvailable, JSON.stringify(m));
-  }
-
-  // --- Raise Dead: target pool ------------------------------------------
-  {
-    const s = state("p1", {});
-    const pw = power({ p1: "necromancer" }, { p1: 1 });
-    check("Raise: every reserve token is a target", getRaiseTargets(s, pw, "p1").length === 4);
-    check("Raise: dark pool matches while both tiles are free", getRaiseTargets(s, pw, "p1", true).length === 4);
-
-    const s2 = state("p1", { 0: RAISE_POSITION });
-    check("Raise: own token on the entry tile blocks a plain raise", getRaiseTargets(s2, pw, "p1").length === 0);
-    check("Raise: dark raise unaffected by entry-tile occupancy", getRaiseTargets(s2, pw, "p1", true).length === 3);
-
-    // The enemy's "position 0" is a different physical square (private
-    // lane) — it must never block, same rule Snipe's isContested guard
-    // regression-tests from the other direction.
-    const s3 = state("p1", { 4: RAISE_POSITION });
-    check("Raise: enemy private-lane index does not block", getRaiseTargets(s3, pw, "p1").length === 4);
-  }
-
-  // --- Raise Dead: apply — non-turn-ending, placement-not-landing --------
-  {
-    const s: GameState = { ...state("p1", {}), lastFlip: 3 };
+    const s: GameState = { ...state("p1", { 0: 5 }), lastFlip: 3 };
     const pw: PowerState = {
-      ...power({ p1: "necromancer" }, { p1: 1 }),
+      ...power({ p1: "necromancer" }, { p1: REVIVE_COST }),
       shieldStreak: { p1: 1, p2: 0 },
-      reflipsUsedThisTurn: 1,
+      corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
     };
-    const r = applyRaiseDead(s, pw, 0, "p1");
-    check("Raise: token placed on the entry tile", r.state.tokens.find((t) => t.id === 0)!.position === RAISE_POSITION);
-    check("Raise: costs one charge", r.power.charges.p1 === 0, `p1=${r.power.charges.p1}`);
-    check("Raise: does not end the turn", r.state.currentPlayer === "p1");
-    check("Raise: the same flip carries on", r.state.lastFlip === 3);
-    check("Raise: shield streak untouched", r.power.shieldStreak.p1 === 1);
-    check("Raise: per-turn flags untouched (still the same turn)", r.power.reflipsUsedThisTurn === 1);
-    check("Raise: second plain raise blocked by the first's occupancy", getRaiseTargets(r.state, r.power, "p1").length === 0);
+    const r = applyRevive(s, pw, "p1");
+    check("Revive: the corpse rises where it died", r.state.tokens.find((t) => t.id === 4)!.position === 8);
+    check("Revive: reports what rose and where", r.raisedTokenId === 4 && r.raisedTo === 8);
+    check("Revive: spends the whole soul bank", r.power.charges.p1 === 0, `p1=${r.power.charges.p1}`);
+    check("Revive: consumes the corpse", r.power.corpse.p1 === null);
+    check("Revive: possession begins at full duration", r.power.thrall.p1?.tokenId === 4 && r.power.thrall.p1?.turnsLeft === THRALL_TURNS);
+    check("Revive: does not end the turn", r.state.currentPlayer === "p1");
+    check("Revive: the same flip carries on", r.state.lastFlip === 3);
+    check("Revive: a placement is not a landing — streak untouched", r.power.shieldStreak.p1 === 1);
+  }
 
-    const pwDark = power({ p1: "necromancer" }, { p1: CHARGE_CAP });
-    const rd = applyRaiseDead(s, pwDark, 1, "p1", true);
-    check("Dark Resurrection: placed at the contested-row doorstep", rd.state.tokens.find((t) => t.id === 1)!.position === DARK_RESURRECTION_POSITION);
-    check("Dark Resurrection: spends the full bank", rd.power.charges.p1 === 0, `p1=${rd.power.charges.p1}`);
-
-    // Kasen's 2026-07-19 rule: the dark cast lands a stone on a shield
-    // tile, so it counts one link in the shield streak — and completes it.
-    check("Dark Resurrection: advances the shield streak", rd.power.shieldStreak.p1 === 1, `streak=${rd.power.shieldStreak.p1}`);
-    check("Dark Resurrection: no ultimate off a short streak", rd.power.ultimateReady.p1 === false);
-
-    const pwTwo: PowerState = {
-      ...power({ p1: "necromancer" }, { p1: CHARGE_CAP }),
-      shieldStreak: { p1: ULTIMATE_STREAK - 1, p2: 0 },
+  // --- Soul Claim: a funded corpse locks its body out of re-entry --------
+  {
+    // p2's token 4 is p1's marked corpse with the bank full: p2 cannot
+    // re-enter it, but their OTHER reserve tokens enter freely.
+    const claimed: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }, { p1: REVIVE_COST }),
+      corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
     };
-    const rdUlt = applyRaiseDead(s, pwTwo, 1, "p1", true);
-    check("Dark Resurrection: completes the streak and banks the ultimate", rdUlt.power.ultimateReady.p1 === true);
-    check("Dark Resurrection: streak consumed on completion", rdUlt.power.shieldStreak.p1 === 0, `streak=${rdUlt.power.shieldStreak.p1}`);
-
-    const pwBanked: PowerState = {
-      ...pwTwo,
-      ultimateReady: { p1: true, p2: false },
+    const s = state("p2", { 0: 9 });
+    const entries = getLegalPowerMoves(s, claimed, 2);
+    check("Soul Claim: the marked body cannot rise on its own", entries.every((mv) => mv.tokenId !== 4));
+    check("Soul Claim: unmarked reserve tokens still enter", entries.some((mv) => mv.tokenId === 5 && mv.from === -1));
+    // The claim holds even while a thrall occupies the slot (the chain's
+    // next corpse stays claimed)...
+    const claimedMidChain: PowerState = {
+      ...claimed,
+      thrall: { p1: { tokenId: 6, turnsLeft: 1 }, p2: null },
     };
-    const rdAgain = applyRaiseDead(s, pwBanked, 1, "p1", true);
-    check("Dark Resurrection: completing at banked ult is consumed either way", rdAgain.power.ultimateReady.p1 === true && rdAgain.power.shieldStreak.p1 === 0);
+    const sMid = state("p2", { 0: 9, 6: 5 });
+    check(
+      "Soul Claim: holds while a thrall occupies the slot",
+      getLegalPowerMoves(sMid, claimedMidChain, 2).every((mv) => mv.tokenId !== 4),
+    );
+    // ...and lapses the moment the bank can't fund the cast.
+    const lapsed: PowerState = { ...claimed, charges: { p1: REVIVE_COST - 1, p2: 0 } };
+    check(
+      "Soul Claim: lapses when the bank can't fund the cast",
+      getLegalPowerMoves(s, lapsed, 2).some((mv) => mv.tokenId === 4 && mv.from === -1),
+    );
+    // A non-necromancer foe never locks anything.
+    const wrongClass: PowerState = { ...claimed, classes: { p1: "warrior", p2: "archer" } };
+    check(
+      "Soul Claim: only a necromancer's mark locks",
+      getLegalPowerMoves(s, wrongClass, 2).some((mv) => mv.tokenId === 4 && mv.from === -1),
+    );
+  }
 
-    // The plain cast targets RAISE_POSITION — not a shield tile — and must
-    // stay streak-neutral even one link short of the ultimate.
-    const pwPlainTwo: PowerState = {
-      ...power({ p1: "necromancer" }, { p1: 1 }),
-      shieldStreak: { p1: ULTIMATE_STREAK - 1, p2: 0 },
+  // --- The dead feel no magic: a thrall's capture pierces Ward -----------
+  {
+    // p2 is a mage at full cap; their most-advanced FREE token is warded.
+    // p1's thrall stands one tile behind it: the thrall's capture is legal
+    // and flagged as a ward break; p1's own (living) token is still blocked.
+    const pw: PowerState = {
+      ...power({ p1: "necromancer", p2: "mage" }, { p2: CHARGE_CAP }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
     };
-    const rPlain = applyRaiseDead(s, pwPlainTwo, 1, "p1");
-    check("Raise: plain cast never advances the streak", rPlain.power.shieldStreak.p1 === ULTIMATE_STREAK - 1 && rPlain.power.ultimateReady.p1 === false);
+    const s = state("p1", { 0: 5, 4: 7, 5: 9 });
+    check("Ward pierce: the target is genuinely warded", isWarded(s, pw, s.tokens.find((t) => t.id === 5)!));
+    const pierce = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 9);
+    check("Ward pierce: the thrall's capture is legal", !!pierce && pierce.captures.includes(5), JSON.stringify(pierce));
+    check("Ward pierce: announced as a ward break", !!pierce && pierce.breaksWard === true);
+    const living = getLegalPowerMoves(s, pw, 4).find((mv) => mv.tokenId === 0 && mv.to === 9);
+    check("Ward pierce: the necromancer's LIVING stones stay blocked", living === undefined, JSON.stringify(living));
+  }
+
+  // --- Thrall movement: the necromancer's fifth stone, chained to the row -
+  {
+    const pw: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const s = state("p1", { 0: 4, 4: 8, 5: 10 });
+    const moves = getLegalPowerMoves(s, pw, 2);
+    const tm = moves.find((mv) => mv.tokenId === 4);
+    check("Thrall: moves on the necromancer's flip", !!tm && tm.from === 8 && tm.to === 10, JSON.stringify(tm));
+    check("Thrall: captures like any stone", !!tm && tm.captures.includes(5), JSON.stringify(tm));
+    if (tm) {
+      const r = applyPowerMove(s, pw, tm, "p1");
+      check("Thrall: its kill pays the full bounty (chain necromancy)", r.power.charges.p1 === NECRO_CHARGE_CAP, `p1=${r.power.charges.p1}`);
+      check("Thrall: its kill leaves the next corpse", r.power.corpse.p1?.tokenId === 5 && r.power.corpse.p1?.tile === 10, JSON.stringify(r.power.corpse.p1));
+      check("Thrall: moving doesn't cost duration", r.power.thrall.p1?.turnsLeft === 2);
+    }
+    // Row-chained: any move past tile 11 simply doesn't exist for it.
+    check("Thrall: cannot pass tile 11", getLegalPowerMoves(s, pw, 4).every((mv) => mv.tokenId !== 4));
+    const sEdge = state("p1", { 0: 4, 4: 10 });
+    check("Thrall: tile 11 itself is reachable", getLegalPowerMoves(sEdge, pw, 1).some((mv) => mv.tokenId === 4 && mv.to === 11));
+    check("Thrall: never offered an escape", getLegalPowerMoves(sEdge, pw, 4).every((mv) => mv.tokenId !== 4));
+
+    // A thrall shield landing is a real landing: extra turn, streak link,
+    // generic charge (still soul-gem-capped at two).
+    const sShield = state("p1", { 0: 4, 4: 5 });
+    const sm = getLegalPowerMoves(sShield, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 7);
+    check("Thrall: shield landing offered", !!sm && sm.landsOnShield, JSON.stringify(sm));
+    if (sm) {
+      const r = applyPowerMove(sShield, pw, sm, "p1");
+      check("Thrall: shield landing grants the extra turn", r.state.extraTurn && r.state.currentPlayer === "p1");
+      check("Thrall: shield landing advances the streak", r.power.shieldStreak.p1 === 1);
+      check("Thrall: shield landing banks a generic charge", r.power.charges.p1 === 1, `p1=${r.power.charges.p1}`);
+    }
+  }
+
+  // --- The victim's side: can't command it, CAN cut it down ---------------
+  {
+    const pw: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const s = state("p2", { 0: 4, 4: 8, 5: 6, 6: -1 });
+    const moves = getLegalPowerMoves(s, pw, 2);
+    check("Victim: cannot move their possessed stone", moves.every((mv) => mv.tokenId !== 4));
+    check("Victim: other reserve tokens still enter normally", moves.some((mv) => mv.tokenId === 6 && mv.from === -1));
+    const mercy = moves.find((mv) => mv.tokenId === 5 && mv.to === 8);
+    check("Victim: mercy kill on their own possessed stone is legal", !!mercy && mercy.captures.includes(4), JSON.stringify(mercy));
+    if (mercy) {
+      const r = applyPowerMove(s, pw, mercy, "p2");
+      check("Victim: mercy kill earns the standard capture charge", r.power.charges.p2 === 1, `p2=${r.power.charges.p2}`);
+      check("Victim: the possession entry falls with the thrall", r.power.thrall.p1 === null);
+      check("Victim: the body comes home to their reserve", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    }
+  }
+
+  // --- Protections vs a thrall: Ward and Bulwark refuse, Push crumbles ----
+  {
+    // Ward: the victim mage's possessed token is never warded, and doesn't
+    // consume their most-advanced slot — their best FREE token wards.
+    const pwWard: PowerState = {
+      ...power({ p1: "necromancer", p2: "mage" }, { p2: CHARGE_CAP }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const sWard = state("p1", { 4: 9, 5: 6 });
+    check("Ward: never guards a possessed token", !isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!));
+    check("Ward: falls to the best FREE token instead", isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 5)!));
+
+    // Bulwark: the victim warrior can't shield the enemy's weapon.
+    const pwBul: PowerState = {
+      ...power({ p1: "necromancer", p2: "warrior" }, { p2: 1 }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const sBul = state("p2", { 4: 9, 5: 6 });
+    const bulTargets = getBulwarkTargets(sBul, pwBul, "p2");
+    check("Bulwark: a possessed token is not a valid target", !bulTargets.includes(4) && bulTargets.includes(5));
+
+    // Push: the victim archer CAN push their own possessed stone — and a
+    // knockback below tile 4 crumbles it (the row is holy ground; the
+    // victim's private lane doubly so).
+    const pwPush: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }, { p2: 1 }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const sPush = state("p2", { 4: 4, 0: 9 });
+    check("Push: the victim's own possessed stone is a target", getPushTargets(sPush, pwPush, "p2").includes(4));
+    const rPush = applyPush(sPush, pwPush, 4, "p2");
+    check("Push: a below-row knockback crumbles the thrall", rPush.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Push: the crumble clears the possession", rPush.power.thrall.p1 === null);
+    check("Push: the crumble is a send-home — the pusher's refund applies", rPush.power.charges.p2 === 1, `p2=${rPush.power.charges.p2}`);
+
+    // Snipe: a thrall one tile past the landing is a legitimate victim.
+    const pwSnipe: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const sSnipe = state("p2", { 5: 6, 4: 9 });
+    const snipeMove = getLegalPowerMoves(sSnipe, pwSnipe, 2).find((mv) => mv.tokenId === 5 && mv.to === 8);
+    check("Snipe: fires on the victim's own possessed stone", !!snipeMove && snipeMove.bonusCaptures.includes(4), JSON.stringify(snipeMove));
+    if (snipeMove) {
+      const r = applyPowerMove(sSnipe, pwSnipe, snipeMove, "p2");
+      check("Snipe: the sniped thrall's possession falls", r.power.thrall.p1 === null);
+    }
+  }
+
+  // --- Thrall lifecycle: the tick, the crumble, the fairness terminus -----
+  {
+    const pw: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const s = state("p1", { 4: 8 });
+    const t1 = tickThrallForNewTurn(s, pw);
+    check("Tick: first tick spends a turn, thrall lives on", t1.power.thrall.p1?.turnsLeft === 1 && t1.expiredTokenId === null);
+    check("Tick: a living thrall stays on its tile", t1.state.tokens.find((t) => t.id === 4)!.position === 8);
+    const t2 = tickThrallForNewTurn(t1.state, t1.power);
+    check("Tick: final tick crumbles the thrall", t2.expiredTokenId === 4 && t2.power.thrall.p1 === null);
+    check("Tick: the crumble ends at the victim's reserve (fairness invariant)", t2.state.tokens.find((t) => t.id === 4)!.position === -1);
+
+    // The OPPONENT's turns never tick the necromancer's thrall.
+    const sFoe = state("p2", { 4: 8 });
+    const tFoe = tickThrallForNewTurn(sFoe, pw);
+    check("Tick: only the possessor's own turns burn duration", tFoe.power.thrall.p1?.turnsLeft === 2);
+    const bare = power({ p1: "necromancer" });
+    const tBare = tickThrallForNewTurn(sFoe, bare);
+    check("Tick: no-op without a thrall returns the same references", tBare.power === bare && tBare.state === sFoe);
+  }
+
+  // --- Win counting stays real-owner: a possessed stone blocks its owner --
+  {
+    const pw: PowerState = {
+      ...power({ p1: "necromancer", p2: "archer" }),
+      thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
+    };
+    const s = state("p2", { 4: 8, 5: PATH_LENGTH_PER_PLAYER, 6: PATH_LENGTH_PER_PLAYER, 7: 13 });
+    const esc = getLegalPowerMoves(s, pw, 1).find((mv) => mv.tokenId === 7 && mv.to === PATH_LENGTH_PER_PLAYER);
+    check("Win: escape still offered while a stone is possessed", !!esc, JSON.stringify(esc));
+    check("Win: but it cannot win — the possessed stone counts as unescaped", !!esc && esc.causesWin === false);
   }
 
   // --- Exhume: target pool and apply ------------------------------------

@@ -335,61 +335,64 @@ export const BULWARK_REINFORCED_TURNS = 4;
  *  simulation trace that picked this design. */
 export const BULWARK_REINFORCED_SAVES = 2;
 
-/** Necromancer's Raise Dead: where a plain (1-charge) cast places the raised
- *  reserve token — the entry tile of the caster's own private lane. Raising
- *  is a PLACEMENT, not a landing: it never grants an extra turn, a charge,
- *  or shield-streak progress, and (unlike every other charge spend except
- *  Re-flip) it does NOT end the turn — the caster still flips and moves,
- *  and the raised token may itself be the mover. That non-turn-ending
- *  design is deliberately load-bearing (it's what makes a raise worth a
- *  charge at all — a normal entry move already exists) and deliberately
- *  risky: this codebase's one extra-action experiment (Push granting an
- *  extra turn) blew out to 95/5 (see applyPush's history note), so if the
- *  necromancer mirrors or vs-warrior sims blow out, "Raise ends the turn"
- *  is the designated one-line nerf. NOT YET SIMULATED — first balance pass
- *  happens when the class joins batch-random-master-killer-games.ts. */
-export const RAISE_POSITION = 0;
+/** Necromancer's Soul Harvest (passive, REWORKED 2026-07-19): how many
+ *  charges the necromancer banks per QUALIFYING KILL — a send-home of a
+ *  token whose REAL owner is the opponent (killing an enemy THRALL of your
+ *  own body in a mirror is a reclaim, not a soul — standard 1-charge
+ *  economy). Replaces both the old death-side Soul Harvest (charge per own
+ *  token lost — the attrition identity Kasen's playtest called "boring, all
+ *  defense") and the generic 1-charge capture grant for necromancer movers.
+ *  3 on a 3-cap bank means one kill fully funds a Revive — including a
+ *  kill BY the thrall, which is the chain-necromancy loop Kasen picked
+ *  deliberately ("yes, let it chain"). FIRST NERF LEVER if sims blow out:
+ *  drop to 2, making every thrall cost two kills. */
+export const SOUL_BOUNTY_CHARGES = 3;
 
-/** Necromancer's Dark Resurrection — the full-bank (CHARGE_CAP) Raise:
- *  places the token HERE instead, the last private-lane tile before the
- *  contested row, trading the whole bank for 3 tiles of travel. Same
- *  Reinforced-Bulwark shape (one action, `dark` flag doubles the effect).
- *  A shield TILE — and since 2026-07-19 that is load-bearing: a Dark
- *  Resurrection counts one link in the caster's shield streak (Kasen's
- *  call — ultimates are rare and the necromancer is all defense, so a
- *  full-bank cast onto the shield tile earns its place in the chain; see
- *  applyRaiseDead). Placement still grants none of the OTHER landing
- *  benefits (no charge, no extra turn). No explicit once-per-turn
- *  counter is needed for any Raise combination: a second plain cast is
- *  blocked by the first token now occupying RAISE_POSITION, and any
- *  plain+dark pairing costs more than CHARGE_CAP can hold.
- *  (First balance pass, 5000 games/matchup: 3 is the ceiling, not a knob
- *  with headroom. The only legal escalation is 12 — the private lane
- *  resumes at 12-14, and getRaiseTargets's own-token-only occupancy check
- *  stays sound on any private tile, while 4-11 are contested and would
- *  need enemy-collision logic this lever doesn't cover — and 12 was TRIED
- *  and is a catastrophic blowout: placing past the whole contested
- *  gauntlet turns Soul Harvest into "every second death funds a
- *  near-escape" and every necromancer matchup collapsed — 97.8/2.2 vs
- *  archer, 90.0/10.0 vs mage, 96.2/3.8 vs warrior. Do not retry 12 (or
- *  13/14, strictly worse) without redesigning Soul Harvest first. The
- *  3 tiles at this setting ARE worth the second charge, though: a bot
- *  policy preferring plain raises over dark ones dropped every
- *  necromancer matchup by 3-6 points — see scoreRaiseDead in
- *  master-killer-bot.ts for that trace.)
- *  (Second balance pass, 5000 games/matchup: 12 was re-tried PAIRED with
- *  the designated "Raise ends the turn" nerf — both raise variants
- *  implemented as turn-ending, the full applyBulwark shape — on the
- *  theory that two levers pointing too far in opposite directions might
- *  meet in the middle. They don't: 93.6/6.4 vs archer, 77.5/22.5 vs
- *  mage, 88.4/11.6 vs warrior, still a blowout. A tile-12 placement is a
- *  guaranteed eventual escape (nothing in the game can touch a private-
- *  lane token), so paying a turn per cast just slows the certainty
- *  without breaking it — games SHORTENED to ~55 turns. The do-not-retry
- *  note above stands even with the nerf attached; the ends-turn
- *  machinery was reverted with it, so applyRaiseDead's non-turn-ending
- *  contract is unchanged.) */
-export const DARK_RESURRECTION_POSITION = 3;
+/** The necromancer's charge cap — one higher than everyone else's
+ *  CHARGE_CAP, but the third pip is the SOUL GEM: generic income (zero
+ *  flips, shield landings, non-qualifying captures) still runs through
+ *  addCharge, which caps at CHARGE_CAP for every class INCLUDING the
+ *  necromancer — only grantKillBounty reaches this cap. There is no
+ *  passive road to a full soul bank: the necromancer must draw blood.
+ *  (This is Kasen's "spend 2 to unlock the third charge" idea expressed as
+ *  a gate instead of a transaction — same tension, no extra bookkeeping.)
+ *  Every CHARGE_CAP reference in the archer/mage/warrior kits (Charged
+ *  Shot's full-bank gate, Reinforced Bulwark's cost, Ward's threshold) is
+ *  deliberately untouched: no other class can ever hold a third charge. */
+export const NECRO_CHARGE_CAP = 3;
+
+/** Necromancer's Revive: the full-soul-bank (NECRO_CHARGE_CAP) cast that
+ *  consumes the corpse (see PowerState.corpse) and raises the killed ENEMY
+ *  token on the tile it died on, fighting for the necromancer as a THRALL
+ *  for this many of the necromancer's own turns (the raise turn counts —
+ *  Revive doesn't end the turn, so the thrall can move immediately).
+ *  Ticked on every fresh flip dealt to the necromancer, the
+ *  tickBulwarkExpiry convention — extra turns from shield landings DO
+ *  burn a thrall turn, but they also grant the immediate extra move, so
+ *  the trade is self-balancing. At 0 the thrall crumbles back to its real
+ *  owner's reserve. SECOND NERF LEVER: drop to 1.
+ *
+ *  HISTORY THAT SHAPED THIS DESIGN — both prior blowouts are respected:
+ *  the old Dark Resurrection's tile-12 experiments (97.8/2.2 vs archer;
+ *  still 93.6/6.4 even paired with a turn-ending nerf) proved that any
+ *  placement PAST the contested gauntlet is a guaranteed-escape engine —
+ *  so the thrall spawns ON the row and is chained to it (never past tile
+ *  11, never escapes, never scores; a knockback that would drop it below
+ *  tile 4 crumbles it instead — the victim's private lane stays sacred).
+ *  And Push-grants-extra-turn (95/5, see applyPush) proved extra ACTIONS
+ *  compound catastrophically — the thrall is an extra OPTION on the
+ *  normal flip, never an extra action. THIRD NERF LEVER, per that same
+ *  tradition: "Revive ends the turn." Fairness invariant, doc'd at
+ *  applyRevive: possession never leaves the victim worse off than the
+ *  kill that enabled it (expiry and thrall-death both end at the reserve
+ *  the token was already headed to). */
+export const THRALL_TURNS = 3;
+
+/** What a Revive costs: the entire soul bank. Kept equal to
+ *  NECRO_CHARGE_CAP on purpose (Charged Shot / Reinforced Bulwark's
+ *  full-bank-spend pattern at the necromancer's own cap) — a separate
+ *  named constant so a future partial-cost experiment is one edit. */
+export const REVIVE_COST = 3;
 
 /** Necromancer's Exhume ultimate: the board position an ESCAPED enemy token
  *  is dragged back to — the only mechanic in the game that touches the win
@@ -480,6 +483,24 @@ export interface PowerState {
    *  its bulwarked entry everywhere that clears one (expiry, final block,
    *  an ultimate's capture). */
   bulwarkSaves: Record<number, number>;
+  /** Necromancer's corpse marker: the last QUALIFYING kill this player made
+   *  (see SOUL_BOUNTY_CHARGES for what qualifies), remembered as the killed
+   *  token and the contested tile it died on. Only ever populated for a
+   *  necromancer. Overwritten by every newer kill (only the freshest corpse
+   *  keeps its soul), consumed by Revive, and DEAD-LETTERED — not eagerly
+   *  cleared — the moment the victim re-enters that token from reserve:
+   *  Revive's legality (getReviveSpawnTile) lazily requires the corpse
+   *  token to still be AT position -1, so re-entry is the denial counter-
+   *  play without any extra clearing hook (the engine derives the DENIED
+   *  announcement from the same condition). */
+  corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  /** Necromancer's active thrall: the possessed enemy token and how many of
+   *  the necromancer's own turns it has left (see THRALL_TURNS). The token
+   *  NEVER changes owner in GameState — possession is entirely this entry
+   *  plus effectiveOwner()'s reading of it, threaded through every
+   *  legality/targeting enumeration. At most one thrall per player by
+   *  construction (a single slot, and Revive requires it empty). */
+  thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
 }
 
 /** Superset of rulebook.Move — same fields, plus power-derived ones. */
@@ -523,15 +544,11 @@ export type PowerAction =
        *  the plain 1-charge cast, unchanged. */
       reinforced?: boolean;
     }
-  | {
-      kind: "raiseDead";
-      /** One of the caster's own RESERVE token ids — see getRaiseTargets. */
-      tokenId: number;
-      /** Dark Resurrection: spend the FULL bank (CHARGE_CAP) to place at
-       *  DARK_RESURRECTION_POSITION instead of RAISE_POSITION. Optional and
-       *  additive, same shape as bulwark's `reinforced`. */
-      dark?: boolean;
-    }
+  /** Necromancer's Revive: no target — the corpse (PowerState.corpse)
+   *  fully determines what rises and where. Legality lives in
+   *  getReviveSpawnTile, the drift-proof single source shared by the
+   *  server's validation, the bot, and the client's gem gate. */
+  | { kind: "revive" }
   | { kind: "exhume"; targetTokenId: number };
 
 // ============================================================================
@@ -547,6 +564,8 @@ export function initialPowerState(): PowerState {
     ultimateReady: { p1: false, p2: false },
     bulwarked: {},
     bulwarkSaves: {},
+    corpse: { p1: null, p2: null },
+    thrall: { p1: null, p2: null },
   };
 }
 
@@ -564,15 +583,46 @@ export function canReflipAgain(power: PowerState, mover: PlayerId): boolean {
   return power.charges[mover] >= 1 && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
 }
 
+/** Which player's thrall this token currently is — null when unpossessed.
+ *  The id-level primitive under effectiveOwner, exported for the engine's
+ *  broadcast/announcement derivations. */
+export function possessorOf(power: PowerState, tokenId: number): PlayerId | null {
+  if (power.thrall.p1?.tokenId === tokenId) return "p1";
+  if (power.thrall.p2?.tokenId === tokenId) return "p2";
+  return null;
+}
+
+/** THE possession rule (Revive rework, 2026-07-19): for every LEGALITY and
+ *  TARGETING question, a possessed token counts as its possessor's — the
+ *  necromancer can move it and stack-blocks against it; the victim's own
+ *  army can capture it (a mercy kill that earns the standard charge); the
+ *  opponent's Snipe/Charged Shot/Push/sweep all treat it as the
+ *  necromancer's stone. Real `token.owner` remains authoritative for
+ *  everything PHYSICAL and PERMANENT: win counting, which reserve it
+ *  crumbles back to, whose lane its private indices name, and same-tile
+ *  collision physics (contested indices 4-11 — the only tiles a thrall can
+ *  occupy — are the same square for both numberings anyway). */
+export function effectiveOwner(power: PowerState, token: TokenState): PlayerId {
+  return possessorOf(power, token.id) ?? token.owner;
+}
+
 /** On-board only (0 <= position < PATH_LENGTH_PER_PLAYER) — escaped tokens
  *  sit at position 15, which would otherwise always outrank real board
  *  positions and permanently (and pointlessly — an escaped token can't be
  *  captured) hog "most advanced", including multiple escaped tokens tying
- *  and warding simultaneously once more than one has come home. */
-function isMostAdvanced(state: GameState, token: TokenState): boolean {
+ *  and warding simultaneously once more than one has come home. Possessed
+ *  tokens are excluded on BOTH sides (as candidate and as pool): a token
+ *  serving the enemy neither carries its true owner's Ward nor consumes
+ *  the "most advanced" slot their free tokens compete for. */
+function isMostAdvanced(state: GameState, power: PowerState, token: TokenState): boolean {
   if (token.position < 0 || token.position >= PATH_LENGTH_PER_PLAYER) return false;
+  if (possessorOf(power, token.id) !== null) return false;
   const mine = state.tokens.filter(
-    (t) => t.owner === token.owner && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+    (t) =>
+      t.owner === token.owner &&
+      t.position >= 0 &&
+      t.position < PATH_LENGTH_PER_PLAYER &&
+      possessorOf(power, t.id) === null,
   );
   if (mine.length === 0) return false;
   const best = Math.max(...mine.map((t) => t.position));
@@ -581,10 +631,12 @@ function isMostAdvanced(state: GameState, token: TokenState): boolean {
 
 /** Mage's Blink Strike ultimate always moves the mover's most-advanced
  *  on-board token (the same one Ward would protect) — null if they have no
- *  on-board tokens at all. */
-function findMostAdvancedToken(state: GameState, mover: PlayerId): TokenState | null {
+ *  on-board tokens at all. Effective ownership: a token of the mover's
+ *  that currently serves the enemy as a thrall is not theirs to relocate. */
+function findMostAdvancedToken(state: GameState, power: PowerState, mover: PlayerId): TokenState | null {
   const mine = state.tokens.filter(
-    (t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+    (t) =>
+      effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
   );
   if (mine.length === 0) return null;
   return mine.reduce((best, t) => (t.position > best.position ? t : best));
@@ -592,10 +644,14 @@ function findMostAdvancedToken(state: GameState, mover: PlayerId): TokenState | 
 
 /** Warrior's Warpath ultimate always moves the mover's LEAST-advanced
  *  on-board token — the one that benefits most from an instant reposition —
- *  null if they have no on-board tokens at all. */
-function findLeastAdvancedToken(state: GameState, mover: PlayerId): TokenState | null {
+ *  null if they have no on-board tokens at all. Same effective-ownership
+ *  rule as findMostAdvancedToken. NOTE: a mover's THRALL is never a
+ *  candidate here either — only mage/warrior reach these finders and only
+ *  a necromancer can hold a thrall, so effectiveOwner alone settles it. */
+function findLeastAdvancedToken(state: GameState, power: PowerState, mover: PlayerId): TokenState | null {
   const mine = state.tokens.filter(
-    (t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+    (t) =>
+      effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
   );
   if (mine.length === 0) return null;
   return mine.reduce((best, t) => (t.position < best.position ? t : best));
@@ -603,7 +659,10 @@ function findLeastAdvancedToken(state: GameState, mover: PlayerId): TokenState |
 
 /** Is this token currently protected by its owner's Ward? Derived, not
  *  stored — see the Mage kit note in the plan for why it's gated at the
- *  full charge cap rather than any-charge. */
+ *  full charge cap rather than any-charge. A POSSESSED token is never
+ *  warded (isMostAdvanced already refuses it): the soul isn't home, and a
+ *  Mage's magic guarding the necromancer's weapon against the Mage's own
+ *  rescue attempts would be absurd. */
 export function isWarded(
   state: GameState,
   power: PowerState,
@@ -611,7 +670,7 @@ export function isWarded(
 ): boolean {
   if (power.classes[token.owner] !== "mage") return false;
   if (power.charges[token.owner] < CHARGE_CAP) return false;
-  if (WARD_SCOPE === "most-advanced") return isMostAdvanced(state, token);
+  if (WARD_SCOPE === "most-advanced") return isMostAdvanced(state, power, token);
   return true;
 }
 
@@ -687,28 +746,41 @@ export function grantZeroFlipCharge(power: PowerState, mover: PlayerId): PowerSt
   return addCharge(power, mover);
 }
 
-/** Necromancer's Soul Harvest (passive): every one of the necromancer's own
- *  tokens sent home by an enemy action banks the NECROMANCER a charge —
- *  deaths feed the class, so aggression against it is never free. The
- *  capturer still earns their normal capture charge on top; a death simply
- *  pays both sides of the table when the victim is a necromancer. One
- *  charge PER TOKEN (a Warpath double = two souls) rather than per event —
- *  each death is a soul — with CHARGE_CAP clamping the difference to
- *  near-nothing in practice via addCharge's existing no-op-at-cap.
- *
- *  Must be called at EVERY send-home site, and only for real send-homes:
- *  resolveTurn (landing captures, Snipe, Charge sweeps, Rain of Arrows all
- *  ride finalCaptures through it), applyPush and applyChargedShot (their
- *  sendsHome branch only — a partial on-board shove is not a death),
- *  applyBlinkStrike, and applyWarpath. Gated on the VICTIM's class in here
- *  so every call site stays a one-line unconditional call that can't drift.
- *  Captures are enemy-only by construction at all of those sites, so the
- *  victim is always otherPlayerId(mover). */
-function grantSoulHarvest(power: PowerState, victim: PlayerId, count: number): PowerState {
-  if (count <= 0 || power.classes[victim] !== "necromancer") return power;
-  let next = power;
-  for (let i = 0; i < count; i++) next = addCharge(next, victim);
-  return next;
+/** Necromancer's Soul Harvest (passive, REWORKED — see SOUL_BOUNTY_CHARGES
+ *  for the design story): the necromancer's own QUALIFYING kills bank
+ *  SOUL_BOUNTY_CHARGES each, up to NECRO_CHARGE_CAP — the only income in
+ *  the game that can fill the third pip (the soul gem). Gated on the
+ *  MOVER's class here so the call site stays unconditional. The caller
+ *  filters for qualifying kills (real owner = the foe) BEFORE counting —
+ *  see resolveTurn, the necromancer's only kill path (no Snipe, no sweep,
+ *  and Exhume is a return, not a kill; the thrall's captures resolve
+ *  through resolveTurn like any landing move, which is exactly how a
+ *  thrall kill funds the NEXT thrall). */
+function grantKillBounty(power: PowerState, mover: PlayerId, count: number): PowerState {
+  if (count <= 0 || power.classes[mover] !== "necromancer") return power;
+  const current = power.charges[mover];
+  const next = Math.min(NECRO_CHARGE_CAP, current + count * SOUL_BOUNTY_CHARGES);
+  if (next === current) return power;
+  return { ...power, charges: { ...power.charges, [mover]: next } };
+}
+
+/** A captured thrall dies for real: its possession entry must fall with it
+ *  (the token itself is already headed to position -1 — its real owner's
+ *  reserve — which is the fairness invariant: no worse off than the kill
+ *  that enabled the possession). Same call-site discipline as
+ *  clearCapturedBulwarks: every path that sends tokens home must run this —
+ *  resolveTurn (landing captures, Snipe, sweeps, Rain of Arrows),
+ *  applyPush/applyChargedShot (sendsHome branch), applyBlinkStrike,
+ *  applyWarpath. No-op (same reference back) when no thrall was hit. */
+function clearThrallIfCaptured(power: PowerState, capturedIds: number[]): PowerState {
+  const hit = (["p1", "p2"] as PlayerId[]).filter((pl) => {
+    const th = power.thrall[pl];
+    return th !== null && capturedIds.includes(th.tokenId);
+  });
+  if (hit.length === 0) return power;
+  const thrall = { ...power.thrall };
+  for (const pl of hit) thrall[pl] = null;
+  return { ...power, thrall };
 }
 
 // ============================================================================
@@ -736,15 +808,53 @@ export function getLegalPowerMoves(
   const moves: PowerMove[] = [];
 
   for (const token of state.tokens) {
-    if (token.owner !== player) continue;
+    // Effective ownership (see effectiveOwner): the mover's pool includes a
+    // thrall they possess and excludes any of their own tokens possessed
+    // AGAINST them — the victim can neither move nor re-enter their
+    // possessed stone (it isn't in reserve, and it isn't effectively theirs).
+    if (effectiveOwner(power, token) !== player) continue;
     if (token.position >= PATH_LENGTH_PER_PLAYER) continue; // already escaped
+    const isThrall = possessorOf(power, token.id) === player;
 
     const from = token.position;
     const to = from === -1 ? flip - 1 : from + flip;
 
+    // SOUL CLAIM: a token whose corpse the enemy necromancer has marked
+    // AND funded (full soul bank) cannot re-enter from reserve — the soul
+    // is already claimed; the body will not rise on its own. The claim
+    // holds even while a thrall is still up (the chain's NEXT corpse stays
+    // claimed until the slot frees); it lapses only when the bank is spent
+    // or the corpse overwritten, and then re-entry denial works as before.
+    // Without this, the first balance run measured denial eating half of
+    // all corpses (any flip 1-4 re-enters), starving the class's entire
+    // kit: 82.7/17.3 vs mage. The thrall-active arm was added when the
+    // claim-lapses-during-possession version still leaked the chain's
+    // follow-up corpse to cheap denial.
+    if (from === -1) {
+      const foe = otherPlayerId(player);
+      if (
+        power.classes[foe] === "necromancer" &&
+        power.corpse[foe]?.tokenId === token.id &&
+        power.charges[foe] === REVIVE_COST
+      ) {
+        continue;
+      }
+    }
+
+    // A thrall is chained to the contested row (see THRALL_TURNS's history
+    // note): tiles past 11 are the VICTIM's private return lane in its own
+    // position numbering — holy ground the dead may not walk, and the road
+    // to an escape it must never have. Overshooting moves simply don't
+    // exist for it (the necromancer's other tokens still move normally).
+    if (isThrall && to > 11) continue;
+
     // Escape — identical to the classic rule, no power interacts with it.
+    // (Unreachable for a thrall: its `to` is capped at 11 above.)
     if (to >= PATH_LENGTH_PER_PLAYER - 1) {
       if (to !== PATH_LENGTH_PER_PLAYER - 1) continue;
+      // Win counting stays REAL-owner: a token of yours serving the enemy
+      // as a thrall is on the board (position <= 11), so it counts as
+      // not-escaped and correctly blocks causesWin until it comes home.
       const remaining = state.tokens.filter(
         (t) => t.owner === player && t.id !== token.id && t.position < PATH_LENGTH_PER_PLAYER,
       );
@@ -764,11 +874,16 @@ export function getLegalPowerMoves(
     }
 
     const destTile = BOARD_LAYOUT[to];
+    // The occupancy FILTER stays real-owner (physics: same-owner indices
+    // name the same tile everywhere, cross-owner only on contested tiles);
+    // the self/enemy CLASSIFICATION is effective-owner (allegiance) — the
+    // one split that lets the victim's own army capture their possessed
+    // stone while the necromancer stack-blocks against it.
     const occupants = state.tokens.filter(
       (t) => t.position === to && t.id !== token.id && (destTile.isContested || t.owner === player),
     );
-    const self = occupants.find((t) => t.owner === player);
-    const enemy = occupants.find((t) => t.owner !== player);
+    const self = occupants.find((t) => effectiveOwner(power, t) === player);
+    const enemy = occupants.find((t) => effectiveOwner(power, t) !== player);
 
     if (self) continue; // own-token blocks, same as classic
 
@@ -780,8 +895,17 @@ export function getLegalPowerMoves(
       // isn't something even a Warrior's Ward Breaker pierces, unlike Ward.
       if (onShieldTile(enemy) || isBulwarked(power, enemy)) continue;
       if (isWarded(state, power, enemy)) {
-        if (cls !== "warrior") continue; // blocked for everyone but a Warrior
-        breaksWard = true; // Ward Breaker: legal, captures (client announces the break)
+        // THE DEAD FEEL NO MAGIC: a thrall's capture pierces Ward, the
+        // same exception Warrior's Ward Breaker carries — and the thrall's
+        // whole reason to exist in the mage matchup. Without it the
+        // necromancer has zero Ward interaction of any kind, the
+        // structural hole BOTH kits' balance passes measured as their
+        // worst number (old kit 63-69/37-31 mage; rework pre-pierce
+        // 70.0/30.0 at 5000 games with Soul Claim + 3-turn thralls
+        // already applied). Shield tiles and Bulwark still block it —
+        // only the living's magic is beneath its notice.
+        if (cls !== "warrior" && !isThrall) continue; // blocked for everyone else
+        breaksWard = true; // pierce: legal, captures (client announces the break)
         captures = [enemy.id];
       } else {
         captures = [enemy.id]; // normal contested capture
@@ -801,8 +925,10 @@ export function getLegalPowerMoves(
     // sits at their own private position 1, Snipe fired anyway.
     const bonusCaptures: number[] = [];
     if (cls === "archer" && BOARD_LAYOUT[to + 1].isContested) {
+      // Effective ownership: an archer's own token possessed against them
+      // is a legitimate Snipe victim (mercy at range).
       const sniped = state.tokens.find(
-        (t) => t.position === to + 1 && t.owner !== player && t.id !== enemy?.id,
+        (t) => t.position === to + 1 && effectiveOwner(power, t) !== player && t.id !== enemy?.id,
       );
       if (sniped && !isProtected(state, power, sniped)) {
         bonusCaptures.push(sniped.id);
@@ -828,11 +954,14 @@ export function getLegalPowerMoves(
         const tile = BOARD_LAYOUT[i];
         if (!tile.isContested) continue; // sweep only matters on shared tiles
         const occ = state.tokens.filter((t) => t.position === i && t.id !== token.id);
-        if (occ.some((t) => t.owner === player)) {
+        // Effective ownership on both sides: the warrior's possessed token
+        // is not a lane-blocker of theirs — it's an enemy the sweep can cut
+        // down on the way through.
+        if (occ.some((t) => effectiveOwner(power, t) === player)) {
           laneClear = false;
           break;
         }
-        const foe = occ.find((t) => t.owner !== player);
+        const foe = occ.find((t) => effectiveOwner(power, t) !== player);
         if (
           foe &&
           chargeSweepCaptures.length < CHARGE_SWEEP_CAP &&
@@ -876,7 +1005,7 @@ export function getLegalPowerMoves(
 export function getRainOfArrowsTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
-    .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
     .map((t) => t.id);
 }
@@ -970,11 +1099,36 @@ function resolveTurn(
   }
 
   let nextPower: PowerState = { ...power, bulwarked, bulwarkSaves };
-  if (finalCaptures.length > 0 || landsOnShield) {
+  // A captured thrall's possession entry falls with it — before income, so
+  // the accounting below reads a settled board.
+  nextPower = clearThrallIfCaptured(nextPower, finalCaptures);
+
+  // Income + corpse. QUALIFYING kills (real owner = the foe — reclaiming
+  // your own possessed body in a necromancer mirror is not a soul) pay a
+  // necromancer mover the kill bounty INSTEAD of the generic capture
+  // charge, and leave the corpse marker on the landing tile (the captured
+  // token stood exactly there; the necromancer has no Snipe/sweep, so a
+  // landing capture is its only kill shape and the freshest kill simply
+  // overwrites). Everyone else — and a necromancer's non-qualifying
+  // reclaim — keeps the classic one-charge-per-qualifying-move economy.
+  const foe = otherPlayerId(mover);
+  const soulKills =
+    power.classes[mover] === "necromancer"
+      ? finalCaptures.filter((id) => state.tokens.find((t) => t.id === id)?.owner === foe)
+      : [];
+  if (soulKills.length > 0) {
+    nextPower = grantKillBounty(nextPower, mover, soulKills.length);
+    nextPower = {
+      ...nextPower,
+      corpse: { ...nextPower.corpse, [mover]: { tokenId: soulKills[soulKills.length - 1], tile: to } },
+    };
+    // A shield landing's generic charge still applies on top (addCharge's
+    // CHARGE_CAP clamp makes it a no-op whenever the bounty already filled
+    // the soul gem — the common case).
+    if (landsOnShield) nextPower = addCharge(nextPower, mover);
+  } else if (finalCaptures.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
-  // Soul Harvest: no-op unless the victim is a necromancer — see its doc.
-  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), finalCaptures.length);
 
   const extraTurn = landsOnShield;
   const nextState: GameState = {
@@ -1046,8 +1200,21 @@ export function applyCharge(
  *  (computeChargedShotLanding, flat CHARGED_SHOT_DISTANCE) can each resolve
  *  their OWN collision math against a single shared source of truth for
  *  what counts as a send-home, without either one having to reimplement it. */
-function computeKnockbackLanding(state: GameState, target: TokenState, distance: number): number {
+function computeKnockbackLanding(
+  state: GameState,
+  power: PowerState,
+  target: TokenState,
+  distance: number,
+): number {
   const rawTo = target.position - distance;
+  // A THRALL knocked below the contested row crumbles instead of landing:
+  // tiles 0-3 in its position numbering are the VICTIM's private lane, and
+  // a necromancer-controlled stone squatting the victim's own safe row
+  // would break the game's most sacred guarantee. Symmetric with the >11
+  // cap on its forward movement — leaving the row in EITHER direction ends
+  // the possession (and a send-home is what -1 already means here, so the
+  // pusher's functionally-a-capture refund applies as usual).
+  if (possessorOf(power, target.id) !== null && rawTo < 4) return -1;
   // Same-owner tokens share a lane everywhere, so any position match is a
   // real collision. Different-owner tokens only physically share a tile in
   // the contested zone (positions 4-11 are the SAME square for both
@@ -1071,7 +1238,7 @@ function computeKnockbackLanding(state: GameState, target: TokenState, distance:
  *  below — the one case Bulwark blocks a Push) and to actually resolve a
  *  chosen push (applyPush). */
 function computePushLanding(state: GameState, power: PowerState, target: TokenState): number {
-  return computeKnockbackLanding(state, target, pushDistance(state, power, target));
+  return computeKnockbackLanding(state, power, target, pushDistance(state, power, target));
 }
 
 /** Archer's Charged Shot: same idea as computePushLanding — CHARGED_SHOT_DISTANCE
@@ -1085,7 +1252,7 @@ function computePushLanding(state: GameState, power: PowerState, target: TokenSt
  *  both getChargedShotTargets's Bulwark-aware filter and applyChargedShot. */
 function computeChargedShotLanding(state: GameState, power: PowerState, target: TokenState): number {
   const distance = isWarded(state, power, target) ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE;
-  return computeKnockbackLanding(state, target, distance);
+  return computeKnockbackLanding(state, power, target, distance);
 }
 
 /** Archer's Push: valid targets are enemy tokens on a contested tile that
@@ -1122,7 +1289,7 @@ function computeChargedShotLanding(state: GameState, power: PowerState, target: 
 export function getPushTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
-    .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
     .filter((t) => !onShieldTile(t))
     .filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST)
@@ -1149,8 +1316,9 @@ export function applyPush(
   };
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
-    // Soul Harvest: a send-home is a death; a partial shove (below) is not.
-    spentPower = grantSoulHarvest(spentPower, otherPlayerId(mover), 1);
+    // A pushed-home THRALL dies for real (incl. the below-row crumble in
+    // computeKnockbackLanding) — its possession entry falls with it.
+    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
@@ -1207,7 +1375,7 @@ export function getChargedShotTargets(state: GameState, power: PowerState, mover
   if (power.charges[mover] !== CHARGE_CAP) return [];
   const foe = otherPlayerId(mover);
   return state.tokens
-    .filter((t) => t.owner === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
     .filter((t) => !onShieldTile(t))
     .filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1)
@@ -1240,8 +1408,8 @@ export function applyChargedShot(
   };
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
-    // Soul Harvest: same send-home-only rule as Push's — see grantSoulHarvest.
-    spentPower = grantSoulHarvest(spentPower, otherPlayerId(mover), 1);
+    // Same thrall-death rule as Push's — see clearThrallIfCaptured.
+    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
   const nextState: GameState = {
@@ -1284,7 +1452,7 @@ export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
  *  the two rules can't drift. Empty if the mover has no on-board token to
  *  relocate at all. */
 export function getBlinkStrikeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (!findMostAdvancedToken(state, mover)) return [];
+  if (!findMostAdvancedToken(state, power, mover)) return [];
   return getRainOfArrowsTargets(state, power, mover);
 }
 
@@ -1292,7 +1460,7 @@ export function getBlinkStrikeTargets(state: GameState, power: PowerState, mover
  *  the sweep along the way (see applyWarpath) pierces everything too.
  *  Empty if the mover has no on-board token to relocate at all. */
 export function getWarpathTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (!findLeastAdvancedToken(state, mover)) return [];
+  if (!findLeastAdvancedToken(state, power, mover)) return [];
   return getRainOfArrowsTargets(state, power, mover);
 }
 
@@ -1327,7 +1495,7 @@ export function applyBlinkStrike(
   targetTokenId: number,
   mover: PlayerId,
 ): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
-  const mine = findMostAdvancedToken(state, mover)!;
+  const mine = findMostAdvancedToken(state, power, mover)!;
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const tokens = state.tokens.map((t) => {
     if (t.id === mine.id) return { ...t, position: target.position };
@@ -1341,8 +1509,8 @@ export function applyBlinkStrike(
     },
     [targetTokenId],
   );
+  nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
-  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), 1);
   const nextState: GameState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -1373,7 +1541,7 @@ export function applyWarpath(
   targetTokenId: number,
   mover: PlayerId,
 ): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
-  const mine = findLeastAdvancedToken(state, mover)!;
+  const mine = findLeastAdvancedToken(state, power, mover)!;
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const from = mine.position;
   const to = target.position;
@@ -1383,8 +1551,14 @@ export function applyWarpath(
   const sweepCaptures: number[] = [];
   for (let i = lo + 1; i < hi; i++) {
     if (!BOARD_LAYOUT[i].isContested) continue;
+    // Effective ownership: the warrior's own possessed token in the path
+    // of the Warpath is an enemy combatant — swept like any other.
     const foe = state.tokens.find(
-      (t) => t.position === i && t.owner !== mover && t.id !== mine.id && t.id !== targetTokenId,
+      (t) =>
+        t.position === i &&
+        effectiveOwner(power, t) !== mover &&
+        t.id !== mine.id &&
+        t.id !== targetTokenId,
     );
     if (foe) {
       sweepCaptures.push(foe.id);
@@ -1405,9 +1579,8 @@ export function applyWarpath(
     },
     allCaptures,
   );
+  nextPower = clearThrallIfCaptured(nextPower, allCaptures);
   nextPower = addCharge(nextPower, mover);
-  // Soul Harvest pays per token — a Warpath double-capture is two souls.
-  nextPower = grantSoulHarvest(nextPower, otherPlayerId(mover), allCaptures.length);
   const nextState: GameState = {
     tokens,
     currentPlayer: otherPlayerId(mover),
@@ -1437,8 +1610,10 @@ export function applyWarpath(
  *  that aren't already Bulwarked — no point re-flagging one that's already
  *  protected, so it's excluded from the target list entirely. */
 export function getBulwarkTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  // Effective ownership: a warrior's token possessed against them is not
+  // theirs to shield (and shielding the enemy's weapon would be absurd).
   return state.tokens
-    .filter((t) => t.owner === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => !isBulwarked(power, t))
     .map((t) => t.id);
 }
@@ -1521,21 +1696,29 @@ export function tickBulwarkExpiry(state: GameState, power: PowerState, mover: Pl
 
 /** Ids of the CURRENT mover's opponent's Bulwarked tokens that Bulwark
  *  ACTUALLY blocked THIS flip — would have been captured by a normal move
- *  (including Snipe), a Charge sweep (only if the mover can actually afford
- *  Charge this turn), or sent home by a Push/Charged Shot (only if the
- *  mover can afford one), had Bulwark not protected them. Ultimates are
+ *  (including Snipe) or a Charge sweep (only if the mover can actually
+ *  afford Charge this turn), had Bulwark not protected them. Ultimates are
  *  deliberately NOT considered: they pierce Bulwark outright (2026-07-17),
- *  so a Bulwark never "blocks" one and must never spend a save on one. A
- *  REINFORCED Bulwark's plain-Push immunity is likewise not a "block" —
- *  it's a static property (the target never enters Push's pool at all, in
- *  the real list or the hypothetical below), so it costs no save.
+ *  so a Bulwark never "blocks" one and must never spend a save on one.
  *
- *  Computed by diffing the real move/target lists against the SAME lists
- *  with every Bulwark switched off, rather than reimplementing any capture
+ *  Push/Charged Shot send-home immunity is a STATIC property, NOT a block
+ *  (CHANGED 2026-07-20 — Kasen's field report): the protected target
+ *  simply never enters those pools (getPushTargets/getChargedShotTargets'
+ *  own filters), the same rule the doc always applied to a reinforced
+ *  cast's plain-Push immunity. The old reveal-time accounting counted
+ *  those exclusions as consuming blocks, which let a full-bank archer
+ *  MELT a Reinforced Bulwark by merely standing in send-home range: one
+ *  save burned per archer flip, no shot ever fired, the two-save shield
+ *  dead in two turns while the archer kept both charges — plus a phantom
+ *  "Blocked!" announcement each time with nothing visible happening.
+ *  Saves now spend only on threats a move could actually execute.
+ *
+ *  Computed by diffing the real move lists against the SAME lists with
+ *  every Bulwark switched off, rather than reimplementing any capture
  *  legality here — so this can never drift from the rules enforced above
- *  (isProtected/isBulwarked, getPushTargets). A token surfacing as a NEW
- *  capture/target once Bulwark is switched off, that isn't in the real
- *  (Bulwark-respecting) result, means Bulwark was the thing blocking it. */
+ *  (isProtected/isBulwarked). A token surfacing as a NEW capture once
+ *  Bulwark is switched off, that isn't in the real (Bulwark-respecting)
+ *  result, means Bulwark was the thing blocking it. */
 export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: number): number[] {
   if (Object.keys(power.bulwarked).length === 0) return [];
   const mover = state.currentPlayer;
@@ -1557,22 +1740,6 @@ export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: 
       : [];
     for (const id of openCaptures) {
       if (power.bulwarked[id] !== undefined && !realCaptures.includes(id)) blocked.add(id);
-    }
-  }
-
-  if (power.classes[mover] === "archer" && power.charges[mover] >= 1) {
-    const realPush = getPushTargets(state, power, mover);
-    for (const id of getPushTargets(state, unbulwarked, mover)) {
-      if (power.bulwarked[id] !== undefined && !realPush.includes(id)) blocked.add(id);
-    }
-  }
-  // Charged Shot: same shape as the Push check above (a send-home threat
-  // gated on affordability), just at CHARGE_CAP instead of >= 1, and using
-  // getChargedShotTargets/its own collision math instead of Push's.
-  if (power.classes[mover] === "archer" && power.charges[mover] === CHARGE_CAP) {
-    const realChargedShot = getChargedShotTargets(state, power, mover);
-    for (const id of getChargedShotTargets(state, unbulwarked, mover)) {
-      if (power.bulwarked[id] !== undefined && !realChargedShot.includes(id)) blocked.add(id);
     }
   }
 
@@ -1631,88 +1798,121 @@ export function tickBulwarkForReflip(
 }
 
 // ============================================================================
-// NECROMANCER — the class that treats the reserve as a graveyard. Passive:
-// Soul Harvest (see grantSoulHarvest, wired into every send-home site).
-// Actives: Raise Dead (1 charge, reserve token to RAISE_POSITION, does NOT
-// end the turn — Re-flip's precedent) and its full-bank Dark Resurrection
-// variant (CHARGE_CAP, to DARK_RESURRECTION_POSITION — Reinforced Bulwark's
-// `reinforced`-flag shape, as `dark`). Ultimate: Exhume (shield-streak
-// banked via the existing ultimateReady flow, same as Blink Strike/Warpath)
-// — drags an ESCAPED enemy token back onto the board. Nothing here adds
-// PowerState fields: Soul Harvest is an event-time grant and both actives
-// are instant, so the class's whole persistent footprint is the `classes`
-// entry itself.
+// NECROMANCER (REWORKED 2026-07-19 — the Revive/thrall kit; the original
+// Soul-Harvest-on-death + Raise Dead + Dark Resurrection kit is gone, see
+// SOUL_BOUNTY_CHARGES for why). The class that raises the enemy's dead
+// against them. Passive: Soul Harvest — QUALIFYING kills bank
+// SOUL_BOUNTY_CHARGES up to NECRO_CHARGE_CAP (the soul gem, the only
+// income that fills pip 3 — see grantKillBounty) and leave a corpse marker
+// on the death tile (resolveTurn). Active: Revive (REVIVE_COST = the full
+// soul bank) — consume the corpse, raise the killed ENEMY token where it
+// died, and command it as a THRALL for THRALL_TURNS of the caster's turns
+// (effectiveOwner is the whole possession mechanic; getLegalPowerMoves
+// generates its row-chained moves). Ultimate: Exhume, unchanged. The
+// class's persistent footprint is PowerState.corpse + PowerState.thrall.
 // ============================================================================
 
-/** Necromancer's Raise Dead: valid "targets" are the caster's own RESERVE
- *  tokens (position -1). All reserve tokens are interchangeable — the list
- *  exists so the tap-a-token UI and the server's validation share one
- *  source of truth, same trust model as every other target getter. Empty
- *  when the destination tile is occupied by the caster's OWN token — the
- *  destination is private-lane by construction (RAISE_POSITION and
- *  DARK_RESURRECTION_POSITION are both in the 0-3 row), so only own tokens
- *  can ever block; an enemy token whose position merely shares the numeric
- *  index sits on a different physical square (the private-lane rule Snipe's
- *  isContested guard exists for). Affordability (plain: >= 1 charge, dark:
- *  the full CHARGE_CAP bank) is a dispatch-layer/UI gate per the Bulwark
- *  precedent, NOT baked in here. */
-export function getRaiseTargets(
+/** Necromancer's Revive: THE legality-and-spawn oracle, shared by the
+ *  server's validation, the bot, and the client's gem gate so the three
+ *  can never drift (Charged Shot's bake-the-gate-in precedent — Revive's
+ *  affordability is one uniform full-soul-bank check, and it has no
+ *  target list to hang a per-target gate on). Returns the tile the thrall
+ *  would rise on, or null when Revive is illegal right now:
+ *  no corpse banked; the corpse token no longer waiting in reserve (the
+ *  victim re-entered it — the denial counterplay — or it's already back
+ *  on the board some other way); a thrall already up (one army slot); or
+ *  the bank short of REVIVE_COST.
+ *
+ *  Spawn walk: the corpse tile itself when free, else the nearest free
+ *  contested tile BEHIND it (Exhume's backward-walk temperament — further
+ *  from tile 11 = more runway for the hunt), else forward of it. A free
+ *  tile always exists: both armies total 8 tokens, the corpse itself lies
+ *  in reserve, so at most 7 stand on the row's 8 tiles. Occupancy is any
+ *  token at the numeric position — every candidate is contested (4-11),
+ *  where both numberings share the square. */
+export function getReviveSpawnTile(
   state: GameState,
   power: PowerState,
   mover: PlayerId,
-  dark = false,
-): number[] {
-  const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
-  if (state.tokens.some((t) => t.owner === mover && t.position === dest)) return [];
-  return state.tokens.filter((t) => t.owner === mover && t.position === -1).map((t) => t.id);
+): number | null {
+  if (power.charges[mover] !== REVIVE_COST) return null;
+  if (power.thrall[mover] !== null) return null;
+  const corpse = power.corpse[mover];
+  if (!corpse) return null;
+  const body = state.tokens.find((t) => t.id === corpse.tokenId);
+  if (!body || body.position !== -1) return null; // dead-lettered: soul reclaimed
+  const free = (tile: number) => !state.tokens.some((t) => t.position === tile);
+  for (let tile = corpse.tile; tile >= 4; tile--) if (free(tile)) return tile;
+  for (let tile = corpse.tile + 1; tile <= 11; tile++) if (free(tile)) return tile;
+  return null; // unreachable by the counting argument above — kept as a guard
 }
 
-/** Necromancer's Raise Dead: spends 1 charge (or the full bank when `dark`)
- *  to place a reserve token directly on RAISE_POSITION (or
- *  DARK_RESURRECTION_POSITION). Does NOT end the turn — the caller keeps
- *  the SAME flip and recomputes legal moves against the new board, exactly
- *  the Re-flip contract (and like Re-flip, no resetTurnFlags: it's still
- *  the same turn). currentPlayer/lastFlip/extraTurn all pass through
- *  untouched. A placement is not a landing: no charge grant and no extra
- *  turn — and no streak BREAK either, again matching Re-flip (only
- *  turn-ending non-landing actions break a streak). One exception, by
- *  Kasen's 2026-07-19 rule: a DARK cast advances the shield streak —
- *  DARK_RESURRECTION_POSITION is a shield tile, and a full-bank cast onto
- *  it counts as a shield in the chain, banking ultimateReady at
- *  ULTIMATE_STREAK exactly like resolveShieldStreak's non-archer branch
- *  (the caster is a necromancer by construction, so the immediate-fire
- *  archer arm can't apply). A plain cast (RAISE_POSITION, not a shield)
- *  stays streak-neutral.
- *  The raised token carries no stale protection state by construction:
- *  bulwarked entries are cleared at capture time (resolveTurn), and
- *  never-boarded tokens never had any. Like every pure apply* here,
- *  no affordability self-guard — the caller already verified it. */
-export function applyRaiseDead(
+/** Necromancer's Revive: spends the whole soul bank, consumes the corpse,
+ *  and raises the killed enemy token on getReviveSpawnTile's answer as a
+ *  thrall for THRALL_TURNS. Does NOT end the turn — the caller keeps the
+ *  SAME flip and recomputes legal moves against the new board (the risen
+ *  stone may be the one that moves), exactly the Re-flip contract, and
+ *  like Re-flip no resetTurnFlags and no streak interaction: a raise is a
+ *  placement, not a landing (no charge, no extra turn, no streak link —
+ *  the thrall EARNS streak links the honest way, by landing on tile 7).
+ *
+ *  FAIRNESS INVARIANT (load-bearing for the whole design): possession
+ *  never leaves the victim worse off than the kill that enabled it. The
+ *  token was already reserve-bound; expiry (tickThrallForNewTurn) and
+ *  thrall-death (clearThrallIfCaptured at every send-home site) both end
+ *  at that same reserve. The victim's only NEW cost is time: the token
+ *  can't re-enter while it serves. The token carries no stale protection
+ *  state by construction (bulwarked entries cleared at capture time), and
+ *  can't be Warded/Bulwarked while possessed (isWarded/getBulwarkTargets
+ *  refuse). Like every pure apply* here, no legality self-guard — the
+ *  caller already consulted getReviveSpawnTile. */
+export function applyRevive(
   state: GameState,
   power: PowerState,
-  tokenId: number,
   mover: PlayerId,
-  dark = false,
-): { state: GameState; power: PowerState } {
-  const dest = dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION;
-  const cost = dark ? CHARGE_CAP : 1;
-  const tokens = state.tokens.map((t) => (t.id === tokenId ? { ...t, position: dest } : t));
-  let spent: PowerState = {
+): { state: GameState; power: PowerState; raisedTokenId: number; raisedTo: number } {
+  const corpse = power.corpse[mover]!;
+  const tile = getReviveSpawnTile(state, power, mover)!;
+  const tokens = state.tokens.map((t) => (t.id === corpse.tokenId ? { ...t, position: tile } : t));
+  const nextPower: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
+    charges: { ...power.charges, [mover]: power.charges[mover] - REVIVE_COST },
+    corpse: { ...power.corpse, [mover]: null },
+    thrall: { ...power.thrall, [mover]: { tokenId: corpse.tokenId, turnsLeft: THRALL_TURNS } },
   };
-  if (dark) {
-    const next = spent.shieldStreak[mover] + 1;
-    spent =
-      next < ULTIMATE_STREAK
-        ? { ...spent, shieldStreak: { ...spent.shieldStreak, [mover]: next } }
-        : {
-            ...spent,
-            shieldStreak: { ...spent.shieldStreak, [mover]: 0 },
-            ultimateReady: { ...spent.ultimateReady, [mover]: true },
-          };
+  return { state: { ...state, tokens }, power: nextPower, raisedTokenId: corpse.tokenId, raisedTo: tile };
+}
+
+/** Thrall bookkeeping for the START of a brand-new turn — the
+ *  tickBulwarkExpiry convention: call once per fresh flip dealt to
+ *  state.currentPlayer (extra turns included, Re-flips not), and call it
+ *  BEFORE computing the turn's move list AND before the Bulwark tick — a
+ *  crumbling thrall changes the board both of those must read. Decrements
+ *  the CURRENT player's own thrall; at 0 the possession ends and the
+ *  token crumbles home to its real owner's reserve (position -1, the
+ *  fairness invariant's terminus). Returns the crumbled token id so the
+ *  server can announce it (lastThrallExpired), or null. */
+export function tickThrallForNewTurn(
+  state: GameState,
+  power: PowerState,
+): { state: GameState; power: PowerState; expiredTokenId: number | null } {
+  const mover = state.currentPlayer;
+  const th = power.thrall[mover];
+  if (!th) return { state, power, expiredTokenId: null };
+  const turnsLeft = th.turnsLeft - 1;
+  if (turnsLeft > 0) {
+    return {
+      state,
+      power: { ...power, thrall: { ...power.thrall, [mover]: { ...th, turnsLeft } } },
+      expiredTokenId: null,
+    };
   }
-  return { state: { ...state, tokens }, power: spent };
+  const tokens = state.tokens.map((t) => (t.id === th.tokenId ? { ...t, position: -1 } : t));
+  return {
+    state: { ...state, tokens },
+    power: { ...power, thrall: { ...power.thrall, [mover]: null } },
+    expiredTokenId: th.tokenId,
+  };
 }
 
 /** Necromancer's Exhume ultimate: valid targets are the opponent's ESCAPED

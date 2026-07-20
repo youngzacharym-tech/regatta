@@ -36,8 +36,9 @@ export type ProcIconId =
   | "bulwark"
   | "bulwarkReinforced"
   | "bulwarkBlock"
-  | "raiseDead"
-  | "darkResurrection"
+  | "revive"
+  | "thrallExpired"
+  | "corpseDenied"
   | "exhume"
   | "soulHarvest";
 
@@ -230,23 +231,9 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M15 17.5 L19 21 L17.5 24 L21.5 27.5" ${DETAIL}/>`,
   ),
 
-  // Necromancer 1-charge: the marked headstone, one soul slipping free —
-  // a rising chevron engraved on the face points the stone's tenant home.
-  raiseDead: wrap(
-    STONE +
-      GROUND +
-      // Engraved ascent chevron on the stone face.
-      `<path d="M24 34 L24 22" ${DETAIL}/>` +
-      `<path d="M19.5 26.5 L24 22 L28.5 26.5" ${DETAIL}/>` +
-      // The freed soul, rising off the stone's shoulder.
-      `<circle cx="38" cy="14.5" r="1.7" fill="${GOLD}"/>` +
-      `<circle cx="41" cy="8.5" r="1.2" fill="${GOLD}"/>`,
-  ),
-
-  // Necromancer full-bank: the same stone cracked open, the returning soul
-  // bursting off its top as a gold star — the sibling stays a headstone
-  // (raise = quiet chevron, resurrection = eruption).
-  darkResurrection: wrap(
+  // Necromancer full-bank Revive: the grave cracked open, the claimed soul
+  // erupting off its crown as a gold star — the thrall rises.
+  revive: wrap(
     STONE +
       GROUND +
       // The grave gives — a crack running up the face.
@@ -255,6 +242,31 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M24 2 L26 6.8 L31 9 L26 11.2 L24 16 L22 11.2 L17 9 L22 6.8 Z" fill="${GOLD}"/>` +
       `<circle cx="34" cy="15" r="1.3" fill="${GOLD}"/>` +
       `<circle cx="13.5" cy="15" r="1.1" fill="${GOLD}"/>`,
+  ),
+
+  // Thrall's crumble: the headstone with a descending chevron — the
+  // borrowed body settling back into the grave, its last soul-mote fading.
+  thrallExpired: wrap(
+    STONE +
+      GROUND +
+      // Engraved descent chevron on the stone face.
+      `<path d="M24 22 L24 34" ${DETAIL}/>` +
+      `<path d="M19.5 29.5 L24 34 L28.5 29.5" ${DETAIL}/>` +
+      // The spent soul settling off the stone's shoulder.
+      `<circle cx="38" cy="14.5" r="1.4" fill="${GOLD}"/>`,
+  ),
+
+  // Soul reclaimed: the marked headstone barred — the victim re-entered
+  // the body and the claim is broken.
+  corpseDenied: wrap(
+    STONE +
+      GROUND +
+      // The claim, crossed out on the stone face.
+      `<path d="M18.5 22 L29.5 33" ${DETAIL}/>` +
+      `<path d="M29.5 22 L18.5 33" ${DETAIL}/>` +
+      // The soul slipping away sideways, out of the necromancer's reach.
+      `<circle cx="40" cy="26" r="1.5" fill="${GOLD}"/>` +
+      `<circle cx="45" cy="23" r="1.1" fill="${GOLD}"/>`,
   ),
 
   // Necromancer ultimate: the open pit, an escaped token dragged back down

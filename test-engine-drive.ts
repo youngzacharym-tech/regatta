@@ -122,17 +122,17 @@ function playOne(
               "reflip commit missing lastReflip",
             );
           }
-          if (action.kind === "raiseDead") {
+          if (action.kind === "revive") {
             // Same contract for the Necromancer's turn-keeping act: the
-            // raise commit must announce itself (the client's Raise! proc
-            // and the hand-to-board animation key on this field) and keep
-            // the flip alive for the recomputed move list.
+            // revive commit must announce itself (the client's Revive!
+            // proc and the rise animation key on this field) and keep the
+            // flip alive for the recomputed move list.
             const newest = doc.events[doc.events.length - 1];
             assert(
-              newest?.kind === "state" && newest.lastRaise?.tokenId === action.tokenId,
-              "raise commit missing lastRaise",
+              newest?.kind === "state" && newest.lastRevive != null,
+              "revive commit missing lastRevive",
             );
-            assert(doc.currentFlip !== null, "raise commit dropped the flip");
+            assert(doc.currentFlip !== null, "revive commit dropped the flip");
           }
         }
         return;
@@ -229,6 +229,8 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
     ultimateReady: { p1: false, p2: false },
     bulwarked: { 2: 3 }, // one live Bulwark elsewhere on the table
     bulwarkSaves: { 2: 2 },
+    corpse: { p1: null, p2: null },
+    thrall: { p1: null, p2: null },
   };
   const blockedDoc: RoomDoc = {
     ...base,

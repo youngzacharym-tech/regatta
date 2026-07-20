@@ -202,20 +202,23 @@ export type ServerMessage =
         /** Every currently-Bulwarked token id, across both players — public
          *  table-state (drives the client's tint, same idea as isWarded). */
         bulwarkedTokenIds: number[];
-        /** Valid Raise Dead targets (the caster's own reserve token ids)
-         *  for the CURRENT player, if they're a Necromancer with a charge
-         *  and it's their turn — empty otherwise. Computed for the plain
-         *  cast's destination gate; Dark Resurrection reads its own list
-         *  below. Both are still re-validated server-side. */
-        raiseTargets?: number[];
-        /** Dark Resurrection's own target list — the same reserve-token
-         *  pool as raiseTargets but gated on ITS destination tile, which
-         *  can be free when the plain cast's is blocked (and vice versa).
-         *  Same population rule as raiseTargets (Necromancer with a
-         *  charge, their turn); affordability (the full bank) stays the
-         *  client gem's own gate, like Reinforced Bulwark's. ADDITIVE:
-         *  older servers omit it. */
-        darkRaiseTargets?: number[];
+        /** Necromancer rework (2026-07-19): each player's banked corpse —
+         *  the last enemy token they killed and the contested tile it died
+         *  on — broadcast only while still raisable (its token waiting in
+         *  reserve). Public table-state: the corpse decal is a threat BOTH
+         *  seats need to see (the victim's re-entry denial play depends on
+         *  knowing it's there). */
+        corpse?: Record<PlayerId, { tokenId: number; tile: number } | null>;
+        /** The active possession, if any: which token serves which player
+         *  and for how many more of the possessor's turns — drives the
+         *  possession treatment on the token and the plates' lifecycle
+         *  readouts. */
+        thrall?: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+        /** Where a Revive would spawn the thrall for the CURRENT player
+         *  right now, or null when Revive isn't castable (no corpse, corpse
+         *  denied, thrall already up, or soul bank short). THE client-side
+         *  gem gate — server-validated against the same shared oracle. */
+        reviveSpawnTile?: number | null;
         /** Valid Exhume targets (the opponent's ESCAPED token ids) for the
          *  CURRENT player, if they're a Necromancer with ultimateReady and
          *  it's their turn — empty otherwise. */
@@ -270,26 +273,27 @@ export type ServerMessage =
        *  refunded) even though a re-flip DID happen and the client owes an
        *  announcement. Server-computed, never re-derived client-side. */
       lastReflip?: { player: PlayerId } | null;
-      /** Master Killer mode only: Necromancer's Raise Dead just resolved
-       *  on this broadcast. Same turn-continues lifecycle as lastReflip —
+      /** Master Killer mode only: Necromancer's Revive just resolved on
+       *  this broadcast. Same turn-continues lifecycle as lastReflip —
        *  the flip is unchanged and the move list was recomputed against
-       *  the board the raised token now stands on. `dark` is additive:
-       *  true when the cast was the full-bank Dark Resurrection. */
-      lastRaise?: { tokenId: number; dark?: boolean } | null;
+       *  the board the risen thrall now stands on. `tile` is the spawn
+       *  the server's walk actually chose, never re-derived client-side. */
+      lastRevive?: { tokenId: number; tile: number } | null;
+      /** Master Killer mode only: a thrall's duration ran out at the start
+       *  of this broadcast's turn — the token crumbled home to its real
+       *  owner's reserve. Drives the crumble treatment + activity log. */
+      lastThrallExpired?: { tokenId: number } | null;
+      /** Master Killer mode only: the corpse's owner re-entered the marked
+       *  token on this broadcast, reclaiming the soul — the necromancer's
+       *  banked Revive is denied. Server-derived, same authority rule as
+       *  every announcement here. */
+      lastCorpseDenied?: { tokenId: number } | null;
       /** Master Killer mode only: Necromancer's Exhume ultimate. Non-null
        *  exactly on the broadcast where it resolved. `returnedTo` is the
        *  tile the occupancy walk actually landed the dragged token on —
        *  server-computed, never re-derived client-side, same reasoning as
        *  lastUltimate. */
       lastExhume?: { targetTokenId: number; returnedTo: number } | null;
-      /** Master Killer mode only: Soul Harvest paid the VICTIM on this
-       *  broadcast — the necromancer's charge gain from their own tokens
-       *  being sent home. Deliberately separate from lastChargeEvent,
-       *  which carries only ONE player's delta: a capture against a
-       *  necromancer changes BOTH banks in a single broadcast (the actor's
-       *  side stays in lastChargeEvent, unchanged). Computed server-side
-       *  as a before/after diff, never re-derived client-side. */
-      lastSoulHarvest?: { player: PlayerId; delta: number } | null;
     }
   | {
       type: "gameOver";
@@ -356,14 +360,11 @@ export type ClientMessage =
          *  the doubled (Reinforced) Bulwark; absent/false is the plain
          *  1-charge cast, unchanged. */
         | { kind: "bulwark"; tokenId: number; reinforced?: boolean }
-        /** `tokenId` is one of the caster's OWN reserve tokens (from
-         *  power.raiseTargets — or power.darkRaiseTargets for the dark
-         *  cast — same target-id trust model as push). `dark` is additive,
-         *  Reinforced Bulwark's shape: true spends the full charge bank on
-         *  Dark Resurrection (the deeper placement); anything but `true`
-         *  is the plain 1-charge Raise (the server coerces, never echoes
-         *  a raw value). */
-        | { kind: "raiseDead"; tokenId: number; dark?: boolean }
+        /** Necromancer's Revive: no payload — the server's banked corpse
+         *  fully determines what rises and where. The client gates on
+         *  power.reviveSpawnTile being non-null; the server re-validates
+         *  against the same shared oracle. */
+        | { kind: "revive" }
         | { kind: "exhume"; targetTokenId: number };
     }
   | {

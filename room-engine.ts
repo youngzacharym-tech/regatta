@@ -52,8 +52,8 @@ import {
   applyExhume,
   applyPowerMove,
   applyPush as mkApplyPush,
-  applyRaiseDead,
   applyReflip as mkApplyReflip,
+  applyRevive,
   applyWarpath,
   breakShieldStreak,
   canReflipAgain,
@@ -64,12 +64,14 @@ import {
   getExhumeTargets,
   getLegalPowerMoves,
   getPushTargets,
-  getRaiseTargets,
+  getReviveSpawnTile,
   getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
+  REVIVE_COST,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
+  tickThrallForNewTurn,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -123,6 +125,10 @@ export interface WirePowerState {
   ultimateReady: Record<PlayerId, boolean>;
   bulwarked: Record<number, number>;
   bulwarkSaves: Record<number, number>;
+  /** Necromancer rework (2026-07-19): corpse marker + active thrall — see
+   *  PowerState's docs. Plain JSON, rides the doc verbatim. */
+  corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
 }
 
 export function toWirePower(p: PowerState): WirePowerState {
@@ -145,6 +151,13 @@ export function fromWirePower(w: WirePowerState): PowerState {
     // 1-block cast, which an empty map means exactly. (A doc persisted with
     // the retired safeTokens array just carries a harmless extra key.)
     bulwarkSaves: w.bulwarkSaves ?? {},
+    // Docs persisted before the necromancer rework have neither corpse nor
+    // thrall — no possession in flight, which the null pair means exactly.
+    // (Their live necromancers ALSO lose the old Raise kit mid-game; the
+    // deploy ships a rules change, not just a schema one, and the old
+    // fields simply stop being read.)
+    corpse: w.corpse ?? { p1: null, p2: null },
+    thrall: w.thrall ?? { p1: null, p2: null },
   };
 }
 
@@ -178,13 +191,18 @@ export interface PublicPower {
   /** Shield-streak progress per player — ADDITIVE, same activity-log pass
    *  (diagnosing "did my Dark Resurrection count toward the ultimate"). */
   shieldStreak?: Record<PlayerId, number>;
-  raiseTargets: number[];
-  /** Dark Resurrection's own list — same reserve-token pool as raiseTargets
-   *  but gated on ITS destination tile, which can be free when the plain
-   *  cast's is blocked (and vice versa). Without it the client would gate
-   *  the full-bank gem on the plain cast's list and a server-legal dark
-   *  cast could become unsendable. ADDITIVE field, raiseTargets' twin. */
-  darkRaiseTargets: number[];
+  /** Necromancer rework: the corpse each player has banked, broadcast only
+   *  while still RAISABLE (its token waiting in reserve) — the client's
+   *  corpse decal and the DENIED inference both key off presence here. */
+  corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  /** The active possession, if any: which token serves which player and
+   *  for how many more of their turns — drives the possession VFX and the
+   *  activity log's lifecycle panel. */
+  thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** getReviveSpawnTile's answer for the CURRENT player (null = Revive not
+   *  castable right now) — the client's gem gate and spawn preview, the
+   *  server's own validation, and the bot all read the same oracle. */
+  reviveSpawnTile: number | null;
   exhumeTargets: number[];
   /** How many Re-flips the CURRENT player has already fired this turn —
    *  drives the client's Re-flip button gate (charges alone can't: a Mage
@@ -242,26 +260,26 @@ export type RoomEvent =
        *  happened and the client still owes the proc. Events from before
        *  this field existed read as undefined ≙ null. */
       lastReflip?: { player: PlayerId } | null;
-      /** Necromancer's Raise Dead just resolved on this commit. Same
+      /** Necromancer's Revive just resolved on this commit. Same
        *  turn-continues lifecycle as lastReflip: the flip is unchanged and
-       *  the move list was recomputed against the board the raised token
-       *  now stands on. `dark` is additive: true when the cast was the
-       *  full-bank Dark Resurrection. Events from before this field
-       *  existed read as undefined ≙ null. */
-      lastRaise?: { tokenId: number; dark?: boolean } | null;
+       *  the move list was recomputed against the board the risen thrall
+       *  now stands on. `tile` is the spawn the walk actually chose
+       *  (server-computed, never re-derived client-side). */
+      lastRevive?: { tokenId: number; tile: number } | null;
+      /** A thrall crumbled at the start of this commit's turn (its
+       *  duration ran out) — the token is back in its real owner's
+       *  reserve. Drives the crumble VFX + activity log lifecycle. */
+      lastThrallExpired?: { tokenId: number } | null;
+      /** The corpse's owner re-entered the marked token this commit — the
+       *  soul is reclaimed and the necromancer's Revive is denied. Derived
+       *  server-side in applyMkMove (corpse token moved from reserve by
+       *  its owner), same authority rule as every announcement here. */
+      lastCorpseDenied?: { tokenId: number } | null;
       /** Necromancer's Exhume ultimate just resolved on this commit — same
        *  lifecycle as lastUltimate. `returnedTo` is the tile the occupancy
        *  walk actually landed the dragged token on (server-computed, never
        *  re-derived client-side). */
       lastExhume?: { targetTokenId: number; returnedTo: number } | null;
-      /** Soul Harvest paid the VICTIM on this commit: the necromancer's
-       *  charge gain from their own tokens being sent home. Deliberately
-       *  separate from lastChargeEvent, which carries only ONE player's
-       *  delta — a capture against a necromancer changes BOTH banks in a
-       *  single commit (the actor's side stays in lastChargeEvent,
-       *  unchanged). Computed server-side as a before/after diff of the
-       *  victim's bank, same authority rule as lastChargeEvent. */
-      lastSoulHarvest?: { player: PlayerId; delta: number } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -332,15 +350,17 @@ export interface RoomDoc {
   /** See RoomEvent's doc: set only on the commit where a Re-flip resolved.
    *  Docs persisted before this field existed read as undefined ≙ null. */
   lastReflip?: { player: PlayerId } | null;
-  /** See RoomEvent's doc: set only on the commit where a Raise Dead
-   *  resolved. Docs persisted before this field existed read as
-   *  undefined ≙ null. */
-  lastRaise?: { tokenId: number; dark?: boolean } | null;
+  /** See RoomEvent's doc: set only on the commit where a Revive resolved.
+   *  Docs persisted before this field existed read as undefined ≙ null. */
+  lastRevive?: { tokenId: number; tile: number } | null;
+  /** See RoomEvent's doc: set on the commit whose turn-start crumbled a
+   *  thrall. */
+  lastThrallExpired?: { tokenId: number } | null;
+  /** See RoomEvent's doc: set on the commit where the corpse's owner
+   *  re-entered the marked token, denying the Revive. */
+  lastCorpseDenied?: { tokenId: number } | null;
   /** See RoomEvent's doc: set only on the commit where an Exhume resolved. */
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
-  /** See RoomEvent's doc: set only on the commit where Soul Harvest paid
-   *  the victim. */
-  lastSoulHarvest?: { player: PlayerId; delta: number } | null;
 }
 
 // ============================================================================
@@ -364,11 +384,10 @@ export type RoomActionInput =
          *  Bulwark, unchanged; true spends the full bank on the doubled
          *  cast (see master-killer.ts's BULWARK_REINFORCED_TURNS). */
         | { kind: "bulwark"; tokenId: number; reinforced?: boolean }
-        /** `dark` is ADDITIVE, Reinforced Bulwark's shape: absent/false is
-         *  the plain 1-charge Raise to RAISE_POSITION; true spends the
-         *  full bank on Dark Resurrection (see master-killer.ts's
-         *  DARK_RESURRECTION_POSITION). */
-        | { kind: "raiseDead"; tokenId: number; dark?: boolean }
+        /** Necromancer's Revive: no payload — the banked corpse fully
+         *  determines what rises and where (getReviveSpawnTile is the
+         *  shared legality oracle). */
+        | { kind: "revive" }
         | { kind: "exhume"; targetTokenId: number };
     }
   | { op: "newMatch" }
@@ -424,6 +443,16 @@ function otherSeat(seat: PlayerId): PlayerId {
   return seat === "p1" ? "p2" : "p1";
 }
 
+/** A player's corpse, but only while it's still raisable (its token waiting
+ *  in reserve) — the lazy-denial rule getReviveSpawnTile enforces, applied
+ *  to the broadcast so clients never see a dead-lettered marker. */
+function raisableCorpse(doc: RoomDoc, player: PlayerId): { tokenId: number; tile: number } | null {
+  const corpse = doc.mk?.corpse?.[player] ?? null;
+  if (!corpse) return null;
+  const body = doc.state.tokens.find((t) => t.id === corpse.tokenId);
+  return body && body.position === -1 ? corpse : null;
+}
+
 /** The public MK block both seats may see (target lists are computed for the
  *  CURRENT player only — they're empty/meaningless for the other seat). */
 export function publicPower(doc: RoomDoc): PublicPower | null {
@@ -465,17 +494,15 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
     bulwarkTurns: { ...doc.mk.bulwarked },
     bulwarkSavesLeft: { ...doc.mk.bulwarkSaves },
     shieldStreak: { ...doc.mk.shieldStreak },
-    raiseTargets:
-      doc.mk.classes[mover] === "necromancer" && doc.mk.charges[mover] >= 1
-        ? getRaiseTargets(doc.state, p, mover)
-        : [],
-    // Same >= 1 gate as raiseTargets (not the full-bank one) so the two
-    // lists appear together and the client can tell "reserve is empty"
-    // from "destination blocked"; affordability stays the gem's own gate.
-    darkRaiseTargets:
-      doc.mk.classes[mover] === "necromancer" && doc.mk.charges[mover] >= 1
-        ? getRaiseTargets(doc.state, p, mover, true)
-        : [],
+    corpse: {
+      // Broadcast only while raisable — the moment the victim re-enters
+      // the marked token the decal (and the threat) vanish for both seats.
+      p1: raisableCorpse(doc, "p1"),
+      p2: raisableCorpse(doc, "p2"),
+    },
+    thrall: { p1: doc.mk.thrall?.p1 ?? null, p2: doc.mk.thrall?.p2 ?? null },
+    reviveSpawnTile:
+      doc.mk.classes[mover] === "necromancer" ? getReviveSpawnTile(doc.state, p, mover) : null,
     exhumeTargets:
       doc.mk.classes[mover] === "necromancer" && doc.mk.ultimateReady[mover]
         ? getExhumeTargets(doc.state, p, mover)
@@ -534,9 +561,10 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastUltimate: doc.lastUltimate,
     lastChargeSweep: doc.lastChargeSweep ?? null,
     lastReflip: doc.lastReflip ?? null,
-    lastRaise: doc.lastRaise ?? null,
+    lastRevive: doc.lastRevive ?? null,
+    lastThrallExpired: doc.lastThrallExpired ?? null,
+    lastCorpseDenied: doc.lastCorpseDenied ?? null,
     lastExhume: doc.lastExhume ?? null,
-    lastSoulHarvest: doc.lastSoulHarvest ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -561,7 +589,7 @@ export function freshMatchFields(
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
-  | "lastReflip" | "lastRaise" | "lastExhume" | "lastSoulHarvest" | "rescueAttempted"
+  | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastExhume" | "rescueAttempted"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -587,9 +615,10 @@ export function freshMatchFields(
     lastBulwark: null,
     lastBulwarkBlock: null,
     lastReflip: null,
-    lastRaise: null,
+    lastRevive: null,
+    lastThrallExpired: null,
+    lastCorpseDenied: null,
     lastExhume: null,
-    lastSoulHarvest: null,
     rescueAttempted: false,
   };
 }
@@ -723,7 +752,7 @@ export function applyAction(
       // neither ride into the doc verbatim nor diverge from what
       // validateUsePower gated on (which coerces identically).
       if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced === true) };
-      if (a.kind === "raiseDead") return { doc: applyMkRaise(doc, seat, a.tokenId, a.dark === true, now) };
+      if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
@@ -792,23 +821,14 @@ function validateUsePower(
       }
       if (!getBulwarkTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Bulwark target";
       return null;
-    case "raiseDead":
-      if (cls !== "necromancer") return "Only a Necromancer can Raise Dead";
-      // `=== true`, matching the dispatch's coercion — a truthy non-boolean
-      // must gate the same variant (cost AND destination) that gets applied.
-      if (a.dark === true) {
-        // Same full-bank gate as Reinforced Bulwark's: Dark Resurrection is
-        // a uniform "has the mover banked the whole cap" check, identical
-        // for every target.
-        if (doc.mk.charges[seat] !== CHARGE_CAP) return "Dark Resurrection needs a full charge bank";
-      } else if (doc.mk.charges[seat] < 1) {
-        return "No charge available";
-      }
-      // Raise keeps the SAME flip alive (see applyMkRaise) — there has to
+    case "revive":
+      if (cls !== "necromancer") return "Only a Necromancer can Revive";
+      // Revive keeps the SAME flip alive (see applyMkRevive) — there has to
       // be one to keep, same guard as chooseMove's.
       if (doc.currentFlip === null) return "No flip yet";
-      if (!getRaiseTargets(doc.state, p(), seat, a.dark === true).includes(a.tokenId))
-        return "Invalid Raise Dead target";
+      // Everything else — corpse banked, corpse still raisable, no thrall
+      // up, full soul bank — is getReviveSpawnTile's single shared oracle.
+      if (getReviveSpawnTile(doc.state, p(), seat) === null) return "Revive not castable";
       return null;
     case "exhume":
       if (cls !== "necromancer") return "Only a Necromancer can Exhume";
@@ -839,9 +859,10 @@ const CLEAR_SLOTS = {
   lastUltimate: null,
   lastChargeSweep: null,
   lastReflip: null,
-  lastRaise: null,
+  lastRevive: null,
+  lastThrallExpired: null,
+  lastCorpseDenied: null,
   lastExhume: null,
-  lastSoulHarvest: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -850,16 +871,17 @@ const CLEAR_SLOTS = {
 function applyMkMove(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number, rand: () => number): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
   const foe = otherSeat(seat);
-  const foeChargesBefore = doc.mk!.charges[foe];
   const r = applyPowerMove(doc.state, fromWirePower(doc.mk!), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
-  // Soul Harvest pays the VICTIM's side of the table: lastChargeEvent only
-  // carries the actor's delta, so the foe's gain gets its own authoritative
-  // before/after diff — non-null only when a necromancer just had tokens
-  // sent home (nothing else touches the non-mover's bank mid-commit).
-  const foeDelta = r.power.charges[foe] - foeChargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
   const caps = move.captures.length + move.bonusCaptures.length + rainHit;
+  // Corpse denial: the mover just re-entered the exact token the enemy
+  // necromancer's corpse marker points at — the soul is reclaimed. Derived
+  // here (the only path a reserve token re-enters by) so the client gets
+  // an authoritative announcement instead of inferring from the corpse
+  // field vanishing.
+  const foeCorpse = doc.mk!.corpse?.[foe] ?? null;
+  const corpseDenied = foeCorpse !== null && move.tokenId === foeCorpse.tokenId && move.from === -1;
   let next: RoomDoc = {
     ...doc,
     ...CLEAR_SLOTS,
@@ -871,7 +893,7 @@ function applyMkMove(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number,
     lastMove: move,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
-    lastSoulHarvest: foeDelta !== 0 ? { player: foe, delta: foeDelta } : null,
+    lastCorpseDenied: corpseDenied ? { tokenId: move.tokenId } : null,
     lastRainOfArrows: r.rainOfArrows,
   };
   return commitFrame(next, now, stateEventOf(next));
@@ -879,12 +901,8 @@ function applyMkMove(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number,
 
 function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number, rand: () => number): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
-  const foe = otherSeat(seat);
-  const foeChargesBefore = doc.mk!.charges[foe];
   const r = mkApplyCharge(doc.state, fromWirePower(doc.mk!), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
-  // Same foe-side Soul Harvest diff as applyMkMove's — see the note there.
-  const foeDelta = r.power.charges[foe] - foeChargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
   const caps = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
   let next: RoomDoc = {
@@ -898,7 +916,6 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
     lastMove: move,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
-    lastSoulHarvest: foeDelta !== 0 ? { player: foe, delta: foeDelta } : null,
     lastRainOfArrows: r.rainOfArrows,
     lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures },
   };
@@ -918,8 +935,6 @@ function applyMkSimple(
   reinforced = false,
 ): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
-  const foe = otherSeat(seat);
-  const foeChargesBefore = doc.mk!.charges[foe];
   const power = fromWirePower(doc.mk!);
   let r: { state: GameState; power: PowerState; sweptTokenIds?: number[] };
   let slots: Partial<RoomDoc> = {};
@@ -960,10 +975,6 @@ function applyMkSimple(
     }
   }
   const delta = r.power.charges[seat] - chargesBefore;
-  // Same foe-side Soul Harvest diff as applyMkMove's — see the note there.
-  // Live for push/chargedShot/blinkStrike/warpath sends-home; always 0 for
-  // bulwark and exhume, which capture nothing.
-  const foeDelta = r.power.charges[foe] - foeChargesBefore;
   let next: RoomDoc = {
     ...doc,
     ...CLEAR_SLOTS,
@@ -975,7 +986,6 @@ function applyMkSimple(
     captures: capsGained ? { ...doc.captures, [seat]: doc.captures[seat] + capsGained } : doc.captures,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
-    lastSoulHarvest: foeDelta !== 0 ? { player: foe, delta: foeDelta } : null,
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1014,42 +1024,42 @@ function applyMkReflip(doc: RoomDoc, seat: PlayerId, now: number, rand: () => nu
   return commitFrame(next, now, stateEventOf(next));
 }
 
-/** Raise Dead does NOT end the turn: the raised token joins the board and
- *  the SAME flip re-resolves against it — Re-flip's contract, minus the
- *  re-roll (see applyRaiseDead's doc in master-killer.ts). The commit
- *  resets waitingSince, so a pending auto-skip deadline restarts against
- *  the recomputed move list by construction. */
-function applyMkRaise(doc: RoomDoc, seat: PlayerId, tokenId: number, dark: boolean, now: number): RoomDoc {
+/** Revive does NOT end the turn: the risen thrall joins the board and the
+ *  SAME flip re-resolves against it — Re-flip's contract, minus the
+ *  re-roll (see applyRevive's doc in master-killer.ts). The commit resets
+ *  waitingSince, so a pending auto-skip deadline restarts against the
+ *  recomputed move list by construction. */
+function applyMkRevive(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
   const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
-  const raised = applyRaiseDead(doc.state, fromWirePower(doc.mk!), tokenId, seat, dark);
-  // Move list FIRST (against the post-raise board), THEN the same-turn
-  // Bulwark re-check, exactly the Re-flip path's: the raised token can
-  // reveal capture threats the pre-raise board didn't have (no expiry
-  // tick — it's still the same turn), and a Bulwark that blocks one eats
-  // that threat for this flip, so the served list must come from the
+  const risen = applyRevive(doc.state, fromWirePower(doc.mk!), seat);
+  // Move list FIRST (against the post-revive board), THEN the same-turn
+  // Bulwark re-check, exactly the Re-flip path's: the thrall can reveal
+  // capture threats the pre-revive board didn't have (no expiry tick —
+  // it's still the same turn), and a Bulwark that blocks one eats that
+  // threat for this flip, so the served list must come from the
   // pre-consumption power — commitTurnFlip's and both sims' ordering.
-  const currentPowerMoves = getLegalPowerMoves(raised.state, raised.power, flip);
-  const bulwarkResult = tickBulwarkForReflip(raised.state, raised.power, flip);
+  const currentPowerMoves = getLegalPowerMoves(risen.state, risen.power, flip);
+  const bulwarkResult = tickBulwarkForReflip(risen.state, risen.power, flip);
   const power = bulwarkResult.power;
   const delta = power.charges[seat] - chargesBefore;
   let next: RoomDoc = {
     ...doc,
     ...CLEAR_SLOTS,
-    state: raised.state,
+    state: risen.state,
     mk: toWirePower(power),
     currentFlip: flip,
     currentPowerMoves,
     lastMovePlayer: doc.lastMovePlayer,
     lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
-    lastRaise: { tokenId, dark },
-    // A raise during a zero flip spends AFTER the flip commit banked the
+    lastRevive: { tokenId: risen.raisedTokenId, tile: risen.raisedTo },
+    // A revive during a zero flip spends AFTER the flip commit banked the
     // grant's baseline: shift the baseline down by the same spend so the
     // auto-skip commit still announces exactly the grant (see the flip-zero
     // branch in tickOnce), not grant-minus-spend.
     zeroFlipChargeBefore:
-      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - (dark ? CHARGE_CAP : 1) : null,
+      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - REVIVE_COST : null,
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1094,17 +1104,16 @@ function autoSkipDelay(doc: RoomDoc): number {
     if (doc.mk.classes[mover] === "mage" && canReflipAgain(p, mover)) {
       return AUTO_SKIP_WITH_RESCUE_MS; // human Mage gets a real Re-flip window
     }
-    // The Necromancer has the SAME dead-flip rescue as the Mage: Raise Dead
-    // keeps the flip and recomputes the move list against the raised board
-    // (the risen stone may be the one that moves) — so a human with a
-    // castable raise gets the same window. Flip-zero stays a snappy skip:
-    // no raise can conjure a legal move out of a zero.
+    // The Necromancer has the SAME dead-flip rescue as the Mage: Revive
+    // keeps the flip and recomputes the move list against the risen board
+    // (the thrall may be the one that moves) — so a human with a castable
+    // Revive gets the same window. Flip-zero stays a snappy skip: no
+    // revive can conjure a legal move out of a zero.
     if (
       doc.mk.classes[mover] === "necromancer" &&
       doc.currentFlip !== null &&
       doc.currentFlip !== 0 &&
-      ((doc.mk.charges[mover] >= 1 && getRaiseTargets(doc.state, p, mover).length > 0) ||
-        (doc.mk.charges[mover] === CHARGE_CAP && getRaiseTargets(doc.state, p, mover, true).length > 0))
+      getReviveSpawnTile(doc.state, p, mover) !== null
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
@@ -1263,28 +1272,36 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
       return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
-    case "raiseDead":
-      return applyMkRaise(doc, seat, action.tokenId, action.dark ?? false, now);
+    case "revive":
+      return applyMkRevive(doc, seat, now);
     case "exhume":
       return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
   }
 }
 
-/** Start a turn: flip the coins, deal the zero-flip charge, tick Bulwark. */
+/** Start a turn: flip the coins, deal the zero-flip charge, tick the
+ *  thrall (BEFORE move gen — a crumbling thrall changes the board the
+ *  move list and the Bulwark check must both read), then tick Bulwark. */
 function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
   const flip = flipCoins(rand);
   let mk = doc.mk;
+  let state = doc.state;
   let currentPowerMoves: PowerMove[] | null = null;
   let zeroFlipChargeBefore: number | null = null;
   let lastBulwarkBlock: RoomDoc["lastBulwarkBlock"] = null;
+  let lastThrallExpired: RoomDoc["lastThrallExpired"] = null;
   if (doc.variant === "masterKiller" && mk) {
     let power = fromWirePower(mk);
     if (flip === 0) {
-      zeroFlipChargeBefore = power.charges[doc.state.currentPlayer];
-      power = grantZeroFlipCharge(power, doc.state.currentPlayer);
+      zeroFlipChargeBefore = power.charges[state.currentPlayer];
+      power = grantZeroFlipCharge(power, state.currentPlayer);
     }
-    currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
-    const bulwarkResult = tickBulwarkForNewTurn(doc.state, power, flip);
+    const thrallResult = tickThrallForNewTurn(state, power);
+    state = thrallResult.state;
+    power = thrallResult.power;
+    if (thrallResult.expiredTokenId !== null) lastThrallExpired = { tokenId: thrallResult.expiredTokenId };
+    currentPowerMoves = getLegalPowerMoves(state, power, flip);
+    const bulwarkResult = tickBulwarkForNewTurn(state, power, flip);
     power = bulwarkResult.power;
     if (bulwarkResult.blockedIds.length > 0) lastBulwarkBlock = { tokenIds: bulwarkResult.blockedIds };
     mk = toWirePower(power);
@@ -1292,11 +1309,13 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
   let next: RoomDoc = {
     ...doc,
     ...CLEAR_SLOTS,
+    state,
     currentFlip: flip,
     mk,
     currentPowerMoves,
     turns: doc.turns + 1,
     lastBulwarkBlock,
+    lastThrallExpired,
     zeroFlipChargeBefore,
   };
   return commitFrame(next, now, stateEventOf(next));

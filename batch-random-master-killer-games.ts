@@ -24,17 +24,19 @@ import {
   applyExhume,
   applyPowerMove,
   applyPush,
-  applyRaiseDead,
   applyReflip,
+  applyRevive,
   applyWarpath,
   breakShieldStreak,
   CHARGE_CAP,
   getLegalPowerMoves,
   grantZeroFlipCharge,
   initialPowerState,
+  possessorOf,
   REFLIPS_PER_TURN,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
+  tickThrallForNewTurn,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -63,10 +65,11 @@ interface GameResult {
     bulwark: number;
     bulwarkReinforced: number; // full-bank Reinforced Bulwark casts (subset of bulwark)
     bulwarkBlock: number;
-    raise: number; // plain (1-charge) Raise Dead casts
-    darkRaise: number; // full-bank Dark Resurrection casts (NOT a subset of raise)
+    revive: number; // full-soul-bank Revive casts (thralls raised)
+    thrallKill: number; // captures made BY a thrall (the chain-necromancy engine)
+    corpseDeny: number; // corpse voided by the victim re-entering the marked token
+    thrallExpired: number; // thralls that crumbled at full duration (vs being killed)
     exhume: number;
-    soulHarvest: number; // victim-side charges actually banked (post-CHARGE_CAP clamp)
   };
 }
 
@@ -88,6 +91,13 @@ function takeTurn(
   // it, exactly like the real server. (Used to be granted only in the
   // skip path below, which under-modeled that rescue.)
   if (flip === 0) power = grantZeroFlipCharge(power, mover);
+  // Necromancer thrall: tick the mover's own possession BEFORE move gen —
+  // a crumbling thrall changes the board the move list must read. Same
+  // order as room-engine's commitTurnFlip.
+  const thrallTick = tickThrallForNewTurn(state, power);
+  state = thrallTick.state;
+  power = thrallTick.power;
+  const thrallExpiredThisTurn = thrallTick.expiredTokenId !== null;
   let moves = getLegalPowerMoves(state, power, flip);
   // Warrior Bulwark: tick the mover's own countdown, and consume any
   // Bulwark this exact flip's moves reveal as blocked for the opponent —
@@ -97,26 +107,24 @@ function takeTurn(
   let bulwarkBlockedThisTurn = newTurnBulwark.blockedIds.length > 0;
   let action = pickBotPowerAction(state, power, moves, flip, rand);
 
-  // Neither a Re-flip nor a Raise ends the turn: a Mage holding both charges
-  // may fire up to REFLIPS_PER_TURN Re-flips back-to-back, and a Necromancer
-  // may Raise (structurally at most once per turn — a second plain cast is
-  // blocked by the first token now on RAISE_POSITION, and any plain+dark
-  // pairing overspends the bank; see DARK_RESURRECTION_POSITION's doc). One
-  // loop handles both, bounded by the sum of those caps plus one for safety
-  // against a bot bug, exactly like the server's own act-then-redecide
-  // cycle. NOTE: a re-rolled zero grants its charge back inside the real
-  // server path (applyMkReflip); mirrored here so the sim's charge economy
-  // can't drift from the transports'. A Raise keeps the SAME flip
-  // (applyRaiseDead's contract — no re-roll, no zero-flip grant, `flips`
+  // Neither a Re-flip nor a Revive ends the turn: a Mage holding both
+  // charges may fire up to REFLIPS_PER_TURN Re-flips back-to-back, and a
+  // Necromancer may Revive (structurally at most once per turn — the cast
+  // fills the thrall slot and empties the bank). One loop handles both,
+  // bounded by the sum of those caps plus one for safety against a bot
+  // bug, exactly like the server's own act-then-redecide cycle. NOTE: a
+  // re-rolled zero grants its charge back inside the real server path
+  // (applyMkReflip); mirrored here so the sim's charge economy can't
+  // drift from the transports'. A Revive keeps the SAME flip
+  // (applyRevive's contract — no re-roll, no zero-flip grant, `flips`
   // untouched so playOne's reflip accounting stays exact) but the BOARD
   // changed, so it recomputes moves and runs the same tickBulwarkForReflip
-  // hook a Re-flip does: same-turn recompute, no expiry tick, yet the fresh
-  // move list can reveal a Bulwark block the pre-raise one couldn't.
-  let raises = 0;
-  let darkRaises = 0;
+  // hook a Re-flip does: same-turn recompute, no expiry tick, yet the
+  // fresh move list can reveal a Bulwark block the pre-revive one couldn't.
+  let revives = 0;
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "raiseDead") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
+    (action?.kind === "reflip" || action?.kind === "revive") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
     i++
   ) {
     if (action.kind === "reflip") {
@@ -125,11 +133,10 @@ function takeTurn(
       flip = flipCoins();
       if (flip === 0) power = grantZeroFlipCharge(power, mover);
     } else {
-      const r = applyRaiseDead(state, power, action.tokenId, mover, action.dark ?? false);
+      const r = applyRevive(state, power, mover);
       state = r.state;
       power = r.power;
-      if (action.dark) darkRaises++;
-      else raises++;
+      revives++;
     }
     moves = getLegalPowerMoves(state, power, flip);
     const sameTurnBulwark = tickBulwarkForReflip(state, power, flip);
@@ -139,20 +146,20 @@ function takeTurn(
   }
 
   // Usage the turn already earned regardless of what the FINAL action turns
-  // out to be — Bulwark blocks revealed along the way, plus any Raises the
+  // out to be — Bulwark blocks revealed along the way, plus any Revives the
   // loop applied (they really happened even if the turn then dead-ends).
   const turnUsage: Partial<GameResult["usage"]> = {
     ...(bulwarkBlockedThisTurn ? { bulwarkBlock: 1 } : {}),
-    ...(raises > 0 ? { raise: raises } : {}),
-    ...(darkRaises > 0 ? { darkRaise: darkRaises } : {}),
+    ...(revives > 0 ? { revive: revives } : {}),
+    ...(thrallExpiredThisTurn ? { thrallExpired: 1 } : {}),
   };
 
-  // A leftover "reflip"/"raiseDead" here would mean the bot ignored its own
+  // A leftover "reflip"/"revive" here would mean the bot ignored its own
   // per-turn guards past the loop's safety bound — shouldn't happen at
-  // runtime (pickBotPowerAction checks canReflipAgain / the target pools),
-  // but the return TYPE can't prove that statically, so it's treated the
-  // same as "no action" rather than left unhandled.
-  if (action === null || action.kind === "reflip" || action.kind === "raiseDead") {
+  // runtime (pickBotPowerAction checks canReflipAgain / the shared revive
+  // oracle), but the return TYPE can't prove that statically, so it's
+  // treated the same as "no action" rather than left unhandled.
+  if (action === null || action.kind === "reflip" || action.kind === "revive") {
     // No zero-flip grant here — it already happened on the flip commit
     // above (or inside the re-flip loop), matching the server's ordering.
     // The skip DOES break a live shield streak — room-engine's auto-skip
@@ -165,6 +172,13 @@ function takeTurn(
 
   switch (action.kind) {
     case "move": {
+      // Thrall-kill and corpse-denial accounting read the PRE-apply power:
+      // was the mover's stone a thrall, and was this entry the foe's corpse?
+      const foe: PlayerId = mover === "p1" ? "p2" : "p1";
+      const thrallKill =
+        possessorOf(power, action.move.tokenId) === mover && action.move.captures.length > 0;
+      const corpseDeny =
+        power.corpse[foe]?.tokenId === action.move.tokenId && action.move.from === -1;
       const r = applyPowerMove(state, power, action.move, mover, rand);
       const rainHit = r.rainOfArrows?.targetTokenId != null;
       const sweepSize = action.move.captures.length + action.move.bonusCaptures.length + (rainHit ? 1 : 0);
@@ -177,6 +191,8 @@ function takeTurn(
           ...turnUsage,
           ...(action.move.bonusCaptures.length > 0 ? { snipe: 1 } : {}),
           ...(rainHit ? { rainOfArrows: 1 } : {}),
+          ...(thrallKill ? { thrallKill: 1 } : {}),
+          ...(corpseDeny ? { corpseDeny: 1 } : {}),
         },
       };
     }
@@ -266,20 +282,17 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     bulwark: 0,
     bulwarkReinforced: 0,
     bulwarkBlock: 0,
-    raise: 0,
-    darkRaise: 0,
+    revive: 0,
+    thrallKill: 0,
+    corpseDeny: 0,
+    thrallExpired: 0,
     exhume: 0,
-    soulHarvest: 0,
   };
   const rand = Math.random;
 
   while (state.winner === null && turns < MAX_TURNS_PER_GAME) {
     turns++;
     const wasReflipEligible = power.classes[state.currentPlayer] === "mage" && power.charges[state.currentPlayer] >= 1;
-    // Soul Harvest is VICTIM-side: snapshot the non-mover's bank so the
-    // post-turn diff can be attributed (see the counter below).
-    const victim: PlayerId = state.currentPlayer === "p1" ? "p2" : "p1";
-    const victimChargesBefore = power.charges[victim];
     const r = takeTurn(state, power, rand);
     state = r.state;
     power = r.power;
@@ -297,17 +310,13 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.bulwark) usage.bulwark++;
     if (r.usage.bulwarkReinforced) usage.bulwarkReinforced++;
     if (r.usage.bulwarkBlock) usage.bulwarkBlock++;
-    // Raises arrive as counts, not flags (the non-turn-ending loop could in
-    // principle fire more than one), so add rather than the boolean ++ style.
-    usage.raise += r.usage.raise ?? 0;
-    usage.darkRaise += r.usage.darkRaise ?? 0;
+    // Revives arrive as counts, not flags (the non-turn-ending loop shape),
+    // so add rather than the boolean ++ style.
+    usage.revive += r.usage.revive ?? 0;
+    if (r.usage.thrallKill) usage.thrallKill++;
+    if (r.usage.corpseDeny) usage.corpseDeny++;
+    if (r.usage.thrallExpired) usage.thrallExpired++;
     if (r.usage.exhume) usage.exhume++;
-    // Soul Harvest: grantSoulHarvest is the ONLY mutation of the non-mover's
-    // bank during the mover's turn (every other grant/spend targets the
-    // mover), so this diff is exactly the charges the victim banked from
-    // deaths this turn — post-CHARGE_CAP clamp, i.e. unbankable overflow
-    // souls deliberately don't count.
-    usage.soulHarvest += Math.max(0, power.charges[victim] - victimChargesBefore);
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -369,10 +378,11 @@ for (const [a, b] of matchups) {
   const avgBulwark = mean(results.map((r) => r.usage.bulwark));
   const avgBulwarkReinforced = mean(results.map((r) => r.usage.bulwarkReinforced));
   const avgBulwarkBlock = mean(results.map((r) => r.usage.bulwarkBlock));
-  const avgRaise = mean(results.map((r) => r.usage.raise));
-  const avgDarkRaise = mean(results.map((r) => r.usage.darkRaise));
+  const avgRevive = mean(results.map((r) => r.usage.revive));
+  const avgThrallKill = mean(results.map((r) => r.usage.thrallKill));
+  const avgCorpseDeny = mean(results.map((r) => r.usage.corpseDeny));
+  const avgThrallExpired = mean(results.map((r) => r.usage.thrallExpired));
   const avgExhume = mean(results.map((r) => r.usage.exhume));
-  const avgSoulHarvest = mean(results.map((r) => r.usage.soulHarvest));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
@@ -381,8 +391,8 @@ for (const [a, b] of matchups) {
       `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
       `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
       `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}` +
-      `  raise/g=${avgRaise.toFixed(2)}  darkRaise/g=${avgDarkRaise.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
-      `  soulHarvest/g=${avgSoulHarvest.toFixed(2)}`,
+      `  revive/g=${avgRevive.toFixed(2)}  thrallKill/g=${avgThrallKill.toFixed(3)}  corpseDeny/g=${avgCorpseDeny.toFixed(3)}` +
+      `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

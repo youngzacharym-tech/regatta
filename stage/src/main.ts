@@ -29,11 +29,12 @@ import {
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
-  DARK_RESURRECTION_POSITION,
   EXHUME_RETURN_POSITION,
   isWarded,
-  RAISE_POSITION,
+  NECRO_CHARGE_CAP,
   REFLIPS_PER_TURN,
+  REVIVE_COST,
+  THRALL_TURNS,
   type PlayerClass,
   type PowerMove,
   type PowerState,
@@ -713,6 +714,12 @@ const p1Mat = new THREE.MeshStandardMaterial({ color: 0xc02020, roughness: 0.6 }
 const p2Mat = new THREE.MeshStandardMaterial({ color: 0x2040c0, roughness: 0.6 });
 
 const STONE_TINT = 0xdcd3c1; // soft bone; keeps the stones from reading pure white
+/** Mirror matches only: the multiplier the OPPONENT's stones wear so two
+ *  identical class sculpts read apart at a glance (see applyTokenGeometries).
+ *  Cool slate — under it the warm reliefs go dusky while the sculpt stays
+ *  legible; chosen against STONE_TINT's warm bone so the split is hue, not
+ *  brightness (survives the iPad's reflective glass better). */
+const MIRROR_FOE_TINT = 0x93a7c9;
 
 interface TokenMarker {
   mesh: THREE.Mesh;
@@ -790,6 +797,26 @@ function applyTokenGeometries() {
     const geos = (cls ? classTokenGeos?.[cls] : null) ?? sculptedTokenGeos;
     if (geos) marker.mesh.geometry = owner === "p1" ? geos.red : geos.blue;
   });
+  // Mirror-match distinction (Kasen 2026-07-20): identical class sculpts on
+  // both sides read confusable — the vertex paint carries the class relief
+  // in the SAME colors for both teams (the red/blue variants differ only in
+  // the base coin's decoration). In a mirror, the OPPONENT's four stones
+  // take a cool slate multiplier over their vertex paint, viewer-relative:
+  // YOUR stones always wear the true palette on your own screen. Applied
+  // only once the sculpted materials are live (vertexColors on) — the
+  // pre-load placeholder red/blue materials already tell the sides apart.
+  {
+    const p1c = myVariant === "masterKiller" ? currentPower?.classes.p1 ?? pickedClasses.p1 : null;
+    const p2c = myVariant === "masterKiller" ? currentPower?.classes.p2 ?? pickedClasses.p2 : null;
+    const mirror = p1c !== null && p1c === p2c;
+    const me: PlayerId = myRole ?? "p1";
+    markers.forEach((marker, i) => {
+      const mat = marker.mesh.material as THREE.MeshStandardMaterial;
+      if (!mat.vertexColors) return;
+      const owner: PlayerId = i < 4 ? "p1" : "p2";
+      mat.color.setHex(mirror && owner !== me ? MIRROR_FOE_TINT : STONE_TINT);
+    });
+  }
   markShadowsDirty(); // geometry swaps change the casters
 }
 
@@ -1222,6 +1249,7 @@ function ensureMkPieces() {
 }
 
 function triggerCoinFlip(markedCount: number, set: CoinAnim[]) {
+  bumpKinetic();
   const now = performance.now();
   // Pick markedCount coin indices uniformly at random to show the marked face.
   const indices = [0, 1, 2, 3];
@@ -1373,11 +1401,14 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
 // the tiled wood textures, not these).
 // ---------------------------------------------------------------------------
-type StatusKind = "ward" | "bulwark" | "shieldTile";
+type StatusKind = "ward" | "bulwark" | "shieldTile" | "thrall";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
   shieldTile: 0xcfdcec,
+  // Possession wears the necromancer's blood red — the enemy stone serving
+  // the graveyard is marked in its master's color, not its owner's.
+  thrall: 0xd94a45,
 };
 /** Dashed rune-ring, drawn white so the material color carries the class —
  *  deliberately a different visual language from the solid "movable" ring. */
@@ -1447,6 +1478,72 @@ for (let i = 0; i < STATUS_RIG_COUNT; i++) {
 /** Which stones currently wear which protection — rebuilt per broadcast. */
 const statusMarks: { idx: number; kind: StatusKind }[] = [];
 
+// --- Corpse decals (necromancer rework) ------------------------------------
+// A grave mark on the tile where the necromancer's last kill fell — visible
+// to BOTH seats (the victim's re-entry-denial play depends on seeing it).
+// One decal per seat (a necromancer mirror can hold two corpses at once).
+// Position from tileWorldPos — corpse tiles are contested (4-11), the same
+// physical square in either numbering.
+function makeCorpseTexture(): THREE.CanvasTexture {
+  const s = 128;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  g.strokeStyle = "rgba(255,255,255,0.9)";
+  g.shadowBlur = 5;
+  g.shadowColor = "rgba(255,255,255,0.8)";
+  g.lineWidth = 5;
+  // The grave ring...
+  g.beginPath();
+  g.arc(s / 2, s / 2, 42, 0, Math.PI * 2);
+  g.stroke();
+  // ...and the crossed mark of the claimed soul.
+  g.lineWidth = 6;
+  g.beginPath();
+  g.moveTo(s / 2 - 16, s / 2 - 16);
+  g.lineTo(s / 2 + 16, s / 2 + 16);
+  g.moveTo(s / 2 + 16, s / 2 - 16);
+  g.lineTo(s / 2 - 16, s / 2 + 16);
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const corpseDecalGeo = new THREE.PlaneGeometry(0.5, 0.5);
+const corpseDecalTex = makeCorpseTexture();
+const corpseDecals: THREE.Mesh[] = (["p1", "p2"] as const).map(() => {
+  const mat = new THREE.MeshBasicMaterial({
+    map: corpseDecalTex,
+    color: 0xd94a45, // the necromancer's blood red, canon
+    transparent: true,
+    opacity: 0.85,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(corpseDecalGeo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.renderOrder = 1;
+  mesh.visible = false;
+  scene.add(mesh);
+  return mesh;
+});
+
+/** Sync the two corpse decals to the latest broadcast — called from
+ *  updateTokenTints (the per-broadcast status pass). */
+function updateCorpseDecals() {
+  (["p1", "p2"] as PlayerId[]).forEach((side, i) => {
+    const corpse = currentPower?.corpse?.[side] ?? null;
+    const mesh = corpseDecals[i];
+    if (!corpse) {
+      mesh.visible = false;
+      return;
+    }
+    const pos = tileWorldPos(side, corpse.tile);
+    mesh.position.set(pos.x, pos.y + 0.012, pos.z);
+    mesh.visible = true;
+  });
+}
+
 /** Master Killer only: mark warded / Bulwarked / Ward Breaker-safe /
  *  shield-tile-sheltered tokens for the protection rigs, plus a matching
  *  emissive lift on the sculpt itself. Reuses the real isWarded() from
@@ -1468,13 +1565,32 @@ function updateTokenTints(state: GameState) {
         ultimateReady: { p1: false, p2: false },
         bulwarked: {},
         bulwarkSaves: {},
+        // Real possession state, not a stub: isWarded consults it (a
+        // possessed token is never warded), and the thrall tint below
+        // reads it too.
+        corpse: currentPower.corpse ?? { p1: null, p2: null },
+        thrall: currentPower.thrall ?? { p1: null, p2: null },
       }
     : null;
+  // Which token (if any) is currently a thrall — possession outranks every
+  // other status read (a possessed stone can't be warded or Bulwarked by
+  // rule, so the branches below are mutually exclusive by construction).
+  const thrallIds = new Set<number>();
+  if (currentPower?.thrall) {
+    for (const side of ["p1", "p2"] as PlayerId[]) {
+      const th = currentPower.thrall[side];
+      if (th) thrallIds.add(th.tokenId);
+    }
+  }
   statusMarks.length = 0;
   state.tokens.forEach((token, idx) => {
     const mat = markers[idx].mesh.material as THREE.MeshStandardMaterial;
     let kind: StatusKind | null = null;
-    if (fakePower && isWarded(state, fakePower, token)) {
+    if (thrallIds.has(token.id)) {
+      kind = "thrall";
+      mat.emissive.setHex(0xd94a45); // the necromancer's claim, burning through
+      mat.emissiveIntensity = 0.62;
+    } else if (fakePower && isWarded(state, fakePower, token)) {
       kind = "ward";
       mat.emissive.setHex(0x8040ff); // violet — Mage ward
       mat.emissiveIntensity = 0.55;
@@ -1496,6 +1612,7 @@ function updateTokenTints(state: GameState) {
     }
     if (kind && statusMarks.length < STATUS_RIG_COUNT) statusMarks.push({ idx, kind });
   });
+  updateCorpseDecals();
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,13 +1638,21 @@ const gemsThem = document.getElementById("gems-them") as HTMLDivElement;
 const plateNameMe = document.getElementById("plate-name-me") as HTMLDivElement;
 const plateNameThem = document.getElementById("plate-name-them") as HTMLDivElement;
 
-// One gem socket per bankable charge, built from the real tunable so a
-// CHARGE_CAP change reshapes the frames automatically.
-for (const container of [gemsMe, gemsThem]) {
-  for (let i = 0; i < CHARGE_CAP; i++) {
-    container.appendChild(Object.assign(document.createElement("span"), { className: "gem" }));
+// Gem sockets are PER-CLASS now: everyone banks CHARGE_CAP, but the
+// necromancer's frame carries a third socket — the SOUL GEM, the pip only
+// a kill can light (see NECRO_CHARGE_CAP's doc in master-killer.ts). Built
+// on demand whenever a plate's class changes; starts as the common two.
+function rebuildGemSockets(container: HTMLDivElement, cls: PlayerClass | null) {
+  const cap = cls === "necromancer" ? NECRO_CHARGE_CAP : CHARGE_CAP;
+  if (container.childElementCount === cap && (cap === CHARGE_CAP || container.querySelector(".soul"))) return;
+  container.innerHTML = "";
+  for (let i = 0; i < cap; i++) {
+    const gem = document.createElement("span");
+    gem.className = i >= CHARGE_CAP ? "gem soul" : "gem";
+    container.appendChild(gem);
   }
 }
+for (const container of [gemsMe, gemsThem]) rebuildGemSockets(container, null);
 
 /** Classes as known during the class-pick phase — lets each plate appear the
  *  moment its class is chosen, before the first state broadcast
@@ -1573,6 +1698,7 @@ function updatePlates(state: GameState | null) {
     const src = `/avatars/${mine}.webp`;
     if (!portraitMe.src.endsWith(src)) portraitMe.src = src;
     plateNameMe.textContent = classLabel(mine);
+    rebuildGemSockets(gemsMe, mine);
     setGems(gemsMe, currentPower ? currentPower.charges[mySide] : 0);
     plateMe.classList.toggle("turn", live && state!.currentPlayer === mySide);
     plateMe.classList.add("show");
@@ -1584,6 +1710,7 @@ function updatePlates(state: GameState | null) {
     const src = `/avatars/${theirs}.webp`;
     if (!portraitThem.src.endsWith(src)) portraitThem.src = src;
     plateNameThem.textContent = classLabel(theirs);
+    rebuildGemSockets(gemsThem, theirs);
     setGems(gemsThem, currentPower ? currentPower.charges[theirSide] : 0);
     plateThem.classList.toggle("turn", live && state!.currentPlayer !== mySide);
     plateThem.classList.add("show");
@@ -1614,15 +1741,14 @@ let currentPower: {
    *  player has already fired this turn — gates the Re-flip button
    *  together with charges (see renderPowerActions). */
   reflipsUsedThisTurn?: number;
-  /** Optional (pre-necromancer servers omit them): Raise Dead's valid
-   *  targets — the caster's OWN reserve token ids — and Exhume's, the
-   *  opponent's ESCAPED token ids. Both mirror pushTargets' rule:
-   *  populated only for the current player, empty otherwise. */
-  raiseTargets?: number[];
-  /** Optional (older servers omit it): Dark Resurrection's own list — the
-   *  same reserve pool as raiseTargets but gated on ITS destination tile,
-   *  which can be free when the plain cast's is blocked (and vice versa). */
-  darkRaiseTargets?: number[];
+  /** Necromancer rework (2026-07-19): each player's banked corpse (only
+   *  while raisable — the server hides a dead-lettered marker), the active
+   *  possession, and where a Revive would rise for the CURRENT player
+   *  (null = not castable) — the client's whole gem gate. Exhume's targets
+   *  are the opponent's ESCAPED token ids, pushTargets' population rule. */
+  corpse?: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  thrall?: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  reviveSpawnTile?: number | null;
   exhumeTargets?: number[];
   /** Optional (older servers omit them): raw lifecycle numbers behind
    *  bulwarkedTokenIds and the streak — surfaced for the activity log's
@@ -1650,9 +1776,7 @@ type ArmedKind =
   | "warpath"
   | "bulwark"
   | "bulwarkReinforced"
-  | "charge"
-  | "raiseDead"
-  | "darkResurrection";
+  | "charge";
 let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
  *  sweep-capable move of the current roll (rebuilt by updateDock). The
@@ -1788,17 +1912,11 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "warrior",
     desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and Bulwarks.",
   },
-  raiseDead: {
-    name: "Raise Dead",
-    cost: "1 charge · keeps your turn",
+  revive: {
+    name: "Revive",
+    cost: `${REVIVE_COST} souls · keeps your turn`,
     klass: "necromancer",
-    desc: `Call a stone back from the graveyard: it rises on tile ${RAISE_POSITION + 1} and your flip stands — the risen stone may even be the one that moves. Rising is no landing: no extra turn, no charge, no shield streak.`,
-  },
-  darkResurrection: {
-    name: "Dark Resurrection",
-    cost: `${CHARGE_CAP} charges`,
-    klass: "necromancer",
-    desc: `The same rite with the whole bank behind it: the stone rises on tile ${DARK_RESURRECTION_POSITION + 1} instead — the last tile before shared water — trading every charge you hold for the head start.`,
+    desc: `Raise the enemy stone you last killed as your THRALL, on the very tile it died. For ${THRALL_TURNS} of your turns it fights for you — it moves on your flips, kills like any stone, and its blade ignores the Mage's Ward — but it can never leave shared water, and then it crumbles home. Your flip stands: the risen dead may be the one that moves.`,
   },
   exhume: {
     name: "Exhume",
@@ -1813,7 +1931,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Soul Harvest",
     cost: "Passive · always on",
     klass: "necromancer",
-    desc: "Every one of your stones an enemy sends home banks you a charge as it dies — one soul per stone, so a double capture pays twice. Aggression against the Necromancer is never free.",
+    desc: `Your kills feed you: every enemy stone you send home banks ${REVIVE_COST} souls — filling even the third gem, which no other income can touch — and leaves its corpse marked on the tile where it fell. While you hold a full bank, the marked body cannot rise on its own: the soul is yours until you spend it.`,
   },
 };
 
@@ -1903,8 +2021,7 @@ const DOCK_COST: Record<string, number> = {
   bulwarkReinforced: CHARGE_CAP,
   blinkStrike: 0,
   warpath: 0,
-  raiseDead: 1,
-  darkResurrection: CHARGE_CAP,
+  revive: REVIVE_COST,
   exhume: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
@@ -1917,8 +2034,7 @@ const DOCK_NAMES: Record<string, string> = {
   bulwarkReinforced: "Reinforced",
   blinkStrike: "Blink Strike",
   warpath: "Warpath",
-  raiseDead: "Raise Dead",
-  darkResurrection: "Resurrection",
+  revive: "Revive",
   exhume: "Exhume",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
@@ -1933,14 +2049,9 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean }[]> = {
     { ability: "bulwarkReinforced" },
     { ability: "warpath", ult: true },
   ],
-  // Dark Resurrection gets its own full-bank slot beside the plain Raise —
-  // Reinforced Bulwark's exact affordance (one wire kind, the flag slot).
-  // Soul Harvest is passive and gets no slot, same rule as Snipe.
-  necromancer: [
-    { ability: "raiseDead" },
-    { ability: "darkResurrection" },
-    { ability: "exhume", ult: true },
-  ],
+  // Revive is the class's one active (the old Raise pair retired with the
+  // rework). Soul Harvest is passive and gets no slot, same rule as Snipe.
+  necromancer: [{ ability: "revive" }, { ability: "exhume", ult: true }],
 };
 /** Ground-ring tint while targeting — the caster's class color (the ring
  *  texture is drawn white so this is a plain material recolor, see tick()). */
@@ -1962,8 +2073,6 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   bulwarkReinforced: "tap one of your stones",
   blinkStrike: "tap an enemy to strike",
   warpath: "tap an enemy to end on",
-  raiseDead: "tap a fallen stone in your reserve to raise",
-  darkResurrection: "tap a fallen stone in your reserve",
 };
 
 /** Class the dock is currently built for — rebuild only on change. */
@@ -2052,32 +2161,16 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (targets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
     }
-    // Each rite gates on ITS OWN server list (the destination tiles differ,
-    // and either can be blocked while the other is free — an own stone on
-    // tile 1 must not lock out a legal full-bank Dark Resurrection). When
-    // one list is empty but the sibling's isn't, the reserve clearly holds
-    // bodies, so the reason names the blocked tile instead.
-    case "raiseDead": {
-      if (charges < 1) return { state: "noafford", reason: needCharges(1) };
-      if ((p.raiseTargets ?? []).length === 0) {
-        const blocked = (p.darkRaiseTargets ?? []).length > 0;
-        return {
-          state: "noafford",
-          reason: blocked ? `Tile ${RAISE_POSITION + 1} is occupied` : "No fallen stones to raise",
-        };
-      }
-      return { state: "ready" };
-    }
-    case "darkResurrection": {
-      if (charges < CHARGE_CAP) return { state: "noafford", reason: needCharges(CHARGE_CAP) };
-      if ((p.darkRaiseTargets ?? []).length === 0) {
-        const blocked = (p.raiseTargets ?? []).length > 0;
-        return {
-          state: "noafford",
-          reason: blocked ? `Tile ${DARK_RESURRECTION_POSITION + 1} is occupied` : "No fallen stones to raise",
-        };
-      }
-      return { state: "ready" };
+    // The server's reviveSpawnTile is the single oracle; the client only
+    // decomposes WHY it's null into a teachable reason, in the order the
+    // player can actually act on: free the slot, mark a corpse, fill the
+    // soul bank.
+    case "revive": {
+      if ((p.reviveSpawnTile ?? null) !== null) return { state: "ready" };
+      if (p.thrall?.[mySide]) return { state: "noafford", reason: "Your thrall still serves" };
+      if (!p.corpse?.[mySide]) return { state: "noafford", reason: "No corpse — kill to mark one" };
+      if (charges < REVIVE_COST) return { state: "noafford", reason: `Need ${REVIVE_COST} souls` };
+      return { state: "noafford", reason: "Revive not castable" };
     }
     case "exhume":
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
@@ -2133,8 +2226,9 @@ function updateDock(active?: boolean) {
     p.blinkStrikeTargets.join(),
     p.warpathTargets.join(),
     p.bulwarkTargets.join(),
-    (p.raiseTargets ?? []).join(),
-    (p.darkRaiseTargets ?? []).join(),
+    p.reviveSpawnTile ?? "",
+    JSON.stringify(p.corpse ?? null),
+    JSON.stringify(p.thrall ?? null),
     (p.exhumeTargets ?? []).join(),
     [...chargeMoveIndexByToken.keys()].join(),
   ].join("|");
@@ -2182,11 +2276,7 @@ function armAbility(kind: ArmedKind) {
             ? p.warpathTargets
             : kind === "charge"
               ? [...chargeMoveIndexByToken.keys()]
-              : kind === "raiseDead"
-                ? p.raiseTargets ?? [] // MY OWN reserve stones, Bulwark's rule
-                : kind === "darkResurrection"
-                  ? p.darkRaiseTargets ?? [] // same pool, ITS OWN destination gate
-                  : p.bulwarkTargets, // bulwark / bulwarkReinforced
+              : p.bulwarkTargets, // bulwark / bulwarkReinforced
   );
   if (ids.size === 0) return;
   armed = { kind, targetIds: ids };
@@ -2235,12 +2325,6 @@ function fireArmed(tokenId: number) {
       break;
     case "bulwarkReinforced":
       sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId, reinforced: true } });
-      break;
-    case "raiseDead":
-      sendToServer({ type: "usePower", action: { kind: "raiseDead", tokenId } });
-      break;
-    case "darkResurrection":
-      sendToServer({ type: "usePower", action: { kind: "raiseDead", tokenId, dark: true } });
       break;
     case "charge": {
       const moveIndex = chargeMoveIndexByToken.get(tokenId);
@@ -2342,6 +2426,13 @@ dockEl.addEventListener("click", (e) => {
       sendToServer({ type: "usePower", action: { kind: "exhume", targetTokenId: t } });
       flashDockButton(ability, "fired");
     }
+    return;
+  }
+  if (ability === "revive") {
+    // Instant as well: the corpse fully determines what rises and where
+    // (reviveSpawnTile gated `ready` above), so there is nothing to aim.
+    sendToServer({ type: "usePower", action: { kind: "revive" } });
+    flashDockButton(ability, "fired");
     return;
   }
   if (armed?.kind === ability) disarm(); // re-tap the armed gem = cancel
@@ -2845,6 +2936,7 @@ let procBusyUntil = 0;
 let procDrainTimer: number | null = null;
 
 function showProc(klass: PlayerClass, text: string, icon: ProcIconId) {
+  bumpKinetic();
   const now = performance.now();
   if (now >= procBusyUntil && procQueue.length === 0) {
     displayProc(klass, text, icon);
@@ -2943,9 +3035,10 @@ function announceFromState(msg: {
   lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
   lastChargeSweep?: { sweptTokenIds: number[] } | null;
   lastReflip?: { player: PlayerId } | null;
-  lastRaise?: { tokenId: number; dark?: boolean } | null;
+  lastRevive?: { tokenId: number; tile: number } | null;
+  lastThrallExpired?: { tokenId: number } | null;
+  lastCorpseDenied?: { tokenId: number } | null;
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
-  lastSoulHarvest?: { player: PlayerId; delta: number } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -2982,28 +3075,29 @@ function announceFromState(msg: {
     showProc("mage", "Reroll!", "reflip");
   }
 
-  // Necromancer Raise Dead proc — hoisted for the Reroll's exact reason:
-  // the same commit can ALSO reveal a Bulwark block (the risen stone can
-  // expose a warded threat, see applyMkRaise), and that branch returns
-  // early. The caster is the risen stone's owner — lastMovePlayer is stale
-  // on raise commits (the turn never changed hands, Re-flip's contract).
-  if (msg.lastRaise) {
-    const raiser = msg.state.tokens.find((t) => t.id === msg.lastRaise!.tokenId)?.owner;
-    const k = classOf(raiser);
-    if (k)
-      showProc(
-        k,
-        msg.lastRaise.dark ? "Dark Resurrection!" : "Raise Dead!",
-        msg.lastRaise.dark ? "darkResurrection" : "raiseDead",
-      );
+  // Necromancer Revive proc — hoisted for the Reroll's exact reason: the
+  // same commit can ALSO reveal a Bulwark block (the risen thrall can
+  // expose a warded threat, see applyMkRevive), and that branch returns
+  // early. The POSSESSOR is the caster — the risen stone's real owner is
+  // the VICTIM, so the class lookup goes through the opponent of the
+  // body's owner (2-player game: the necromancer is always the other seat).
+  if (msg.lastRevive) {
+    const bodyOwner = msg.state.tokens.find((t) => t.id === msg.lastRevive!.tokenId)?.owner;
+    const caster = bodyOwner === "p1" ? "p2" : "p1";
+    if (classOf(caster) === "necromancer") showProc("necromancer", "Revive!", "revive");
   }
 
-  // Soul Harvest proc — the VICTIM's side of a capture commit, which
-  // announces (and returns) for the capturer below, so it must fire before
-  // that chain. The matching gem flare rides replayEvent, mirroring
-  // lastChargeEvent's.
-  if (msg.lastSoulHarvest && classOf(msg.lastSoulHarvest.player) === "necromancer") {
-    showProc("necromancer", "Soul Harvest!", "soulHarvest");
+  // A thrall crumbling / a corpse denied both announce quietly before the
+  // main chain (they share commits with ordinary moves).
+  if (msg.lastThrallExpired) {
+    const bodyOwner = msg.state.tokens.find((t) => t.id === msg.lastThrallExpired!.tokenId)?.owner;
+    const caster = bodyOwner === "p1" ? "p2" : "p1";
+    if (classOf(caster) === "necromancer") showProc("necromancer", "Thrall Crumbles", "thrallExpired");
+  }
+  if (msg.lastCorpseDenied) {
+    const denier = msg.state.tokens.find((t) => t.id === msg.lastCorpseDenied!.tokenId)?.owner;
+    const necro = denier === "p1" ? "p2" : "p1";
+    if (classOf(necro) === "necromancer") showProc("necromancer", "Soul Reclaimed", "corpseDenied");
   }
 
   // Bulwark actually blocking a capture is its own signal, independent of
@@ -3021,20 +3115,18 @@ function announceFromState(msg: {
     return;
   }
 
-  // Raise Dead's full announcement (the proc already fired above). The
+  // Revive's full announcement (the proc already fired above). The
   // resulting tile comes from the authoritative state, lastPush's pattern —
   // never re-derived from the constants here.
-  if (msg.lastRaise) {
-    const raisedToken = msg.state.tokens.find((t) => t.id === msg.lastRaise!.tokenId);
-    if (raisedToken) {
-      const raiser = raisedToken.owner;
-      const isMe = raiser === myRole;
-      const subject = isMe ? "You" : playerLabel(raiser);
-      const dark = msg.lastRaise.dark === true;
+  if (msg.lastRevive) {
+    const risen = msg.state.tokens.find((t) => t.id === msg.lastRevive!.tokenId);
+    if (risen) {
+      const caster = risen.owner === "p1" ? "p2" : "p1";
+      const isMe = caster === myRole;
+      const subject = isMe ? "You" : playerLabel(caster);
+      const whose = isMe ? "their" : "your";
       showAnnouncement(
-        dark
-          ? `${subject} cast Dark Resurrection — a fallen token rises on ${tileDisplay(raisedToken.position)}${chargeFor(raiser)}`
-          : `${subject} raised a fallen token — back aboard on ${tileDisplay(raisedToken.position)}${chargeFor(raiser)}`,
+        `${subject} raised ${whose} fallen stone as a THRALL on ${tileDisplay(risen.position)}${chargeFor(caster)}`,
         "shield",
       );
     }
@@ -3298,6 +3390,7 @@ async function post(body: unknown): Promise<unknown> {
 
 /** Replay one server event — all the TRANSIENT effects, exactly once. */
 function replayEvent(ev: RoomEvent) {
+  bumpKinetic(); // fail-safe full rate for whatever this frame animates
   if (ev.kind === "chat" || ev.kind === "classPick") return; // overlay-rendered
   // Scrubbing history: the event is already captured in the activity log;
   // the board stays frozen on the selected frame until "Back to live".
@@ -3336,14 +3429,6 @@ function replayEvent(ev: RoomEvent) {
   if (ev.lastChargeEvent) {
     const container = viewSide(ev.lastChargeEvent.player) === "p1" ? gemsMe : gemsThem;
     flashGems(container, ev.lastChargeEvent.delta > 0 ? "flare" : "spend");
-  }
-  // Soul Harvest changes the SECOND bank on the same broadcast (a capture
-  // against a necromancer pays both sides; lastChargeEvent above carries
-  // only the actor's delta) — mirror its flare path so the victim's gems
-  // light the moment their stone dies.
-  if (ev.lastSoulHarvest) {
-    const container = viewSide(ev.lastSoulHarvest.player) === "p1" ? gemsMe : gemsThem;
-    flashGems(container, ev.lastSoulHarvest.delta > 0 ? "flare" : "spend");
   }
   if (ev.flip !== null) {
     const mine = ev.state.currentPlayer === (myRole ?? "p1");
@@ -3532,12 +3617,13 @@ function logLabel(p: PlayerId): string {
 }
 
 function actorOf(ev: StateEvent): PlayerId {
-  // Raise commits leave lastMovePlayer stale by contract (the turn never
-  // changed hands) — the caster is the risen stone's owner. Re-flip names
-  // its player outright for the same reason.
-  if (ev.lastRaise) {
-    const o = ev.state.tokens.find((t) => t.id === ev.lastRaise!.tokenId)?.owner;
-    if (o) return o;
+  // Revive commits leave lastMovePlayer stale by contract (the turn never
+  // changed hands) — the caster is the OPPONENT of the risen body's owner
+  // (possession never changes token.owner). Re-flip names its player
+  // outright for the same reason.
+  if (ev.lastRevive) {
+    const o = ev.state.tokens.find((t) => t.id === ev.lastRevive!.tokenId)?.owner;
+    if (o) return o === "p1" ? "p2" : "p1";
   }
   if (ev.lastReflip) return ev.lastReflip.player;
   return ev.lastMovePlayer ?? ev.state.currentPlayer;
@@ -3550,7 +3636,7 @@ function summarizeEvent(ev: StateEvent): string {
   if (ev.lastUltimate) return ev.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
   if (ev.lastRainOfArrows)
     return ev.lastRainOfArrows.targetTokenId === null ? "Rain of Arrows — no target" : "Rain of Arrows";
-  if (ev.lastRaise) return ev.lastRaise.dark ? "Dark Resurrection" : "Raise Dead";
+  if (ev.lastRevive) return `Revive — thrall rises on ${tileDisplay(ev.lastRevive.tile)}`;
   if (ev.lastChargeSweep) return `Charge — sweep of ${ev.lastChargeSweep.sweptTokenIds.length}`;
   if (ev.lastPush) return "Push";
   if (ev.lastChargedShot) return "Charged Shot";
@@ -3588,9 +3674,12 @@ function describeEffects(i: number): string[] {
   };
   const owner = (id: number): PlayerId | null =>
     ev.state.tokens.find((t) => t.id === id)?.owner ?? prev?.state.tokens.find((t) => t.id === id)?.owner ?? null;
+  // Per-player numbering (stone 1-4), NEVER the raw internal id: players
+  // count four stones a side, and "stone #6" reads as nonsense — Kasen's
+  // 2026-07-20 "the log displays incorrect moves" report.
   const ownedLabel = (id: number): string => {
     const o = owner(id);
-    return o ? `${logLabel(o)}'s stone #${id}` : `stone #${id}`;
+    return o ? `${logLabel(o)}'s stone ${(id % 4) + 1}` : `stone ${(id % 4) + 1}`;
   };
 
   const actor = actorOf(ev);
@@ -3600,16 +3689,18 @@ function describeEffects(i: number): string[] {
 
   if (ev.lastMove) {
     const m = ev.lastMove;
-    fx.push(`Move: stone #${m.tokenId} ${tileDisplay(m.from)} → <b>${tileDisplay(m.to)}</b>`);
+    fx.push(`Move: ${ownedLabel(m.tokenId)} ${tileDisplay(m.from)} → <b>${tileDisplay(m.to)}</b>`);
     if (m.landsOnShield) fx.push(`Landed on a <b>shield tile</b> — extra turn + charge`);
   }
   if (ev.lastReflip) fx.push(`<b>Re-flip</b>: same turn, replacement coin toss`);
-  if (ev.lastRaise) {
-    const dark = ev.lastRaise.dark === true;
+  if (ev.lastRevive)
     fx.push(
-      `<b>${dark ? "Dark Resurrection" : "Raise Dead"}</b>: reserve stone #${ev.lastRaise.tokenId} placed on ${tileDisplay(dark ? DARK_RESURRECTION_POSITION : RAISE_POSITION)} — turn continues`,
+      `<b>Revive</b>: ${ownedLabel(ev.lastRevive.tokenId)} rises as a THRALL on ${tileDisplay(ev.lastRevive.tile)} — turn continues`,
     );
-  }
+  if (ev.lastThrallExpired)
+    fx.push(`<b>Thrall crumbles</b>: ${ownedLabel(ev.lastThrallExpired.tokenId)} returns to reserve`);
+  if (ev.lastCorpseDenied)
+    fx.push(`<b>Soul reclaimed</b>: ${ownedLabel(ev.lastCorpseDenied.tokenId)} re-entered — the Revive is denied`);
   if (ev.lastPush) fx.push(`<b>Push</b>: ${ownedLabel(ev.lastPush.targetTokenId)} knocked back`);
   if (ev.lastChargedShot) fx.push(`<b>Charged Shot</b>: ${ownedLabel(ev.lastChargedShot.targetTokenId)} struck`);
   if (ev.lastChargeSweep)
@@ -3630,8 +3721,6 @@ function describeEffects(i: number): string[] {
     );
   if (ev.lastExhume)
     fx.push(`<b>Exhume</b>: escaped ${ownedLabel(ev.lastExhume.targetTokenId)} dragged back to ${tileDisplay(ev.lastExhume.returnedTo)}`);
-  if (ev.lastSoulHarvest)
-    fx.push(`<b>Soul Harvest</b>: ${logLabel(ev.lastSoulHarvest.player)} bank a charge from the death`);
 
   // Board diff: sent home / escaped / entered (raise entries described above).
   if (prev) {
@@ -4559,21 +4648,24 @@ const GUIDE_SPREADS: [string, string][] = [
   [
     `<h2>The Necromancer</h2>
      <ul>
-       <li><b>Soul Harvest</b> (passive, free): every one of your stones an
-       enemy sends home banks you a charge as it dies — one soul per stone,
-       so a double capture pays twice. Aggression against the Necromancer
-       is never free.</li>
-       <li><b>Raise Dead</b> (active, 1 charge): call a stone back from
-       your hand onto tile ${RAISE_POSITION + 1} — your flip stands, and
-       the risen stone may even be the one that moves. Rising is no
-       landing: no extra turn, no charge, no shield streak.</li>
+       <li><b>Soul Harvest</b> (passive, free): your kills feed you. Every
+       enemy stone you send home banks ${REVIVE_COST} souls — filling even
+       your third gem, the SOUL GEM, which no other income can touch — and
+       leaves its corpse marked on the tile where it fell. Only the
+       freshest corpse keeps its soul.</li>
+       <li><b>Soul Claim</b>: while you hold a full soul bank, the marked
+       body cannot re-enter from the enemy's hand — the soul is yours
+       until you spend it. Let the bank lapse and they may reclaim it.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
-       <li><b>Dark Resurrection</b> (active, spends both charges): the same
-       rite with the whole bank behind it — the stone rises on tile
-       ${DARK_RESURRECTION_POSITION + 1} instead, the last tile before
-       shared water, trading every charge you hold for the head start.</li>
+       <li><b>Revive</b> (active, spends all ${REVIVE_COST} souls): raise
+       the marked corpse as your THRALL, on the very tile it died. For
+       ${THRALL_TURNS} of your turns it fights for you — it moves on your
+       flips, kills like any stone (its kills pay full souls and mark new
+       corpses), and its blade ignores the Mage's Ward — but it can never
+       leave shared water, and then it crumbles home. Your flip stands:
+       the risen dead may be the one that moves.</li>
        <li><b>Exhume</b> (active, spends your ultimate): land on a shield
        tile three times running and death honors no finish line — drag one
        of the opponent's ESCAPED stones back aboard at tile
@@ -4763,10 +4855,27 @@ let lastPresenceAt = 0;
 /** Last frame we actually rendered (the governor may skip rAF callbacks). */
 let lastRenderAt = 0;
 
+/** Full-rate GRACE WINDOW — the governor's fail-safe. Enumerating kinetic
+ *  states (sceneKinetic below) proved fragile: the archer's animation
+ *  traffic (knockback lerps, double-capture flights, batched push/shot
+ *  commits) surfaced paths the list missed, rendering flights at the calm
+ *  30 fps pace — Kasen's "token moves glitch / go slow frames, archer
+ *  games specifically" reports (2026-07-19/20). Any game event now BUYS a
+ *  short window of full rate outright; the enumeration only decides how
+ *  long full rate persists BEYOND the window (long flights, mug drinks).
+ *  Battery cost is negligible — turns are seconds apart and idle time
+ *  still dominates. */
+let kineticUntil = 0;
+function bumpKinetic(ms = 1500) {
+  const until = performance.now() + ms;
+  if (until > kineticUntil) kineticUntil = until;
+}
+
 /** Anything kinetic on the table RIGHT NOW — the states that deserve full
  *  frame rate. Ambient motion (fire flicker, breathing rings, motes, rune
  *  spin) is deliberately not on this list: it paces fine at 30. */
 function sceneKinetic(): boolean {
+  if (performance.now() < kineticUntil) return true;
   for (let i = 0; i < markers.length; i++) {
     const m = markers[i];
     if (m.mesh.visible && (m.flying || m.mesh.position.distanceToSquared(m.target) > 1e-6)) return true;
@@ -5046,10 +5155,11 @@ if (dockDemoParam !== null) {
       bulwarkTargets: [0, 1, 2],
       bulwarkedTokenIds: [],
       reflipsUsedThisTurn: d.reflips,
-      // Necromancer demo pools mirror the server's gating: raise needs a
-      // charge, exhume the ultimate (nothing on other classes' rounds).
-      raiseTargets: cls === "necromancer" && d.charges > 0 ? [2, 3] : [],
-      darkRaiseTargets: cls === "necromancer" && d.charges > 0 ? [2, 3] : [],
+      // Necromancer demo pools mirror the server's gating: Revive needs a
+      // full soul bank + a marked corpse, exhume the ultimate.
+      corpse: { p1: cls === "necromancer" && d.charges > 0 ? { tokenId: 4, tile: 8 } : null, p2: null },
+      thrall: { p1: null, p2: null },
+      reviveSpawnTile: cls === "necromancer" && d.charges >= REVIVE_COST ? 8 : null,
       exhumeTargets: cls === "necromancer" && d.ult ? [4] : [],
     };
     currentPowerMoves =
@@ -5198,7 +5308,7 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
       let pick = -1;
       for (let i = activityLog.length - 1; i >= 0 && pick < 0; i--) {
         const e = activityLog[i];
-        if (e.kind === "state" && (e.lastBulwarkBlock || e.lastRaise?.dark === true)) pick = i;
+        if (e.kind === "state" && (e.lastBulwarkBlock || e.lastRevive)) pick = i;
       }
       for (let i = activityLog.length - 1; i >= 0 && pick < 0; i--) {
         const e = activityLog[i];

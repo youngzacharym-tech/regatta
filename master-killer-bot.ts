@@ -30,26 +30,28 @@ import {
   applyExhume,
   applyPowerMove,
   applyPush,
-  applyRaiseDead,
   applyReflip,
+  applyRevive,
   applyWarpath,
   canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
-  DARK_RESURRECTION_POSITION,
+  effectiveOwner,
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
   getExhumeTargets,
   getLegalPowerMoves,
   getPushTargets,
-  getRaiseTargets,
+  getReviveSpawnTile,
   getWarpathTargets,
   isBulwarked,
   isWarded,
+  possessorOf,
   PUSH_DISTANCE,
   PUSH_WARD_DISTANCE,
+  THRALL_TURNS,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -109,54 +111,36 @@ import { EASY_HEED_P, FLIP_WEIGHTS, FLIP_WEIGHT_TOTAL, type BotDifficulty } from
  *  vs 250 read 66.4 vs 64.9-66.3 at 5000, kept 250. */
 const MK_STD_NECRO_SHIELD_EXTRA = 250;
 /** Scale on scoreMove's per-tile progression term (`m.to`) for a
- *  necromancer — the race-the-racer lever, and the single biggest win of
- *  the second pass. Soul Harvest refunds a necromancer's deaths, so its
- *  tokens should sprint where other classes tiptoe. Swept 3/6/10/15/25/40
- *  vs mage: 69.0/69.1/67.3/68.8/69.4/74.3 — a clear peak at 10 (about a
- *  +140 swing on a far-side move, comparable to the flee bonus), after
- *  which racing starts out-competing captures themselves and everything
- *  regresses. */
-const MK_STD_NECRO_RACE_SCALE = 10;
-/** Scale on scoreMove's capture bonus for a necromancer. A capture is
- *  worth more to this class than the shared 400-base admits: +1 charge
- *  (half a Dark Resurrection), a tile of denied enemy progress, and — in
- *  the mage matchup specifically — the only interaction the class has
- *  with the opponent at all (the warded leader being untouchable makes
- *  killing the escorts the entire fight). Swept 0.7/1.3/1.6/2.0 on the
- *  race+shield stack: 68.0/66.3/65.9/66.6 vs mage — kept 1.6. */
-const MK_STD_NECRO_CAPTURE_SCALE = 1.6;
-/** Third-pass lever: flat score for a PLAIN Raise Dead cast while
- *  CAP-BLOCKED — bank at CHARGE_CAP, a reserve body waiting, but the Dark
- *  Resurrection slot squatted by an own token — and no legal move can
- *  vacate the squatter this flip. (When one can, the companion bonus below
- *  is the cheaper fix and this stands down: raising first would squat
- *  RAISE_POSITION too and re-lock the bank a turn later — the ungated
- *  pairing measured ~1pt worse on both the mage and archer matchups.) A
- *  Raise never ends the turn, so firing this costs no tempo; the spent
- *  charge was dead weight anyway — at cap every incoming soul clamps to
- *  nothing, so spending 1 to reopen absorption is income, not expense.
- *  800 outranks every quiet move and most captures, which is correct for
- *  a tempo-free act (the act-then-redecide loop still plays the move
- *  after); swept 500/800/1200 at 20000 games: 64.6/63.7/64.5 vs mage —
- *  kept 800. 0 disables (need-gated scoring as before). */
-const MK_STD_NECRO_CAP_UNBLOCK_RAISE = 800;
-/** The companion third-pass lever: bonus on a move whose `from` is
- *  DARK_RESURRECTION_POSITION while cap-blocked — the unblock move itself.
- *  Vacating the slot converts the held bank into a body next turn without
- *  spending anything today; the two levers split the cap-blocked state
- *  between them (move the squatter when the flip allows, plain-raise when
- *  it doesn't). Solo it already carried most of the effect (64.4/63.5
- *  mage/archer at 20000 games); swept 120/200/300 on the gated pair:
- *  64.2/63.7/64.4 vs mage with vs-archer 63.8/63.0/64.1 — 200 best on
- *  both axes. 0 disables. */
-const MK_STD_NECRO_UNBLOCK_MOVE = 200;
+ *  necromancer. HISTORY: 10 under the old kit ("Soul Harvest refunds
+ *  deaths, so sprint") — that subsidy is GONE with the Revive rework
+ *  (2026-07-19: deaths pay nothing; kills pay everything), so the sprint
+ *  rationale died with it. Reset to neutral for the rework's first
+ *  balance pass; re-sweep from here. */
+const MK_STD_NECRO_RACE_SCALE = 1;
+/** Scale on scoreMove's capture bonus for a necromancer. Under the Revive
+ *  rework a kill is the class's ENTIRE economy in one act: the full soul
+ *  bounty (SOUL_BOUNTY_CHARGES, the only income that can fill the third
+ *  pip) plus the corpse that Revive consumes — where the old kit's 1.6
+ *  priced a kill at "+1 charge and some tempo". First-pass setting for
+ *  the rework, sized so a real capture out-ranks everything except a
+ *  winning move; re-sweep against the matchup bars. */
+const MK_STD_NECRO_CAPTURE_SCALE = 2.5;
+/** The hunt instinct: bonus per enemy stone within flip reach (1-4 ahead on
+ *  the contested row) of the landing tile, necromancer only. Kills are this
+ *  class's ENTIRE economy under the rework, so a landing that sets up
+ *  next-turn kill chances is worth courting the exposure the shared -80
+ *  threat penalty prices — for everyone else those two cancel to caution;
+ *  the necromancer stalks. Added chasing the last outside-the-bar matchup
+ *  (mage 66.5/33.5 with Soul Claim + 3-turn thralls + ward-piercing
+ *  thralls already in). */
+const MK_STD_NECRO_HUNT = 65;
 
 /** Same shape of scoring bot.ts uses for a plain move, extended with the
  *  power-derived capture sets (bonus snipe / charge sweep) so a Master
  *  Killer move that happens to snipe or sweep scores appropriately higher
- *  than an equivalent classic move would. The three trailing weights are
- *  the necromancer levers above; their defaults are exact no-ops, so a
- *  call that doesn't pass them (every non-necromancer call site) scores
+ *  than an equivalent classic move would. The trailing weights are the
+ *  necromancer levers above; their defaults are exact no-ops, so a call
+ *  that doesn't pass them (every non-necromancer call site) scores
  *  byte-identically to the pre-necromancer formula, same rand() draws and
  *  all. */
 function scoreMove(
@@ -167,6 +151,7 @@ function scoreMove(
   shieldExtra = 0,
   raceScale = 1,
   captureScale = 1,
+  huntPerTarget = 0,
 ): number {
   let score = 0;
   const allCaptures = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
@@ -198,6 +183,19 @@ function scoreMove(
         m.to - t.position <= 4,
     );
     if (threatened) score -= 80;
+  }
+
+  // The hunt (necromancer only — see MK_STD_NECRO_HUNT): enemies the
+  // LANDING tile puts within next-flip strike range. Real-owner check is
+  // the right cheapness here — the one cross-allegiance piece (a thrall)
+  // is the mover's own weapon and shouldn't read as prey.
+  if (huntPerTarget > 0 && m.to <= 11) {
+    let prey = 0;
+    for (const t of state.tokens) {
+      if (t.owner === state.currentPlayer) continue;
+      if (t.position > m.to && t.position <= m.to + 4 && t.position >= 4 && t.position <= 11) prey++;
+    }
+    score += huntPerTarget * prey;
   }
 
   score += m.to * raceScale;
@@ -374,77 +372,26 @@ function scoreReflip(currentMoveCount: number, flip: number, rand: () => number)
   return -1; // never worth it over an already-legal move otherwise
 }
 
-/** Score Necromancer's Raise Dead / Dark Resurrection: a body back from the
- *  graveyard. Dark Resurrection fires ON SIGHT (a base far above any
- *  non-winning move score bar a top-end 1.6x-scaled capture — see the
- *  second-pass note below); the plain cast stays need-gated as desperation
- *  recovery. This is DELIBERATELY the opposite of the discipline
- *  scoreChargedShot/scoreReinforcedBulwark apply to their own full-bank
- *  spends, and the first-pass balance sim is why — the "always evaluable
- *  trap" reasoning (see scoreBulwark's history note) does not transfer to
- *  this class, for two structural reasons the other spends don't share:
- *  a Raise never ends the turn, so out-scoring a move never FORGOES that
- *  move (the act-then-redecide loop still plays it on the same flip — the
- *  only real cost is the charge); and a necromancer's banked charge has no
- *  alternative use and no at-cap passive (no Ward analogue), so a held
- *  bank is dead weight that also wastes every Soul Harvest charge arriving
- *  over CHARGE_CAP.
- *  (First balance pass, 5000 games/matchup. Need-gating BOTH variants —
- *  this function's original shape — had the necromancer losing every
- *  non-mirror matchup: 59.4/40.6 vs archer, 76.9/23.1 vs mage, 54.9/45.1
- *  vs warrior. Fire-on-sight for both variants: 46.4/53.6, 69.3/30.7,
- *  45.6/54.4. Preferring PLAIN over dark instead regressed everything —
- *  55.0/45.0, 74.7/25.3, 53.4/46.6 — proving Dark Resurrection's 3 tiles
- *  are worth the second charge. SHIPPED: dark on sight, plain need-gated —
- *  47.5/52.5 vs archer, 68.8/31.2 vs mage, 45.6/54.4 vs warrior, mirror
- *  49.9/50.1. The mage number is this policy's CEILING, not a tuning
- *  miss: raise volume is income-bound (the necromancer already spends
- *  every charge it banks against a mage), and the class has no Ward
- *  interaction of any kind, so the remaining distance to parity there is
- *  a rules-design problem — the same structural hole archer-vs-mage's own
- *  ship-now-reopen-later thread documents — not a bot-weights one.)
- *  (Second balance pass: the dark base moved 700 -> 900, a knock-on of
- *  MK_STD_NECRO_CAPTURE_SCALE. At 1.6x a good capture scores up to ~880,
- *  quietly out-ranking a 700 dark raise — and since a Raise is tempo-free,
- *  "capture out-scores raise" doesn't choose the capture INSTEAD, it just
- *  DEFERS the raise a turn while at-cap Soul Harvest income overflows into
- *  nothing. 900 restores raise-first ordering under the new capture prices
- *  (5000-game probe on the final stack: 65.9 vs mage at 700, 64.7 at 900)
- *  while staying under any causesWin move's 1000-plus. 1100 — above every
- *  non-winning move outright — over-rotated to 67.4 and was reverted:
- *  when a capture genuinely dwarfs the raise, taking the capture first
- *  and raising next turn is sometimes right after all. Plain-cast need
- *  scoring below is unchanged through all of this.)
- *  (Third balance pass: the need scoring below still stands, but a
- *  CAP-BLOCKED plain cast now bypasses it entirely at the call site — see
- *  MK_STD_NECRO_CAP_UNBLOCK_RAISE. The "income-bound" ceiling the first
- *  pass measured was partly self-inflicted cap overflow, and unblocking
- *  it moved the mage matchup from ~66.0 to ~64.2 — inside the bar.)
- *
- *  Plain-cast need scoring: raising when nearly wiped (0-1 own tokens on
- *  board) is a near-capture-sized swing, a healthy board (3 on) prices it
- *  firmly negative, a live enemy board majority nudges it up, and a
- *  deeper graveyard nudges it up too — spending one of three bodies is
- *  cheaper, insurance-wise, than spending the only one. */
-function scoreRaiseDead(state: GameState, dark: boolean, rand: () => number): number {
+/** Score Necromancer's Revive (the rework's single active — the old Raise
+ *  Dead / Dark Resurrection scorer and its three balance-pass traces died
+ *  with the old kit; see git history for the full archaeology). */
+function scoreRevive(state: GameState, power: PowerState, spawnTile: number, rand: () => number): number {
   const mover = state.currentPlayer;
-  let onBoard = 0;
-  let foeOnBoard = 0;
-  let reserve = 0;
+  // Fire-on-sight temperament, the old dark-on-sight policy's heir, for the
+  // same structural reasons (see the doc above): Revive never ends the turn
+  // (the thrall may act on this very flip), the full soul bank has NO other
+  // outlet, and — new with the rework — every turn the corpse sits banked
+  // is a turn the victim can re-enter it and deny the cast entirely. Base
+  // above every quiet move, below a causesWin move's 1000+; sharpened by
+  // how many enemy stones the risen thrall would immediately menace
+  // (within flip reach, 1-4 tiles ahead along the row).
+  let threatened = 0;
   for (const t of state.tokens) {
-    if (t.owner === mover && t.position === -1) reserve++;
-    if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
-    if (t.owner === mover) onBoard++;
-    else foeOnBoard++;
+    if (t.owner === mover || possessorOf(power, t.id) !== null) continue;
+    if (t.position <= spawnTile || t.position > spawnTile + 4) continue;
+    if (t.position >= 4 && t.position <= 11) threatened++;
   }
-  let score: number;
-  if (dark) {
-    score = 900 + 20 * Math.max(0, foeOnBoard - onBoard) + 12 * (reserve - 1);
-  } else {
-    score = 60 + 90 * (1 - onBoard) + 20 * Math.max(0, foeOnBoard - onBoard) + 12 * (reserve - 1);
-  }
-  score += rand() * 20;
-  return score;
+  return 900 + 30 * threatened + rand() * 20;
 }
 
 /** Score Necromancer's Exhume: the ultimate un-wins an escaped enemy token —
@@ -515,23 +462,10 @@ function pickStandardPowerAction(
   const shieldExtra = necro ? MK_STD_NECRO_SHIELD_EXTRA : 0;
   const raceScale = necro ? MK_STD_NECRO_RACE_SCALE : 1;
   const captureScale = necro ? MK_STD_NECRO_CAPTURE_SCALE : 1;
-  // Cap-blocked (see MK_STD_NECRO_CAP_UNBLOCK_RAISE): the bank is full, a
-  // reserve body exists, but the Dark Resurrection slot is squatted by an
-  // own token — every incoming soul is overflowing into the cap clamp.
-  // Pure getters, no rand() consumed — non-necromancer streams untouched.
-  const darkRaiseTargets =
-    necro && charges === CHARGE_CAP ? getRaiseTargets(state, power, mover, true) : [];
-  const capBlocked =
-    necro &&
-    charges === CHARGE_CAP &&
-    darkRaiseTargets.length === 0 &&
-    state.tokens.some((t) => t.owner === mover && t.position === -1);
+  const huntPerTarget = necro ? MK_STD_NECRO_HUNT : 0;
 
   for (const m of moves) {
-    let score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale);
-    if (capBlocked && MK_STD_NECRO_UNBLOCK_MOVE > 0 && m.from === DARK_RESURRECTION_POSITION) {
-      score += MK_STD_NECRO_UNBLOCK_MOVE;
-    }
+    const score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale, huntPerTarget);
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "move", move: m };
@@ -624,35 +558,15 @@ function pickStandardPowerAction(
     }
   }
 
-  if (cls === "necromancer" && charges >= 1) {
-    // One score per Raise variant, not per reserve token — all reserve
-    // tokens are interchangeable (see getRaiseTargets), so the first id
-    // stands for the whole pool. The two variants have different target
-    // pools (different destination tiles can be blocked independently), so
-    // each checks its own.
-    const raiseTargets = getRaiseTargets(state, power, mover);
-    if (raiseTargets.length > 0) {
-      // Cap-blocked: the plain cast is a tempo-free absorption reopener —
-      // see MK_STD_NECRO_CAP_UNBLOCK_RAISE. Only when the squatter can't
-      // move THIS flip (otherwise the unblock-move bonus handles it without
-      // spending the half-a-dark charge, and without double-squatting tiles
-      // 0 and 3). Otherwise need-gated as ever.
-      const score =
-        capBlocked &&
-        MK_STD_NECRO_CAP_UNBLOCK_RAISE > 0 &&
-        !moves.some((m) => m.from === DARK_RESURRECTION_POSITION)
-          ? MK_STD_NECRO_CAP_UNBLOCK_RAISE + rand() * 20
-          : scoreRaiseDead(state, false, rand);
+  if (cls === "necromancer") {
+    // getReviveSpawnTile is the whole gate (corpse banked + raisable, no
+    // thrall up, full soul bank) — one candidate, no target choice.
+    const spawnTile = getReviveSpawnTile(state, power, mover);
+    if (spawnTile !== null) {
+      const score = scoreRevive(state, power, spawnTile, rand);
       if (score > bestScore) {
         bestScore = score;
-        best = { kind: "raiseDead", tokenId: raiseTargets[0] };
-      }
-    }
-    if (darkRaiseTargets.length > 0) {
-      const score = scoreRaiseDead(state, true, rand);
-      if (score > bestScore) {
-        bestScore = score;
-        best = { kind: "raiseDead", tokenId: darkRaiseTargets[0], dark: true };
+        best = { kind: "revive" };
       }
     }
   }
@@ -722,18 +636,9 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
       for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id, reinforced: true });
     }
   }
-  if (cls === "necromancer" && charges >= 1) {
-    // ONE candidate per Raise variant, not one per reserve token: the pool
-    // is interchangeable (see getRaiseTargets), so extra candidates would
-    // add nothing for hard and only skew easy's uniform pick toward
-    // raising. Each variant checks its own pool — the two destination
-    // tiles block independently.
-    const raiseTargets = getRaiseTargets(state, power, mover);
-    if (raiseTargets.length > 0) out.push({ kind: "raiseDead", tokenId: raiseTargets[0] });
-    if (charges === CHARGE_CAP) {
-      const darkTargets = getRaiseTargets(state, power, mover, true);
-      if (darkTargets.length > 0) out.push({ kind: "raiseDead", tokenId: darkTargets[0], dark: true });
-    }
+  if (cls === "necromancer" && getReviveSpawnTile(state, power, mover) !== null) {
+    // One candidate, no payload — the corpse determines everything.
+    out.push({ kind: "revive" });
   }
   if (cls === "necromancer" && power.ultimateReady[mover]) {
     // Same one-candidate collapse: every escaped token is equally escaped.
@@ -808,18 +713,27 @@ const MK_EVAL_ULTIMATE = 70;
  *  MK_EVAL_PLAIN_RAISE_HOLDBACK, MK_EVAL_DARK_RAISE_BIAS, and
  *  MK_EVAL_NECRO_THREAT_SCALE for the other three-quarters of the fix. */
 const MK_EVAL_NECRO_CHARGE = 4;
-/** A necromancer's reserve token is half-alive — one banked charge from
- *  re-entering play via Raise Dead — so it keeps a slice of value instead
- *  of the flat zero every other class's reserve is worth. Half a tile's
- *  worth (was 16 — "two tiles" — before the necromancer-mirror separation
- *  tuning): the bigger credit made the hard tier read a Dark Resurrection
- *  as swapping 16 points of graveyard for 24 of board — near-neutral, so
- *  the search raised on a jitter coin-flip while standard raised on
- *  sight. Cutting it is one piece of a single coherent story (see
- *  MK_EVAL_NECRO_CHARGE's sweep): for this class, bodies BANKED are worth
- *  almost nothing next to bodies RACING. Still nonzero so the eval keeps
- *  correctly cheapening enemy captures AGAINST a necromancer. */
-const MK_EVAL_NECRO_RESERVE = 4;
+/** REWORK NOTE (2026-07-19): the constants that priced the OLD kit's
+ *  graveyard economy — reserve-token credit, self-exposure discount, the
+ *  plain/dark raise holdback-and-bias pair — died with that kit. Their
+ *  replacements below price the Revive kit instead: a banked corpse, an
+ *  active thrall, and the new danger of BEING the necromancer's prey.
+ *  (Old sweep archaeology lives in git history.)
+ *
+ *  A valid banked corpse is a Revive waiting on funding: option value,
+ *  real but modest — the victim can deny it any turn by re-entering. */
+const MK_EVAL_CORPSE = 15;
+/** An active thrall: a temporary extra attacker on the row. Scaled by
+ *  turnsLeft/THRALL_TURNS (a last-turn thrall is worth half a fresh one)
+ *  plus a per-menaced-enemy bonus in mkEvalSide — the thrall's value IS
+ *  its targets; parked on an empty row it's mostly a re-entry denial. */
+const MK_EVAL_THRALL = 40;
+const MK_EVAL_THRALL_MENACE = 15;
+/** Threat scale on tokens exposed to a NECROMANCER enemy: a death against
+ *  the rework's necromancer pays the full soul bounty AND banks a corpse —
+ *  strictly worse than dying to anyone else — so exposure to one is
+ *  priced up, the eval-shaped version of "don't feed the graveyard". */
+const MK_EVAL_NECRO_PREY_SCALE = 1.25;
 /** A necromancer holding ultimateReady while a live Exhume target exists (a
  *  foe token has escaped): the held flag is priced LOW, not at
  *  MK_EVAL_ULTIMATE. For this class the ultimate is Exhume, not a
@@ -832,59 +746,13 @@ const MK_EVAL_NECRO_RESERVE = 4;
  *  structural reading of "opponent escapes are worth attacking". With no
  *  target yet, the flag keeps full MK_EVAL_ULTIMATE option value. */
 const MK_EVAL_EXHUME_HELD = 20;
-/** Holdback on a PLAIN Raise Dead candidate in the hard tier's root — the
- *  option value of banking that charge toward a Dark Resurrection instead,
- *  which the one-ply search structurally cannot see (the dark cast only
- *  exists once the bank hits CHARGE_CAP, a future turn away). Without it,
- *  hard fired a plain raise the moment the bank hit 1 (probe: 4.44 plain /
- *  1.13 dark per game) while standard's need-gated plain banked toward
- *  dark (1.39 / 3.52) — the exact plain-heavy mix a standard-vs-standard
- *  sweep already measured as 3-6 points worse (see scoreRaiseDead's
- *  first-pass trace), and hard lost the necromancer mirror 33.8/66.2 to
- *  standard because of it. Applied only when `dark` is false, at the root
- *  in pickHardPowerAction; a desperate board still plain-raises — the
- *  follow-up mobility of the recovered body overcomes the holdback. */
-const MK_EVAL_PLAIN_RAISE_HOLDBACK = 40;
-/** The companion bias, positive, on a DARK Raise candidate at the hard
- *  tier's root: a necromancer at CHARGE_CAP wastes every further Soul
- *  Harvest / capture / zero-flip charge to addCharge's at-cap no-op, so
- *  spending the full bank REOPENS income absorption — a real, recurring
- *  gain the static eval can't express (it prices the bank it can see, not
- *  the income the cap is about to discard). Ablated at
- *  MK_EVAL_NECRO_THREAT_SCALE=0.15 in the 600-game mirror probe: 47.0%
- *  hard-vs-standard without it, 51.3% with (dark casts 3.88/g vs 4.41/g)
- *  — kept at 30. */
-const MK_EVAL_DARK_RAISE_BIAS = 30;
-/** Scale on the capture-threat penalty for NECROMANCER-owned tokens: a
- *  necro death is heavily refunded (a Soul Harvest charge to the victim,
- *  plus the body stays raisable — see MK_EVAL_NECRO_RESERVE), so full-price
- *  threat aversion makes the hard tier cowardly with exactly the class
- *  whose identity is "deaths feed me": it hugged the private lane, died
- *  less, starved its own soul income, and lost the self-funding
- *  raise-die-harvest loop standard's bolder play rides (probe: hard spent
- *  5.4 charges/game to standard's 8.7 in the mirror). Swept in the
- *  600-game mirror probe with everything else fixed: 0.5 -> 42.8%
- *  hard-vs-standard, 0.25 -> 45.2%, 0.15 -> 51.3%, 0 -> 49.0%. Kept at
- *  0.15, not 0 — the sliver of remaining caution is principled, not just
- *  the probe's argmax: the POSITION a token dies with is a real loss even
- *  when the soul is refunded, so exposure should never be literally free. */
-const MK_EVAL_NECRO_THREAT_SCALE = 0.15;
-/** Per-tile progression value for a NECROMANCER'S tokens in the hard eval —
- *  the hard-tier mirror of MK_STD_NECRO_RACE_SCALE (see that constant's
- *  block for why this class races where others tiptoe: Soul Harvest
- *  refunds its deaths). Added in the second balance pass when the standard
- *  tier learned to race and hard's necromancer mirror slid from the first
- *  pass's 46.3-49.3% to 42.5-45.2% against it — the shared
- *  MK_EVAL_PER_TILE=8 was pricing progression for a class whose whole
- *  second-pass identity became progression. Swept against the separation
- *  gate: 12 -> mirror 46.7/53.7/48.5 across three runs with the mk
- *  hard-vs-standard aggregate at 57.2/58.7/59.8% (passing with more
- *  margin than the first pass's 57.5/58.9); 16 -> catastrophic 31.2
- *  mirror and a FAILING 53.2% aggregate — past 12 the one-ply search
- *  starts walking tokens into refuted captures for raw distance, the
- *  exact recklessness MK_EVAL_NECRO_THREAT_SCALE's "never literally free"
- *  note warns about. Kept at 12, the modest +50% over shared. */
-const MK_EVAL_NECRO_PER_TILE = 12;
+/** Root bias on a Revive candidate: the one-ply search prices the board it
+ *  can see, not the denial it can't — every turn the corpse sits banked is
+ *  a turn the victim may re-enter it and void the cast entirely, so a
+ *  castable Revive carries urgency beyond its static eval. Small; the
+ *  simulated thrall (same-flip follow-up + MK_EVAL_THRALL) carries the
+ *  real value. */
+const MK_EVAL_REVIVE_BIAS = 20;
 /** Live shield-streak progress toward that ultimate, per landing banked. */
 const MK_EVAL_STREAK = 12;
 /** An active Bulwark on an own token — insurance, real but modest (it
@@ -902,22 +770,36 @@ const SIM_RAND = () => 0.5;
 
 /** One player's side of the eval: escaped >> progress + shield perch, minus
  *  probability-weighted capture threat (skipped while Ward/Bulwark
- *  protects the token), plus the charge economy terms. */
+ *  protects the token), plus the charge economy terms. Possession-aware
+ *  (Revive rework): a token of yours serving the enemy is worth nothing to
+ *  you until it comes home; a thrall you command is an attack asset priced
+ *  by its remaining turns and the enemies it menaces; a valid banked
+ *  corpse is Revive option value. */
 function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): number {
+  const foe: PlayerId = player === "p1" ? "p2" : "p1";
   let score = 0;
   for (const t of state.tokens) {
-    if (t.owner !== player) continue;
+    const possessor = possessorOf(power, t.id);
+    if (t.owner === player && possessor !== null && possessor !== player) continue; // enslaved: worth 0 to its owner
+    if (t.owner !== player) {
+      if (possessor !== player) continue;
+      // My thrall: temporary attacker, no progression value (it can never
+      // escape) — its worth is duration times menace.
+      const turnsLeft = power.thrall[player]?.turnsLeft ?? 0;
+      let menaced = 0;
+      for (const e of state.tokens) {
+        if (e.owner === player || possessorOf(power, e.id) !== null) continue;
+        if (e.position > t.position && e.position <= t.position + 4 && e.position <= 11 && e.position >= 4) menaced++;
+      }
+      score += ((MK_EVAL_THRALL + MK_EVAL_THRALL_MENACE * menaced) * turnsLeft) / THRALL_TURNS;
+      continue;
+    }
     if (t.position >= PATH_LENGTH_PER_PLAYER) {
       score += MK_EVAL_ESCAPED;
       continue;
     }
-    if (t.position < 0) {
-      // Reserve is worth exactly nothing — except a necromancer's, which
-      // Raise Dead can return to the board on demand (see MK_EVAL_NECRO_RESERVE).
-      if (power.classes[player] === "necromancer") score += MK_EVAL_NECRO_RESERVE;
-      continue;
-    }
-    score += (power.classes[player] === "necromancer" ? MK_EVAL_NECRO_PER_TILE : MK_EVAL_PER_TILE) * t.position;
+    if (t.position < 0) continue; // reserve is worth exactly nothing
+    score += MK_EVAL_PER_TILE * t.position;
     const tile = BOARD_LAYOUT[t.position];
     if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
     if (
@@ -926,10 +808,12 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
       !isWarded(state, power, t) &&
       !isBulwarked(power, t)
     ) {
-      // A necromancer's exposure is cheap by design — see MK_EVAL_NECRO_THREAT_SCALE.
-      const threatScale = power.classes[player] === "necromancer" ? MK_EVAL_NECRO_THREAT_SCALE : 1;
+      // Dying to a necromancer pays their full soul bounty and banks a
+      // corpse — exposure to one is priced up (MK_EVAL_NECRO_PREY_SCALE).
+      const threatScale = power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1;
       for (const e of state.tokens) {
-        if (e.owner === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER) continue;
+        if (effectiveOwner(power, e) === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER)
+          continue;
         const gap = t.position - e.position;
         if (gap >= 1 && gap <= 4) {
           score -=
@@ -940,7 +824,12 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
     }
     if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
   }
-  // Necromancer charges are raise fuel and nothing else — see
+  // A valid banked corpse is a Revive waiting on funding.
+  const corpse = power.corpse[player];
+  if (corpse && state.tokens.find((t) => t.id === corpse.tokenId)?.position === -1) {
+    score += MK_EVAL_CORPSE;
+  }
+  // Necromancer charges are revive fuel and nothing else — see
   // MK_EVAL_NECRO_CHARGE's doc for the separation-gate failure the shared
   // price caused.
   score +=
@@ -1071,34 +960,32 @@ function mkSimulate(
       return applyWarpath(state, power, c.targetTokenId, mover);
     case "bulwark":
       return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
-    case "raiseDead":
-      return applyRaiseDead(state, power, c.tokenId, mover, c.dark ?? false);
+    case "revive":
+      return applyRevive(state, power, mover);
     case "exhume":
       return applyExhume(state, power, c.targetTokenId, mover);
   }
 }
 
-/** Value of Raise Dead / Dark Resurrection: the raise keeps the turn AND the
- *  flip (applyRaiseDead's contract — no re-roll), so its value is the best
- *  same-flip follow-up on the post-raise board, ending in the same
- *  mkValueAfterAction expectation every other candidate ends in. NOT
- *  mkValueAfterAction directly on the post-raise state — its own-turn arm
- *  would wrongly average over a fresh flip the mover never gets, hiding the
- *  raise's actual point (e.g. a flipped 2 the raised token itself can use).
- *  Same one-power-action-per-turn depth limit as mkReflipValue: a raise
- *  followed by, say, a Dark Resurrection isn't modeled. The charge spend is
- *  priced by MK_EVAL_CHARGE, and the half-alive reserve discount
- *  (MK_EVAL_NECRO_RESERVE) means the eval sees raising as converting 16
- *  points of graveyard into real board presence — so hard raises when the
- *  board (not a heuristic) says the body is needed. */
-function mkRaiseValue(
+/** Value of Revive: the cast keeps the turn AND the flip (applyRevive's
+ *  contract — no re-roll), so its value is the best same-flip follow-up on
+ *  the post-revive board (the thrall itself may be the mover), ending in
+ *  the same mkValueAfterAction expectation every other candidate ends in.
+ *  NOT mkValueAfterAction directly on the post-revive state — its own-turn
+ *  arm would wrongly average over a fresh flip the mover never gets,
+ *  hiding the cast's actual point (e.g. a flipped 2 the thrall itself can
+ *  use to kill). Same one-power-action-per-turn depth limit as
+ *  mkReflipValue. The spent bank is priced by MK_EVAL_NECRO_CHARGE, the
+ *  consumed corpse by MK_EVAL_CORPSE, and the risen thrall by
+ *  MK_EVAL_THRALL(+menace) — so hard revives when the exchange plus the
+ *  follow-up beats holding. */
+function mkReviveValue(
   state: GameState,
   power: PowerState,
-  c: Extract<PowerAction, { kind: "raiseDead" }>,
   flip: number,
   me: PlayerId,
 ): number {
-  const r = applyRaiseDead(state, power, c.tokenId, me, c.dark ?? false);
+  const r = applyRevive(state, power, me);
   if (flip === 0) return evaluateMK(r.state, r.power, me);
   const moves = getLegalPowerMoves(r.state, r.power, flip);
   if (moves.length === 0) return evaluateMK(r.state, r.power, me);
@@ -1141,12 +1028,9 @@ function pickHardPowerAction(
       value = MK_WIN_VALUE;
     } else if (c.kind === "reflip") {
       value = mkReflipValue(state, power, mover);
-    } else if (c.kind === "raiseDead") {
-      value = mkRaiseValue(state, power, c, flip, mover);
-      // A plain raise burns half a Dark Resurrection — option value the
-      // one-ply search can't price. See MK_EVAL_PLAIN_RAISE_HOLDBACK.
-      if (!c.dark) value -= MK_EVAL_PLAIN_RAISE_HOLDBACK;
-      else value += MK_EVAL_DARK_RAISE_BIAS;
+    } else if (c.kind === "revive") {
+      // Denial urgency the one-ply search can't see — see MK_EVAL_REVIVE_BIAS.
+      value = mkReviveValue(state, power, flip, mover) + MK_EVAL_REVIVE_BIAS;
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);

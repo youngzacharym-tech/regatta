@@ -38,8 +38,8 @@ import {
   applyExhume,
   applyPowerMove,
   applyPush,
-  applyRaiseDead,
   applyReflip,
+  applyRevive,
   applyWarpath,
   breakShieldStreak,
   CHARGE_CAP,
@@ -49,6 +49,7 @@ import {
   REFLIPS_PER_TURN,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
+  tickThrallForNewTurn,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -109,9 +110,10 @@ function playClassic(p1Tier: BotDifficulty, p2Tier: BotDifficulty): PlayerId | n
 
 // ---------------------------------------------------------------------------
 // Master Killer: the exact takeTurn shape batch-random-master-killer-games.ts
-// drives (zero-flip charge on the flip commit, Bulwark ticks, the bounded
-// reflip/raise-then-redecide loop — a Raise keeps the SAME flip per
-// applyRaiseDead's contract), with a per-seat difficulty threaded through.
+// drives (zero-flip charge on the flip commit, thrall tick before move gen,
+// Bulwark ticks, the bounded reflip/revive-then-redecide loop — a Revive
+// keeps the SAME flip per applyRevive's contract), with a per-seat
+// difficulty threaded through.
 // ---------------------------------------------------------------------------
 
 function takeTurnMK(
@@ -122,13 +124,16 @@ function takeTurnMK(
   const mover = state.currentPlayer;
   let flip = flipCoins();
   if (flip === 0) power = grantZeroFlipCharge(power, mover);
+  const thrallTick = tickThrallForNewTurn(state, power);
+  state = thrallTick.state;
+  power = thrallTick.power;
   let moves = getLegalPowerMoves(state, power, flip);
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
 
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "raiseDead") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
+    (action?.kind === "reflip" || action?.kind === "revive") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
     i++
   ) {
     if (action.kind === "reflip") {
@@ -136,7 +141,7 @@ function takeTurnMK(
       flip = flipCoins();
       if (flip === 0) power = grantZeroFlipCharge(power, mover);
     } else {
-      const r = applyRaiseDead(state, power, action.tokenId, mover, action.dark ?? false);
+      const r = applyRevive(state, power, mover);
       state = r.state;
       power = r.power;
     }
@@ -145,7 +150,7 @@ function takeTurnMK(
     action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
   }
 
-  if (action === null || action.kind === "reflip" || action.kind === "raiseDead") {
+  if (action === null || action.kind === "reflip" || action.kind === "revive") {
     // Skip breaks a live shield streak, matching room-engine's auto-skip
     // (see batch-random-master-killer-games.ts's dead-end branch).
     return { state: applyNoMove(state), power: breakShieldStreak(power, mover) };
