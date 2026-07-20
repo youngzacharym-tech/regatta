@@ -1402,7 +1402,7 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
 // the tiled wood textures, not these).
 // ---------------------------------------------------------------------------
-type StatusKind = "ward" | "bulwark" | "shieldTile" | "thrall";
+type StatusKind = "ward" | "bulwark" | "shieldTile" | "thrall" | "soulClaim";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
@@ -1410,6 +1410,9 @@ const STATUS_TINTS: Record<StatusKind, number> = {
   // Possession wears the necromancer's blood red — the enemy stone serving
   // the graveyard is marked in its master's color, not its owner's.
   thrall: 0xd94a45,
+  // Soul Claim on a RESERVE stone — the rig loop overrides with the claim
+  // owner's temperature; this entry just keeps the map total.
+  soulClaim: 0xd94a45,
 };
 /** Dashed rune-ring, drawn white so the material color carries the class —
  *  deliberately a different visual language from the solid "movable" ring. */
@@ -1644,11 +1647,27 @@ function updateTokenTints(state: GameState) {
       if (th) thrallIds.add(th.tokenId);
     }
   }
+  // Soul-Claimed reserve stones: the enemy necromancer's mark + a full
+  // soul bank means this stone in your hand CANNOT be played — the exact
+  // client mirror of the rulebook's Soul Claim entry gate. Map token id ->
+  // the claiming side.
+  const claimedBy = new Map<number, PlayerId>();
+  for (const side of ["p1", "p2"] as PlayerId[]) {
+    const corpse = currentPower?.corpse?.[side] ?? null;
+    if (corpse && (currentPower?.charges?.[side] ?? 0) >= REVIVE_COST) {
+      claimedBy.set(corpse.tokenId, side);
+    }
+  }
   statusMarks.length = 0;
   state.tokens.forEach((token, idx) => {
     const mat = markers[idx].mesh.material as THREE.MeshStandardMaterial;
     let kind: StatusKind | null = null;
-    if (thrallIds.has(token.id)) {
+    if (token.position === -1 && claimedBy.has(token.id)) {
+      kind = "soulClaim";
+      const claimer = claimedBy.get(token.id)!;
+      mat.emissive.setHex(viewSide(claimer) === "p1" ? 0xd94a45 : 0x4f6cb0);
+      mat.emissiveIntensity = 0.5;
+    } else if (thrallIds.has(token.id)) {
       kind = "thrall";
       // The claim's temperature is the POSSESSOR's, viewer-relative: your
       // thrall burns warm, the enemy's glows cold — the necromancer-mirror
@@ -2740,6 +2759,20 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left${saves !== undefined ? ` · ${saves} save${saves === 1 ? "" : "s"}` : ""}`,
         klass: "warrior",
         desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
+      };
+    }
+    case "soulClaim": {
+      const claimer = (["p1", "p2"] as PlayerId[]).find(
+        (pl) => currentPower?.corpse?.[pl]?.tokenId === tokenId,
+      );
+      const theirs = claimer && viewSide(claimer) !== "p1";
+      return {
+        name: "Soul Claimed",
+        cost: "cannot re-enter play",
+        klass: "necromancer",
+        desc: theirs
+          ? "The enemy Necromancer holds this stone's soul: while their soul bank stays full, it cannot leave your hand. The claim lapses the moment they spend below a full bank — or resolves when they detonate or raise the corpse."
+          : "You hold this stone's soul: while your soul bank stays full, it cannot re-enter the enemy's hand. Spend below a full bank and they may reclaim it.",
       };
     }
     case "shieldTile":
@@ -5176,6 +5209,7 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
       "<b>Corpse Explosion.</b> The grave's second rite: spend 2 souls to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
       "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
       "<b>Tap anything glowing.</b> Every mark on the board now explains itself — tap a thrall, a Ward, a Bulwark, a shield tile, or the grave itself for a card telling you exactly what it does and how long it lasts.",
+      "<b>A claimed stone tells you so.</b> When the enemy Necromancer holds your fallen stone's soul, the piece waiting in your hand wears their cold shackle-ring — tap it to see why it can't be played and what breaks the claim.",
       "<b>The graveyard reads at a glance.</b> Corpses are little gravestones now (no more X), and possession runs on temperature: YOUR thrall wears a warm red shackle-ring with a floating turns-left counter, the enemy's glows cold blue — even in a Necromancer mirror you always know whose dead are whose.",
       "<b>Your whole kit, always in view.</b> Passives now sit around your avatar with the rest of your abilities — tap any gem to read it. The Mage's Ward gem glows only while the Ward is truly up; the Archer's Rain of Arrows lights when it's one shield landing from firing.",
       "<b>The dead feel no magic.</b> A thrall's blade ignores the Mage's Ward. Shields and Bulwarks still stop it.",
@@ -5403,10 +5437,12 @@ function tick() {
     // temperature (warm = the viewer's own thrall, cold slate = the
     // enemy's) — the mirror-match read Kasen asked for. Everything else
     // keeps the class-colored rune ring.
-    if (mark.kind === "thrall") {
+    if (mark.kind === "thrall" || mark.kind === "soulClaim") {
       const id = mark.idx;
-      const owner = (["p1", "p2"] as PlayerId[]).find(
-        (pl) => currentPower?.thrall?.[pl]?.tokenId === id,
+      const owner = (["p1", "p2"] as PlayerId[]).find((pl) =>
+        mark.kind === "thrall"
+          ? currentPower?.thrall?.[pl]?.tokenId === id
+          : currentPower?.corpse?.[pl]?.tokenId === id,
       );
       if (rig.ringMat.map !== chainRingTex) {
         rig.ringMat.map = chainRingTex;
@@ -5431,11 +5467,12 @@ function tick() {
       rig.ring.rotation.z = 0;
       rig.ringMat.opacity = 0.2 + 0.06 * Math.sin(now * 0.0011 + i);
       rig.ring.scale.setScalar(0.88);
-    } else if (mark.kind === "thrall") {
-      // The shackle doesn't spin — it sits heavy, breathing slow.
+    } else if (mark.kind === "thrall" || mark.kind === "soulClaim") {
+      // The shackle doesn't spin — it sits heavy, breathing slow. On a
+      // reserve stone it's smaller (the hand slots sit tighter).
       rig.ring.rotation.z = 0;
       rig.ringMat.opacity = 0.62 + 0.16 * Math.sin(now * 0.0016 + i);
-      rig.ring.scale.setScalar(1.02);
+      rig.ring.scale.setScalar(mark.kind === "soulClaim" ? 0.8 : 1.02);
     } else {
       // Ward spins with intent; Bulwark turns slow and heavy.
       rig.ring.rotation.z = now * (mark.kind === "bulwark" ? 0.00035 : 0.0009) + i * 1.3;
