@@ -1439,6 +1439,39 @@ function makeStatusRingTexture(): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
+/** Chain-link ring for POSSESSION — visually distinct from the dashed
+ *  rune-ring the other statuses wear: solid band with link ticks, the
+ *  shackle around an enslaved stone. Drawn white; the material color
+ *  carries the POSSESSOR's side temperature (warm = yours). */
+function makeChainRingTexture(): THREE.CanvasTexture {
+  const s = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d")!;
+  g.strokeStyle = "rgba(255,255,255,0.95)";
+  g.shadowBlur = 6;
+  g.shadowColor = "rgba(255,255,255,0.9)";
+  g.lineWidth = 7;
+  g.beginPath();
+  g.arc(s / 2, s / 2, 88, 0, Math.PI * 2);
+  g.stroke();
+  // Chain links: short cross-ticks riding the band.
+  g.lineWidth = 4;
+  const links = 10;
+  for (let i = 0; i < links; i++) {
+    const a = (i / links) * Math.PI * 2;
+    const x = s / 2 + Math.cos(a) * 88;
+    const y = s / 2 + Math.sin(a) * 88;
+    g.beginPath();
+    g.arc(x, y, 8, 0, Math.PI * 2);
+    g.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const chainRingTex = makeChainRingTexture();
+
 // Sized so the dash ring (radius 90/256 of the plane) clearly CIRCLES a
 // stone (Ø ~0.44) instead of hiding under it, yet stays inside one tile
 // (pitch ~0.7) so a protected stone never smears onto its neighbors.
@@ -1486,26 +1519,37 @@ const statusMarks: { idx: number; kind: StatusKind }[] = [];
 // Position from tileWorldPos — corpse tiles are contested (4-11), the same
 // physical square in either numbering.
 function makeCorpseTexture(): THREE.CanvasTexture {
+  // A tiny GRAVESTONE, not an X (Kasen 2026-07-20: the X read as
+  // "forbidden", not "a corpse lies here") — rounded headstone on a mound,
+  // drawn white so the material color carries the OWNER tint.
   const s = 128;
   const c = document.createElement("canvas");
   c.width = c.height = s;
   const g = c.getContext("2d")!;
-  g.strokeStyle = "rgba(255,255,255,0.9)";
-  g.shadowBlur = 5;
+  g.strokeStyle = "rgba(255,255,255,0.95)";
+  g.fillStyle = "rgba(255,255,255,0.28)";
+  g.shadowBlur = 6;
   g.shadowColor = "rgba(255,255,255,0.8)";
   g.lineWidth = 5;
-  // The grave ring...
+  // The headstone: rounded top, planted just above center.
   g.beginPath();
-  g.arc(s / 2, s / 2, 42, 0, Math.PI * 2);
+  g.moveTo(46, 84);
+  g.lineTo(46, 52);
+  g.arc(64, 52, 18, Math.PI, 0);
+  g.lineTo(82, 84);
+  g.closePath();
+  g.fill();
   g.stroke();
-  // ...and the crossed mark of the claimed soul.
-  g.lineWidth = 6;
+  // The mound it stands on.
   g.beginPath();
-  g.moveTo(s / 2 - 16, s / 2 - 16);
-  g.lineTo(s / 2 + 16, s / 2 + 16);
-  g.moveTo(s / 2 + 16, s / 2 - 16);
-  g.lineTo(s / 2 - 16, s / 2 + 16);
+  g.moveTo(30, 88);
+  g.quadraticCurveTo(64, 76, 98, 88);
   g.stroke();
+  // A soul-mote drifting off the stone's shoulder.
+  g.beginPath();
+  g.arc(90, 40, 4, 0, Math.PI * 2);
+  g.fillStyle = "rgba(255,255,255,0.9)";
+  g.fill();
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -1529,6 +1573,17 @@ const corpseDecals: THREE.Mesh[] = (["p1", "p2"] as const).map(() => {
   return mesh;
 });
 
+// Floating countdown badges — the number of turns a possession has left
+// rides ABOVE the enslaved stone itself (screen-projected DOM, one per
+// possible thrall). Temperature matches the rest of the possession
+// language: warm ring = yours, cold = the enemy's.
+const thrallBadges = (["p1", "p2"] as const).map(() => {
+  const el = document.createElement("div");
+  el.className = "thrall-badge";
+  document.body.appendChild(el);
+  return el;
+});
+
 /** Sync the two corpse decals to the latest broadcast — called from
  *  updateTokenTints (the per-broadcast status pass). */
 function updateCorpseDecals() {
@@ -1539,6 +1594,12 @@ function updateCorpseDecals() {
       mesh.visible = false;
       return;
     }
+    // Ownership reads as temperature, viewer-relative: YOUR grave burns the
+    // class's warm red; the ENEMY's grave is cold slate — unmistakable even
+    // in a necromancer mirror with two graves on the row.
+    (mesh.material as THREE.MeshBasicMaterial).color.setHex(
+      viewSide(side) === "p1" ? 0xd94a45 : 0x7e9bd6,
+    );
     const pos = tileWorldPos(side, corpse.tile);
     mesh.position.set(pos.x, pos.y + 0.012, pos.z);
     mesh.visible = true;
@@ -1589,7 +1650,13 @@ function updateTokenTints(state: GameState) {
     let kind: StatusKind | null = null;
     if (thrallIds.has(token.id)) {
       kind = "thrall";
-      mat.emissive.setHex(0xd94a45); // the necromancer's claim, burning through
+      // The claim's temperature is the POSSESSOR's, viewer-relative: your
+      // thrall burns warm, the enemy's glows cold — the necromancer-mirror
+      // disambiguator.
+      const owner = (["p1", "p2"] as PlayerId[]).find(
+        (pl) => currentPower?.thrall?.[pl]?.tokenId === token.id,
+      );
+      mat.emissive.setHex(owner && viewSide(owner) === "p1" ? 0xd94a45 : 0x4f6cb0);
       mat.emissiveIntensity = 0.62;
     } else if (fakePower && isWarded(state, fakePower, token)) {
       kind = "ward";
@@ -5109,6 +5176,7 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
       "<b>Corpse Explosion.</b> The grave's second rite: spend 2 souls to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
       "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
       "<b>Tap anything glowing.</b> Every mark on the board now explains itself — tap a thrall, a Ward, a Bulwark, a shield tile, or the grave itself for a card telling you exactly what it does and how long it lasts.",
+      "<b>The graveyard reads at a glance.</b> Corpses are little gravestones now (no more X), and possession runs on temperature: YOUR thrall wears a warm red shackle-ring with a floating turns-left counter, the enemy's glows cold blue — even in a Necromancer mirror you always know whose dead are whose.",
       "<b>Your whole kit, always in view.</b> Passives now sit around your avatar with the rest of your abilities — tap any gem to read it. The Mage's Ward gem glows only while the Ward is truly up; the Archer's Rain of Arrows lights when it's one shield landing from firing.",
       "<b>The dead feel no magic.</b> A thrall's blade ignores the Mage's Ward. Shields and Bulwarks still stop it.",
       "<b>Reinforced Bulwark holds the line.</b> Fixed: it no longer wears down from an archer merely LOOKING at it — only true blocks spend its saves.",
@@ -5331,7 +5399,27 @@ function tick() {
       rig.ring.visible = rig.dome.visible = false;
       continue;
     }
-    rig.ringMat.color.setHex(STATUS_TINTS[mark.kind]);
+    // Possession swaps in the chain ring, tinted by the POSSESSOR's side
+    // temperature (warm = the viewer's own thrall, cold slate = the
+    // enemy's) — the mirror-match read Kasen asked for. Everything else
+    // keeps the class-colored rune ring.
+    if (mark.kind === "thrall") {
+      const id = mark.idx;
+      const owner = (["p1", "p2"] as PlayerId[]).find(
+        (pl) => currentPower?.thrall?.[pl]?.tokenId === id,
+      );
+      if (rig.ringMat.map !== chainRingTex) {
+        rig.ringMat.map = chainRingTex;
+        rig.ringMat.needsUpdate = true;
+      }
+      rig.ringMat.color.setHex(owner && viewSide(owner) === "p1" ? 0xd94a45 : 0x7e9bd6);
+    } else {
+      if (rig.ringMat.map !== statusRingTex) {
+        rig.ringMat.map = statusRingTex;
+        rig.ringMat.needsUpdate = true;
+      }
+      rig.ringMat.color.setHex(STATUS_TINTS[mark.kind]);
+    }
     rig.ring.visible = true;
     rig.ring.position.set(
       marker.mesh.position.x,
@@ -5343,6 +5431,11 @@ function tick() {
       rig.ring.rotation.z = 0;
       rig.ringMat.opacity = 0.2 + 0.06 * Math.sin(now * 0.0011 + i);
       rig.ring.scale.setScalar(0.88);
+    } else if (mark.kind === "thrall") {
+      // The shackle doesn't spin — it sits heavy, breathing slow.
+      rig.ring.rotation.z = 0;
+      rig.ringMat.opacity = 0.62 + 0.16 * Math.sin(now * 0.0016 + i);
+      rig.ring.scale.setScalar(1.02);
     } else {
       // Ward spins with intent; Bulwark turns slow and heavy.
       rig.ring.rotation.z = now * (mark.kind === "bulwark" ? 0.00035 : 0.0009) + i * 1.3;
@@ -5363,6 +5456,25 @@ function tick() {
       rig.domeMat.opacity = 0.11 + 0.05 * Math.sin(now * 0.004 + i * 1.7);
     }
   }
+  // Thrall countdown badges ride their stones (screen-projected DOM) —
+  // hidden behind overlays, during history scrubs, and mid-flight.
+  (["p1", "p2"] as PlayerId[]).forEach((side, bi) => {
+    const el = thrallBadges[bi];
+    const th = currentPower?.thrall?.[side] ?? null;
+    const marker = th ? markers[th.tokenId] : null;
+    if (!th || !marker || !marker.mesh.visible || marker.flying || overlayUp || viewingHistory()) {
+      el.classList.remove("show");
+      return;
+    }
+    const v = marker.mesh.position.clone();
+    v.y += 0.62;
+    v.project(camera);
+    el.style.left = `${((v.x * 0.5 + 0.5) * window.innerWidth).toFixed(1)}px`;
+    el.style.top = `${((-v.y * 0.5 + 0.5) * window.innerHeight).toFixed(1)}px`;
+    el.textContent = String(th.turnsLeft);
+    el.classList.toggle("theirs", viewSide(side) !== "p1");
+    el.classList.add("show");
+  });
   // Gentle breathing on the capture-hover glow.
   if (hoverGlow.visible) {
     (hoverGlow.material as THREE.MeshBasicMaterial).opacity =

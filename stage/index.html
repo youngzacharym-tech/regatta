@@ -843,6 +843,25 @@
         margin-top: 8px; text-decoration: underline dotted;
       }
       #menu-whatsnew:hover { color: #e8c87e; }
+      /* Thrall countdown — turns of service left, floating over the
+         enslaved stone. Warm shackle red = YOUR thrall; cold slate =
+         the enemy's (the possession temperature language). */
+      .thrall-badge {
+        position: fixed; z-index: 55; display: none;
+        transform: translate(-50%, -100%);
+        min-width: 22px; height: 22px; padding: 0 6px; border-radius: 12px;
+        background: rgba(20, 10, 9, 0.92);
+        border: 2px solid #d94a45;
+        color: #ffd9d6; font-family: Cinzel, serif; font-weight: 700;
+        font-size: 13px; line-height: 19px; text-align: center;
+        box-shadow: 0 0 8px rgba(217, 74, 69, 0.55), 0 2px 6px rgba(0, 0, 0, 0.6);
+        pointer-events: none;
+      }
+      .thrall-badge.show { display: block; }
+      .thrall-badge.theirs {
+        border-color: #7e9bd6; color: #dbe6ff;
+        box-shadow: 0 0 8px rgba(126, 155, 214, 0.5), 0 2px 6px rgba(0, 0, 0, 0.6);
+      }
       #guide-book {
         position: relative;
         width: min(760px, 92vw); height: min(480px, 80vh);
