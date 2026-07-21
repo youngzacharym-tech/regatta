@@ -1336,6 +1336,12 @@
       body:has(#classpick.show) #rail { z-index: 253; }
       body:has(#classpick.show) #chat-panel { z-index: 254; }
       body:has(#classpick.show) #guide-overlay { z-index: 255; }
+      /* The leave dialog the rail's door opens must ride up with the rail —
+         at its resting z-index 62 it rendered UNDER the class-pick backdrop:
+         dimmed, unclickable, and the screen read as frozen (Kasen's
+         2026-07-21 report — open the door on the class table and nothing
+         responds). Same raise, one notch above the rail that opened it. */
+      body:has(#classpick.show) #exit-confirm { z-index: 253; }
       #classpick .card {
         padding: 38px 48px;
         min-width: 300px;
