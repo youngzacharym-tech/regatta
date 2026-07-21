@@ -352,6 +352,10 @@ var EXHUME_RETURN_POSITION = 11;
 var BLESS_COST = 2;
 var BLESSING_CAP = 3;
 var HEAL_COST = 2;
+var ROGUE_STEAL_ON_CAPTURE = 1;
+var PICKPOCKET_COST = 1;
+var PICKPOCKET_STEAL = 1;
+var BACKSTAB_COST = CHARGE_CAP;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
@@ -665,6 +669,15 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
       for (const id of mendedTokenIds) vitality[id] = "blessed";
       nextPower = { ...nextPower, vitality };
     }
+  }
+  if (power.classes[mover] === "rogue" && kills.length > 0) {
+    nextPower = {
+      ...nextPower,
+      charges: {
+        ...nextPower.charges,
+        [foe]: Math.max(0, nextPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE * kills.length)
+      }
+    };
   }
   const extraTurn = landsOnShield;
   const nextState = {
@@ -1186,6 +1199,99 @@ function applyExhume(state, power, targetTokenId, mover) {
   };
   return { state: nextState, power: resetTurnFlags(nextPower), returnedTo: landing };
 }
+function getPickpocketTargets(state, power, mover) {
+  if (power.charges[mover] < PICKPOCKET_COST) return [];
+  const foe = otherPlayerId(mover);
+  if (power.charges[foe] < 1) return [];
+  return getRainOfArrowsTargets(state, power, mover);
+}
+function applyPickpocket(power, mover) {
+  const foe = otherPlayerId(mover);
+  return {
+    ...power,
+    charges: {
+      ...power.charges,
+      [mover]: power.charges[mover] - PICKPOCKET_COST,
+      [foe]: Math.max(0, power.charges[foe] - PICKPOCKET_STEAL)
+    }
+  };
+}
+function getBackstabTargets(state, power, mover) {
+  if (power.charges[mover] < BACKSTAB_COST) return [];
+  return getRainOfArrowsTargets(state, power, mover).filter((id) => {
+    const t = state.tokens.find((tok) => tok.id === id);
+    return !onShieldTile(t) && !isBulwarked(power, t);
+  });
+}
+function applyBackstab(state, power, targetTokenId, mover) {
+  const foe = otherPlayerId(mover);
+  const woundsInstead = isBlessed(power, targetTokenId);
+  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: -1 } : t);
+  let spentPower = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST }
+  };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover
+    );
+  } else {
+    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
+    spentPower = {
+      ...spentPower,
+      charges: {
+        ...spentPower.charges,
+        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE)
+      }
+    };
+  }
+  spentPower = breakShieldStreak(spentPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null
+  };
+}
+function getGrandHeistTargets(state, power, mover) {
+  if (!findMostAdvancedToken(state, power, mover)) return [];
+  return getRainOfArrowsTargets(state, power, mover);
+}
+function applyGrandHeist(state, power, targetTokenId, mover) {
+  const mine = findMostAdvancedToken(state, power, mover);
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  const foe = otherPlayerId(mover);
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: target.position };
+    if (t.id === targetTokenId) return { ...t, position: -1 };
+    return t;
+  });
+  let nextPower = clearCapturedBulwarks(
+    { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } },
+    [targetTokenId]
+  );
+  nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
+  nextPower = clearVitality(nextPower, [targetTokenId]);
+  nextPower = addCharge(nextPower, mover);
+  nextPower = { ...nextPower, charges: { ...nextPower.charges, [foe]: 0 } };
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower) };
+}
 
 // master-killer-bot.ts
 var MK_STD_NECRO_SHIELD_EXTRA = 250;
@@ -1339,6 +1445,24 @@ function scoreHeal(state, targetId, rand) {
 function scoreBenediction(poolSize, rand) {
   return 250 + 120 * poolSize + rand() * 20;
 }
+function scorePickpocket(power, foe, rand) {
+  const cap = power.classes[foe] === "necromancer" ? NECRO_CHARGE_CAP : CHARGE_CAP;
+  const atCap = power.charges[foe] >= cap;
+  const dropsWard = power.classes[foe] === "mage" && atCap;
+  let score = dropsWard ? 260 : atCap ? 90 : -40;
+  score += rand() * 20;
+  return score;
+}
+function scoreBackstab(state, power, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  const wounds = isBlessed(power, targetId);
+  let score = (wounds ? 260 : 460) + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+function scoreGrandHeist(state, power, targetId, foe, rand) {
+  return scoreUltimateStrike(state, targetId, rand) + power.charges[foe] * 30;
+}
 function pickBotPowerAction(state, power, moves, flip, rand = Math.random, difficulty = "standard") {
   if (difficulty === "easy") return pickEasyPowerAction(state, power, moves, flip, rand);
   if (difficulty === "hard") return pickHardPowerAction(state, power, moves, flip, rand);
@@ -1485,6 +1609,32 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       }
     }
   }
+  if (cls === "rogue") {
+    const rogueFoe = mover === "p1" ? "p2" : "p1";
+    for (const targetId of getPickpocketTargets(state, power, mover)) {
+      const score = scorePickpocket(power, rogueFoe, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "pickpocket", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getBackstabTargets(state, power, mover)) {
+      const score = scoreBackstab(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "backstab", targetTokenId: targetId };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      for (const targetId of getGrandHeistTargets(state, power, mover)) {
+        const score = scoreGrandHeist(state, power, targetId, rogueFoe, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "grandHeist", targetTokenId: targetId };
+        }
+      }
+    }
+  }
   return best;
 }
 function enumerateCandidates(state, power, moves) {
@@ -1539,6 +1689,13 @@ function enumerateCandidates(state, power, moves) {
       out.push({ kind: "benediction" });
     }
   }
+  if (cls === "rogue") {
+    for (const id of getPickpocketTargets(state, power, mover)) out.push({ kind: "pickpocket", targetTokenId: id });
+    for (const id of getBackstabTargets(state, power, mover)) out.push({ kind: "backstab", targetTokenId: id });
+    if (power.ultimateReady[mover]) {
+      for (const id of getGrandHeistTargets(state, power, mover)) out.push({ kind: "grandHeist", targetTokenId: id });
+    }
+  }
   return out;
 }
 function pickEasyPowerAction(state, power, moves, flip, rand) {
@@ -1561,6 +1718,7 @@ var MK_EVAL_CORPSE = 15;
 var MK_EVAL_THRALL = 40;
 var MK_EVAL_THRALL_MENACE = 15;
 var MK_EVAL_NECRO_PREY_SCALE = 1.25;
+var MK_EVAL_ROGUE_PREY_SCALE = 1.1;
 var MK_EVAL_EXHUME_HELD = 20;
 var MK_EVAL_REVIVE_BIAS = 20;
 var MK_EVAL_BLESSED = 20;
@@ -1596,7 +1754,8 @@ function mkEvalSide(state, power, player) {
     const tile = BOARD_LAYOUT[t.position];
     if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
     if (tile.isContested && tile.type !== "shield" && !isWarded(state, power, t) && !isBulwarked(power, t)) {
-      const threatScale = (power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1) * (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
+      const preyScale = power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : power.classes[foe] === "rogue" ? MK_EVAL_ROGUE_PREY_SCALE : 1;
+      const threatScale = preyScale * (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
       for (const e of state.tokens) {
         if (effectiveOwner(power, e) === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER)
           continue;
@@ -1705,6 +1864,22 @@ function mkBlessingValue(state, power, c, flip, me) {
   }
   return best;
 }
+function mkPickpocketValue(state, power, c, flip, me) {
+  void c;
+  const nextPower = applyPickpocket(power, me);
+  if (flip === 0) return evaluateMK(state, nextPower, me);
+  const moves = getLegalPowerMoves(state, nextPower, flip);
+  if (moves.length === 0) return evaluateMK(state, nextPower, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin ? MK_WIN_VALUE : (() => {
+      const q = applyPowerMove(state, nextPower, m, me, SIM_RAND);
+      return mkValueAfterAction(q.state, q.power, me);
+    })();
+    if (v > best) best = v;
+  }
+  return best;
+}
 function mkSimulate(state, power, c, mover) {
   switch (c.kind) {
     case "move":
@@ -1733,6 +1908,12 @@ function mkSimulate(state, power, c, mover) {
       return applyHeal(state, power, c.targetTokenId, mover);
     case "benediction":
       return applyBenediction(state, power, mover);
+    case "backstab":
+      return applyBackstab(state, power, c.targetTokenId, mover);
+    case "grandHeist":
+      return applyGrandHeist(state, power, c.targetTokenId, mover);
+    case "pickpocket":
+      return { state, power: applyPickpocket(power, mover) };
   }
 }
 function mkReviveValue(state, power, flip, me) {
@@ -1766,6 +1947,8 @@ function pickHardPowerAction(state, power, moves, flip, rand) {
       value = mkReviveValue(state, power, flip, mover) + MK_EVAL_REVIVE_BIAS;
     } else if (c.kind === "bless") {
       value = mkBlessingValue(state, power, c, flip, mover);
+    } else if (c.kind === "pickpocket") {
+      value = mkPickpocketValue(state, power, c, flip, mover);
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);
@@ -1791,7 +1974,7 @@ var CHAT_MAX = 40;
 var CHAT_TEXT_MAX = 200;
 var OPPONENT_AWAY_MS = 2e4;
 var OPPONENT_LEFT_MS = 12e4;
-var MK_CLASSES = ["archer", "mage", "warrior", "necromancer", "cleric"];
+var MK_CLASSES = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
 function toWirePower(p) {
   return { ...p };
 }
@@ -1875,6 +2058,9 @@ function publicPower(doc) {
     healTargets: doc.mk.classes[mover] === "cleric" ? getHealTargets(doc.state, p, mover) : [],
     benedictionTargets: doc.mk.classes[mover] === "cleric" && doc.mk.ultimateReady[mover] ? getBenedictionTargets(doc.state, p, mover) : [],
     vitality: { ...doc.mk.vitality ?? {} },
+    pickpocketTargets: doc.mk.classes[mover] === "rogue" ? getPickpocketTargets(doc.state, p, mover) : [],
+    backstabTargets: doc.mk.classes[mover] === "rogue" ? getBackstabTargets(doc.state, p, mover) : [],
+    grandHeistTargets: doc.mk.classes[mover] === "rogue" && doc.mk.ultimateReady[mover] ? getGrandHeistTargets(doc.state, p, mover) : [],
     reflipsUsedThisTurn: p.reflipsUsedThisTurn
   };
 }
@@ -1929,6 +2115,8 @@ function stateEventOf(doc) {
     lastBenediction: doc.lastBenediction ?? null,
     lastWound: doc.lastWound ?? null,
     lastMend: doc.lastMend ?? null,
+    lastPickpocket: doc.lastPickpocket ?? null,
+    lastBackstab: doc.lastBackstab ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason
@@ -1972,6 +2160,8 @@ function freshMatchFields(variant) {
     lastBenediction: null,
     lastWound: null,
     lastMend: null,
+    lastPickpocket: null,
+    lastBackstab: null,
     rescueAttempted: false
   };
 }
@@ -2074,6 +2264,9 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
       if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
+      if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "backstab") return { doc: applyMkSimple(doc, seat, "backstab", a.targetTokenId, now) };
+      if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
       const move = doc.currentPowerMoves[a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
     }
@@ -2162,6 +2355,21 @@ function validateUsePower(doc, seat, a) {
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (getBenedictionTargets(doc.state, p(), seat).length === 0) return "Benediction would bless no one";
       return null;
+    case "pickpocket":
+      if (cls !== "rogue") return "Only a Rogue can Pickpocket";
+      if (doc.currentFlip === null) return "No flip yet";
+      if (!getPickpocketTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Pickpocket target";
+      return null;
+    case "backstab":
+      if (cls !== "rogue") return "Only a Rogue can Backstab";
+      if (doc.mk.charges[seat] < BACKSTAB_COST) return "No charge available";
+      if (!getBackstabTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Backstab target";
+      return null;
+    case "grandHeist":
+      if (cls !== "rogue") return "Only a Rogue can Grand Heist";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (!getGrandHeistTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Grand Heist target";
+      return null;
   }
 }
 var CLEAR_SLOTS = {
@@ -2185,6 +2393,8 @@ var CLEAR_SLOTS = {
   lastBenediction: null,
   lastWound: null,
   lastMend: null,
+  lastPickpocket: null,
+  lastBackstab: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null
@@ -2294,6 +2504,26 @@ function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
       r = applyHeal(doc.state, power, tokenId, seat);
       slots = { lastHeal: { tokenId } };
       break;
+    case "backstab": {
+      const rr = applyBackstab(doc.state, power, tokenId, seat);
+      r = rr;
+      capsGained = rr.woundedTokenId === null ? 1 : 0;
+      slots = {
+        lastBackstab: { targetTokenId: tokenId },
+        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null
+      };
+      break;
+    }
+    case "grandHeist": {
+      const heistFoe = seat === "p1" ? "p2" : "p1";
+      const foeChargesBefore = power.charges[heistFoe];
+      const rr = applyGrandHeist(doc.state, power, tokenId, seat);
+      r = { ...rr, sweptTokenIds: [] };
+      capsGained = 1;
+      const drained = foeChargesBefore - rr.power.charges[heistFoe];
+      slots = { lastUltimate: { kind: "grandHeist", targetTokenId: tokenId, sweptTokenIds: [], drained } };
+      break;
+    }
   }
   const delta = r.power.charges[seat] - chargesBefore;
   let next = {
@@ -2389,6 +2619,31 @@ function applyMkBlessing(doc, seat, tokenId, now) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
+function applyMkPickpocket(doc, seat, tokenId, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const foe = otherSeat(seat);
+  const foeChargesBefore = doc.mk.charges[foe];
+  const flip = doc.currentFlip;
+  const power = applyPickpocket(fromWirePower(doc.mk), seat);
+  const currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
+  const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  const stolen = foeChargesBefore - nextPower.charges[foe];
+  let next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastPickpocket: { targetTokenId: tokenId, stolen },
+    zeroFlipChargeBefore: doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - PICKPOCKET_COST : null
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
 function applyMkCorpseExplosion(doc, seat, now) {
   const chargesBefore = doc.mk.charges[seat];
   const r = applyCorpseExplosion(doc.state, fromWirePower(doc.mk), seat);
@@ -2455,6 +2710,9 @@ function autoSkipDelay(doc) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
     if (doc.mk.classes[mover] === "cleric" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getBlessTargets(doc.state, p, mover).length > 0 || getHealTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0)) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    if (doc.mk.classes[mover] === "rogue" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getPickpocketTargets(doc.state, p, mover).length > 0 || getBackstabTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
   }
@@ -2599,6 +2857,12 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkSimple(doc, seat, "heal", action.targetTokenId, now);
     case "benediction":
       return applyMkBenediction(doc, seat, now);
+    case "pickpocket":
+      return applyMkPickpocket(doc, seat, action.targetTokenId, now);
+    case "backstab":
+      return applyMkSimple(doc, seat, "backstab", action.targetTokenId, now);
+    case "grandHeist":
+      return applyMkSimple(doc, seat, "grandHeist", action.targetTokenId, now);
   }
 }
 function commitTurnFlip(doc, now, rand) {

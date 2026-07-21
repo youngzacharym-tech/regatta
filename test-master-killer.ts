@@ -10,6 +10,7 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
 import {
+  BACKSTAB_COST,
   BLESS_COST,
   BLESSING_CAP,
   BULWARK_REINFORCED_SAVES,
@@ -23,14 +24,18 @@ import {
   EXHUME_RETURN_POSITION,
   HEAL_COST,
   NECRO_CHARGE_CAP,
+  PICKPOCKET_COST,
+  PICKPOCKET_STEAL,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
   REFLIPS_PER_TURN,
   REVIVE_COST,
+  ROGUE_STEAL_ON_CAPTURE,
   SOUL_BOUNTY_CHARGES,
   THRALL_TURNS,
   ULTIMATE_STREAK,
+  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -39,6 +44,8 @@ import {
   applyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyGrandHeist,
+  applyPickpocket,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -49,16 +56,19 @@ import {
   consumeBulwarkBlocks,
   effectiveOwner,
   applyHeal,
+  getBackstabTargets,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkBlockedIds,
   getBulwarkTargets,
+  getGrandHeistTargets,
   getHealTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getExhumeTargets,
   getLegalPowerMoves,
+  getPickpocketTargets,
   getPushTargets,
   getRainOfArrowsTargets,
   getReviveSpawnTile,
@@ -2494,6 +2504,275 @@ function check(name: string, cond: boolean, detail?: string) {
   const r = applyExhume(s, pw, 0, "p2");
   check("Exhume: a blessed returner keeps its blessing", r.power.vitality[0] === "blessed");
   check("Exhume: dragged to the return tile", r.state.tokens.find((t) => t.id === 0)!.position === EXHUME_RETURN_POSITION);
+}
+
+// ---------------------------------------------------------------------------
+// Rogue: Larceny — every REAL kill also drains the foe's bank; a wound
+// (blessed victim survives) pays nothing extra, and only a Rogue's own
+// captures trigger it at all
+// ---------------------------------------------------------------------------
+{
+  const s = state("p1", { 0: 4, 4: 6 });
+  const pw = power({ p1: "rogue", p2: "archer" }, { p2: 2 });
+  const moves = getLegalPowerMoves(s, pw, 2);
+  const m = moves.find((mv) => mv.tokenId === 0 && mv.to === 6)!;
+  check("Larceny: sanity — this move really captures", m.captures.includes(4));
+  const r = applyPowerMove(s, pw, m, "p1");
+  check(
+    `Larceny: a real kill drains ROGUE_STEAL_ON_CAPTURE (${ROGUE_STEAL_ON_CAPTURE}) from the foe`,
+    r.power.charges.p2 === 2 - ROGUE_STEAL_ON_CAPTURE,
+    `got ${r.power.charges.p2}`,
+  );
+
+  // Same setup, but the victim is blessed — a WOUND, not a kill. Larceny
+  // must not fire (wounds pay only the standard capture charge, same rule
+  // Necromancer's soul bounty already follows).
+  const pwBlessed: PowerState = { ...power({ p1: "rogue", p2: "archer" }, { p2: 2 }), vitality: { 4: "blessed" } };
+  const movesBlessed = getLegalPowerMoves(s, pwBlessed, 2);
+  const mBlessed = movesBlessed.find((mv) => mv.tokenId === 0 && mv.to === 6)!;
+  const rBlessed = applyPowerMove(s, pwBlessed, mBlessed, "p1");
+  check("Larceny: a WOUND does not drain the foe", rBlessed.power.charges.p2 === 2, `got ${rBlessed.power.charges.p2}`);
+  check("Larceny: sanity — the victim really was wounded, not killed", rBlessed.power.vitality[4] === "wounded");
+
+  // A non-Rogue capturing the exact same shape must not drain the foe.
+  const pwArcher = power({ p1: "archer", p2: "archer" }, { p2: 2 });
+  const movesArcher = getLegalPowerMoves(s, pwArcher, 2);
+  const mArcher = movesArcher.find((mv) => mv.tokenId === 0 && mv.to === 6)!;
+  const rArcher = applyPowerMove(s, pwArcher, mArcher, "p1");
+  check("Larceny: does not fire for a non-Rogue mover", rArcher.power.charges.p2 === 2, `got ${rArcher.power.charges.p2}`);
+
+  // Floors at 0 — draining a foe already at 0 charges must not go negative.
+  const pwZero = power({ p1: "rogue", p2: "archer" }, { p2: 0 });
+  const movesZero = getLegalPowerMoves(s, pwZero, 2);
+  const mZero = movesZero.find((mv) => mv.tokenId === 0 && mv.to === 6)!;
+  const rZero = applyPowerMove(s, pwZero, mZero, "p1");
+  check("Larceny: floors at 0, never goes negative", rZero.power.charges.p2 === 0);
+}
+
+// ---------------------------------------------------------------------------
+// Rogue: Pickpocket — drains a target's bank WITHOUT capturing it; since
+// nothing is actually striking the stone, no protection (shield tile, Ward,
+// Bulwark) applies to its target pool at all
+// ---------------------------------------------------------------------------
+{
+  const s = state("p1", { 0: 4, 4: 6 });
+  const pw = power({ p1: "rogue", p2: "mage" }, { p1: 1, p2: 2 });
+  const targets = getPickpocketTargets(s, pw, "p1");
+  check("Pickpocket: an enemy in shared water with mana IS a legal target", targets.includes(4), JSON.stringify(targets));
+
+  const pwBroke = power({ p1: "rogue", p2: "mage" }, { p1: 0, p2: 2 });
+  check("Pickpocket: no targets when the mover can't afford it", getPickpocketTargets(s, pwBroke, "p1").length === 0);
+
+  // The foe needs something worth stealing — a 0-charge foe is excluded
+  // outright (no legal-but-worthless target, PUSH_WARD_DISTANCE=0's own
+  // precedent for this discipline).
+  const pwFoeBroke = power({ p1: "rogue", p2: "mage" }, { p1: 1, p2: 0 });
+  check("Pickpocket: no targets when the foe has nothing to steal", getPickpocketTargets(s, pwFoeBroke, "p1").length === 0);
+
+  const sPrivate = state("p1", { 0: 4, 4: 1 }); // p2's own private lane
+  check(
+    "Pickpocket: an enemy outside the contested zone is never a legal target",
+    getPickpocketTargets(sPrivate, pw, "p1").length === 0,
+  );
+
+  const sShield = state("p1", { 0: 4, 4: 7 }); // tile 7 is a shield tile
+  check("Pickpocket: reaches an enemy standing on a shield tile", getPickpocketTargets(sShield, pw, "p1").includes(4));
+
+  const pwWarded = power({ p1: "rogue", p2: "mage" }, { p1: 1, p2: CHARGE_CAP });
+  check(
+    "Pickpocket: reaches a Warded enemy (Ward only protects against capture)",
+    getPickpocketTargets(s, pwWarded, "p1").includes(4),
+  );
+
+  const pwBulwarked: PowerState = {
+    ...power({ p1: "rogue", p2: "warrior" }, { p1: 1, p2: 2 }),
+    bulwarked: { 4: 3 },
+  };
+  check(
+    "Pickpocket: reaches a Bulwarked enemy (no capture happens, so Bulwark is irrelevant)",
+    getPickpocketTargets(s, pwBulwarked, "p1").includes(4),
+  );
+
+  const r = applyPickpocket(pw, "p1");
+  check(`Pickpocket: mover spends PICKPOCKET_COST (${PICKPOCKET_COST})`, r.charges.p1 === 1 - PICKPOCKET_COST, `got ${r.charges.p1}`);
+  check(
+    `Pickpocket: foe loses PICKPOCKET_STEAL (${PICKPOCKET_STEAL}), no refund to the mover`,
+    r.charges.p2 === 2 - PICKPOCKET_STEAL,
+    `got ${r.charges.p2}`,
+  );
+
+  // Floors at 0 defensively — applyPickpocket doesn't self-guard on
+  // affordability, same convention as every other pure apply* here.
+  const pwThin = power({ p1: "rogue", p2: "mage" }, { p1: 1, p2: 0 });
+  const rThin = applyPickpocket(pwThin, "p1");
+  check("Pickpocket: floors the foe's charges at 0", rThin.charges.p2 === 0);
+}
+
+// ---------------------------------------------------------------------------
+// Rogue: Backstab — a guaranteed hit that pierces Ward (by omission, same
+// idiom as Charged Shot) but respects Bulwark and the wound split — only
+// ultimates truly pierce Bulwark/Blessing, and Backstab deliberately isn't one
+// ---------------------------------------------------------------------------
+{
+  const s = state("p1", { 0: 4, 4: 6 });
+  const pw = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
+  const targets = getBackstabTargets(s, pw, "p1");
+  check("Backstab: reaches a Warded enemy (pierces Ward by omission)", targets.includes(4), JSON.stringify(targets));
+
+  const pwBelow = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP - 1 });
+  check("Backstab: no targets below the full charge cap", getBackstabTargets(s, pwBelow, "p1").length === 0);
+
+  const sShield = state("p1", { 0: 4, 4: 7 });
+  check("Backstab: a target on a shield tile is not a legal target", !getBackstabTargets(sShield, pw, "p1").includes(4));
+
+  const pwBulwarked: PowerState = {
+    ...power({ p1: "rogue", p2: "warrior" }, { p1: CHARGE_CAP }),
+    bulwarked: { 4: 3 },
+  };
+  check(
+    "Backstab: a Bulwarked enemy is NOT a legal target (only ultimates pierce Bulwark)",
+    !getBackstabTargets(s, pwBulwarked, "p1").includes(4),
+  );
+
+  const sPrivate = state("p1", { 0: 4, 4: 1 });
+  check("Backstab: a target outside the contested zone is never legal", getBackstabTargets(sPrivate, pw, "p1").length === 0);
+
+  // --- Apply: a real kill (unwarded, unblessed target) ---
+  {
+    const sKill = state("p1", { 0: 4, 4: 6 });
+    const pwKill = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 1 });
+    const r = applyBackstab(sKill, pwKill, 4, "p1");
+    check("Backstab: kills the target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check(
+      "Backstab: does NOT refund on a real kill (unlike Push/Charged Shot's conditional send-home)",
+      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST,
+      `got ${r.power.charges.p1}`,
+    );
+    check(
+      `Backstab: Larceny drains ROGUE_STEAL_ON_CAPTURE (${ROGUE_STEAL_ON_CAPTURE}) from the victim on a real kill`,
+      r.power.charges.p2 === 1 - ROGUE_STEAL_ON_CAPTURE,
+      `got ${r.power.charges.p2}`,
+    );
+    check("Backstab: reports no wound", r.woundedTokenId === null);
+    check("Backstab: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+  }
+
+  // --- Apply: pierces Ward for the real kill ---
+  {
+    const sWard = state("p1", { 0: 4, 4: 6 });
+    const pwWard = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
+    check(
+      "Backstab: sanity — the target really is warded",
+      isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!),
+    );
+    const r = applyBackstab(sWard, pwWard, 4, "p1");
+    check("Backstab: kills a Warded target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+  }
+
+  // --- Apply: a wound (blessed target) — survives, still refunds, but NO
+  //     Larceny drain (wounds pay the standard charge and nothing else) ---
+  {
+    const sWound = state("p1", { 0: 4, 4: 6 });
+    const pwWound: PowerState = {
+      ...power({ p1: "rogue", p2: "cleric" }, { p1: CHARGE_CAP, p2: 1 }),
+      vitality: { 4: "blessed" },
+    };
+    const r = applyBackstab(sWound, pwWound, 4, "p1");
+    check("Backstab: a Blessed target survives as a WOUND, not a kill", r.state.tokens.find((t) => t.id === 4)!.position === 6);
+    check("Backstab: the blessing breaks (vitality -> wounded)", r.power.vitality[4] === "wounded");
+    check(
+      "Backstab: still refunds 1 charge on a wound",
+      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST + 1,
+      `got ${r.power.charges.p1}`,
+    );
+    check("Backstab: Larceny does NOT fire on a wound", r.power.charges.p2 === 1, `got ${r.power.charges.p2}`);
+    check("Backstab: reports the wounded token id", r.woundedTokenId === 4);
+  }
+
+  // --- Breaks any live shield streak (no token of the mover's ever moves,
+  //     so it never lands on a shield itself) ---
+  {
+    const sStreak = state("p1", { 0: 4, 4: 6 });
+    const base = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 0 });
+    const pwStreak: PowerState = { ...base, shieldStreak: { ...base.shieldStreak, p1: 2 } };
+    const r = applyBackstab(sStreak, pwStreak, 4, "p1");
+    check("Backstab: breaks a live shield streak", r.power.shieldStreak.p1 === 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rogue: Grand Heist ultimate — teleport-capture like Blink Strike, pierces
+// shield tiles/Ward/Bulwark/Blessing (every ultimate does), and drains the
+// target owner's ENTIRE bank on the kill — NOT just Larceny's flat amount,
+// which is deliberately not also applied on top
+// ---------------------------------------------------------------------------
+{
+  const s = state("p1", { 0: 5, 4: 9 });
+  const base = power({ p1: "rogue", p2: "mage" });
+  const pw: PowerState = { ...base, ultimateReady: { ...base.ultimateReady, p1: true } };
+  check(
+    "Grand Heist: target eligibility matches Rain of Arrows' pool (reused)",
+    JSON.stringify(getGrandHeistTargets(s, pw, "p1")) === JSON.stringify(getRainOfArrowsTargets(s, pw, "p1")),
+  );
+
+  const sNone = state("p1", { 4: 9 }); // p1 has zero on-board tokens
+  check("Grand Heist: no targets when the mover has no on-board token", getGrandHeistTargets(sNone, pw, "p1").length === 0);
+
+  const pwFull: PowerState = { ...base, ultimateReady: { ...base.ultimateReady, p1: true }, charges: { p1: 0, p2: 2 } };
+  const r = applyGrandHeist(s, pwFull, 4, "p1");
+  check("Grand Heist: relocates the mover's token onto the target's tile", r.state.tokens.find((t) => t.id === 0)!.position === 9);
+  check("Grand Heist: captures the target", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Grand Heist: grants 1 charge on the capture", r.power.charges.p1 === 1, `got ${r.power.charges.p1}`);
+  check(
+    "Grand Heist: drains the target owner's ENTIRE bank, not just Larceny's flat amount",
+    r.power.charges.p2 === 0,
+    `got ${r.power.charges.p2}`,
+  );
+  check("Grand Heist: clears ultimateReady on use", r.power.ultimateReady.p1 === false);
+  check("Grand Heist: always ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+
+  // Pierces Ward.
+  const sWard = state("p1", { 0: 5, 4: 9 });
+  const pwWard: PowerState = {
+    ...base,
+    ultimateReady: { ...base.ultimateReady, p1: true },
+    classes: { p1: "rogue", p2: "mage" },
+    charges: { p1: 0, p2: CHARGE_CAP },
+  };
+  check("Grand Heist: sanity — the target really is warded", isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!));
+  const rWard = applyGrandHeist(sWard, pwWard, 4, "p1");
+  check("Grand Heist: captures a Warded target", rWard.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Grand Heist: drains the Warded target owner's entire (full-cap) bank", rWard.power.charges.p2 === 0);
+
+  // Pierces Bulwark, and clears the captured token's bulwarked entry (the
+  // same reserve-trip leak resolveTurn already guards against elsewhere).
+  const sBulwark = state("p1", { 0: 5, 4: 9 });
+  const baseW = power({ p1: "rogue", p2: "warrior" });
+  const pwBulwark: PowerState = {
+    ...baseW,
+    ultimateReady: { ...baseW.ultimateReady, p1: true },
+    charges: { p1: 0, p2: 2 },
+    bulwarked: { 4: 3 },
+  };
+  const rBulwark = applyGrandHeist(sBulwark, pwBulwark, 4, "p1");
+  check("Grand Heist: captures a Bulwarked target", rBulwark.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Grand Heist: clears the captured token's bulwarked entry", rBulwark.power.bulwarked[4] === undefined);
+
+  // Pierces Blessing — a REAL kill, not a wound (every ultimate kills
+  // straight through it, same as Rain of Arrows/Blink Strike/Warpath).
+  const sBlessed = state("p1", { 0: 5, 4: 9 });
+  const pwBlessed: PowerState = {
+    ...power({ p1: "rogue", p2: "cleric" }, { p1: 0, p2: 2 }),
+    ultimateReady: { p1: true, p2: false },
+    vitality: { 4: "blessed" },
+  };
+  const rBlessed = applyGrandHeist(sBlessed, pwBlessed, 4, "p1");
+  check("Grand Heist: kills a Blessed target outright (ultimates pierce blessing)", rBlessed.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Grand Heist: clears the captured token's vitality entry", rBlessed.power.vitality[4] === undefined);
+  check(
+    "Grand Heist: still drains the entire bank even on a pierced-blessing kill",
+    rBlessed.power.charges.p2 === 0,
+  );
 }
 
 // ---------------------------------------------------------------------------

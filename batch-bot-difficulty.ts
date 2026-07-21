@@ -31,15 +31,18 @@ import {
   type PlayerId,
 } from "./rulebook.ts";
 import {
+  applyBackstab,
   applyBlinkStrike,
   applyBless,
   applyBenediction,
   applyBulwark,
+  applyGrandHeist,
   applyHeal,
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyPickpocket,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -82,7 +85,7 @@ const HARD_VS_STANDARD_MIN = 55;
  *  hard-vs-standard, from the other side. */
 const STANDARD_VS_EASY_MIN = 55;
 
-const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric"];
+const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
 const PAIRINGS: [BotDifficulty, BotDifficulty, number][] = [
   // [stronger, weaker, min stronger win%]
   ["standard", "easy", STANDARD_VS_EASY_MIN],
@@ -135,12 +138,13 @@ function takeTurnMK(
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
 
-  // Cleric Bless joined the turn-keeping club (applyBless's contract; Heal
-  // did NOT — it ends the turn, see HEAL_COST's doc) — same three-kind
-  // loop as batch-random-master-killer-games.ts's takeTurn.
+  // Cleric Bless and Rogue Pickpocket joined the turn-keeping club
+  // (applyBless/applyPickpocket's shared contract; Heal did NOT — it ends
+  // the turn, see HEAL_COST's doc) — same four-kind loop as
+  // batch-random-master-killer-games.ts's takeTurn.
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless") &&
+    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless" || action?.kind === "pickpocket") &&
     i <= REFLIPS_PER_TURN + CHARGE_CAP * 2 + 1;
     i++
   ) {
@@ -152,17 +156,25 @@ function takeTurnMK(
       const r = applyRevive(state, power, mover);
       state = r.state;
       power = r.power;
-    } else {
+    } else if (action.kind === "bless") {
       const r = applyBless(state, power, action.targetTokenId, mover);
       state = r.state;
       power = r.power;
+    } else {
+      power = applyPickpocket(power, mover);
     }
     moves = getLegalPowerMoves(state, power, flip);
     power = tickBulwarkForReflip(state, power, flip).power;
     action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
   }
 
-  if (action === null || action.kind === "reflip" || action.kind === "revive" || action.kind === "bless") {
+  if (
+    action === null ||
+    action.kind === "reflip" ||
+    action.kind === "revive" ||
+    action.kind === "bless" ||
+    action.kind === "pickpocket"
+  ) {
     // Skip breaks a live shield streak, matching room-engine's auto-skip
     // (see batch-random-master-killer-games.ts's dead-end branch).
     return { state: applyNoMove(state), power: breakShieldStreak(power, mover) };
@@ -202,6 +214,14 @@ function takeTurnMK(
       return applyHeal(state, power, action.targetTokenId, mover);
     case "benediction": {
       const r = applyBenediction(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "backstab": {
+      const r = applyBackstab(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "grandHeist": {
+      const r = applyGrandHeist(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };
     }
   }

@@ -17,6 +17,7 @@
 
 import { initialState, flipCoins, applyNoMove, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -25,7 +26,9 @@ import {
   applyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyGrandHeist,
   applyHeal,
+  applyPickpocket,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -49,7 +52,7 @@ import { pickBotPowerAction } from "./master-killer-bot.ts";
 const GAMES_PER_MATCHUP = Number(process.argv[2] ?? 2000);
 const MAX_TURNS_PER_GAME = 1000;
 
-const CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric"];
+const CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
 
 interface GameResult {
   winner: PlayerId | null;
@@ -81,6 +84,9 @@ interface GameResult {
     benediction: number; // Benediction ultimates fired
     wound: number; // blessings broken (captures/knockbacks absorbed as wounds)
     mend: number; // stones mended by Sanctified Ground shield landings
+    pickpocket: number; // Rogue Pickpocket casts (turn-keeping bank drain)
+    backstab: number; // Rogue Backstab casts (guaranteed hit, kill or wound)
+    grandHeist: number; // Grand Heist ultimates fired
   };
 }
 
@@ -134,14 +140,17 @@ function takeTurn(
   // fresh move list can reveal a Bulwark block the pre-revive one couldn't.
   // Cleric Bless joined the turn-keeping club (applyBless's contract —
   // same flip, no re-roll; Heal deliberately did NOT, see HEAL_COST's
-  // doc), so the loop handles three kinds. Bound: the Re-flip cap plus
-  // every mana the bank could fund across the turn-keepers (each Bless
-  // costs >= 1, Revive empties the bank), plus safety.
+  // doc), and Rogue Pickpocket joined it too (applyPickpocket's own
+  // contract — bank-level, no board change at all), so the loop handles
+  // four kinds. Bound: the Re-flip cap plus every mana the bank could fund
+  // across the turn-keepers (each Bless/Pickpocket costs >= 1, Revive
+  // empties the bank), plus safety.
   let revives = 0;
   let blessCasts = 0;
+  let pickpocketCasts = 0;
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless") &&
+    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless" || action?.kind === "pickpocket") &&
     i <= REFLIPS_PER_TURN + CHARGE_CAP * 2 + 1;
     i++
   ) {
@@ -155,11 +164,14 @@ function takeTurn(
       state = r.state;
       power = r.power;
       revives++;
-    } else {
+    } else if (action.kind === "bless") {
       const r = applyBless(state, power, action.targetTokenId, mover);
       state = r.state;
       power = r.power;
       blessCasts++;
+    } else {
+      power = applyPickpocket(power, mover);
+      pickpocketCasts++;
     }
     moves = getLegalPowerMoves(state, power, flip);
     const sameTurnBulwark = tickBulwarkForReflip(state, power, flip);
@@ -175,6 +187,7 @@ function takeTurn(
     ...(bulwarkBlockedThisTurn ? { bulwarkBlock: 1 } : {}),
     ...(revives > 0 ? { revive: revives } : {}),
     ...(blessCasts > 0 ? { bless: blessCasts } : {}),
+    ...(pickpocketCasts > 0 ? { pickpocket: pickpocketCasts } : {}),
     ...(thrallExpiredThisTurn ? { thrallExpired: 1 } : {}),
   };
 
@@ -183,7 +196,13 @@ function takeTurn(
   // runtime (pickBotPowerAction checks canReflipAgain / the shared
   // oracles), but the return TYPE can't prove that statically, so it's
   // treated the same as "no action" rather than left unhandled.
-  if (action === null || action.kind === "reflip" || action.kind === "revive" || action.kind === "bless") {
+  if (
+    action === null ||
+    action.kind === "reflip" ||
+    action.kind === "revive" ||
+    action.kind === "bless" ||
+    action.kind === "pickpocket"
+  ) {
     // No zero-flip grant here — it already happened on the flip commit
     // above (or inside the re-flip loop), matching the server's ordering.
     // The skip DOES break a live shield streak — room-engine's auto-skip
@@ -326,6 +345,20 @@ function takeTurn(
       const r = applyBenediction(state, power, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, benediction: 1 } };
     }
+    case "backstab": {
+      const r = applyBackstab(state, power, action.targetTokenId, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.woundedTokenId === null ? 1 : 0,
+        usage: { ...turnUsage, backstab: 1, ...(r.woundedTokenId !== null ? { wound: 1 } : {}) },
+      };
+    }
+    case "grandHeist": {
+      const r = applyGrandHeist(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 1, usage: { ...turnUsage, grandHeist: 1 } };
+    }
   }
 }
 
@@ -360,6 +393,9 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     benediction: 0,
     wound: 0,
     mend: 0,
+    pickpocket: 0,
+    backstab: 0,
+    grandHeist: 0,
   };
   const rand = Math.random;
 
@@ -398,6 +434,11 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     // Wounds/mends arrive as counts (several can land in one move).
     usage.wound += r.usage.wound ?? 0;
     usage.mend += r.usage.mend ?? 0;
+    // Pickpocket arrives as a count too (the turn-keeping loop can fire it
+    // more than once per turn, same shape as revive/bless).
+    usage.pickpocket += r.usage.pickpocket ?? 0;
+    if (r.usage.backstab) usage.backstab++;
+    if (r.usage.grandHeist) usage.grandHeist++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -471,6 +512,9 @@ for (const [a, b] of matchups) {
   const avgBenediction = mean(results.map((r) => r.usage.benediction));
   const avgWound = mean(results.map((r) => r.usage.wound));
   const avgMend = mean(results.map((r) => r.usage.mend));
+  const avgPickpocket = mean(results.map((r) => r.usage.pickpocket));
+  const avgBackstab = mean(results.map((r) => r.usage.backstab));
+  const avgGrandHeist = mean(results.map((r) => r.usage.grandHeist));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
@@ -483,7 +527,8 @@ for (const [a, b] of matchups) {
       `  thrallKill/g=${avgThrallKill.toFixed(3)}  corpseDeny/g=${avgCorpseDeny.toFixed(3)}` +
       `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
       `  bless/g=${avgBless.toFixed(2)}  heal/g=${avgHeal.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
-      `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}`,
+      `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}` +
+      `  pickpocket/g=${avgPickpocket.toFixed(2)}  backstab/g=${avgBackstab.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

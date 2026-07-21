@@ -27,6 +27,7 @@ import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
 // branch that reads them is gated accordingly).
 import {
   CHARGE_CAP,
+  BACKSTAB_COST,
   BLESS_COST,
   BLESSING_CAP,
   CHARGED_SHOT_DISTANCE,
@@ -36,6 +37,8 @@ import {
   HEAL_COST,
   isWarded,
   NECRO_CHARGE_CAP,
+  PICKPOCKET_COST,
+  PICKPOCKET_STEAL,
   REFLIPS_PER_TURN,
   REVIVE_COST,
   THRALL_TURNS,
@@ -1226,7 +1229,7 @@ function ensureMkPieces() {
       // (applyTokenGeometries' own fallback) instead of dragging every
       // OTHER class down with it — the seam that lets a new class's rules
       // ship ahead of (or without) its Blender relief.
-      for (const cls of ["archer", "mage", "warrior", "necromancer", "cleric"] as const) {
+      for (const cls of ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"] as const) {
         const red = geoOf(`token_${cls}_red`);
         const blue = geoOf(`token_${cls}_blue`);
         if (!red || !blue) {
@@ -1876,6 +1879,12 @@ let currentPower: {
   healTargets?: number[];
   benedictionTargets?: number[];
   vitality?: Record<number, "blessed" | "wounded">;
+  /** Rogue (2026-07-21): Pickpocket/Backstab target pools for the CURRENT
+   *  player (affordability baked in server-side) and Grand Heist's
+   *  ultimate pool (ultimateReady-gated). */
+  pickpocketTargets?: number[];
+  backstabTargets?: number[];
+  grandHeistTargets?: number[];
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -1898,7 +1907,10 @@ type ArmedKind =
   | "bulwarkReinforced"
   | "charge"
   | "bless"
-  | "heal";
+  | "heal"
+  | "pickpocket"
+  | "backstab"
+  | "grandHeist";
 let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
  *  sweep-capable move of the current roll (rebuilt by updateDock). The
@@ -2109,6 +2121,30 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "necromancer",
     desc: `Your kills feed you: every enemy stone you send home pays ${REVIVE_COST} mana — filling even your third crystal, the Soul Gem, which no other income can touch — and leaves its corpse marked where it fell. While your mana is full, the marked body cannot rise on its own: the soul is yours until you spend it.`,
   },
+  larceny: {
+    name: "Larceny",
+    cost: "Passive · always on",
+    klass: "rogue",
+    desc: `Every stone you send home pays twice: your own mana climbs as usual, and ${PICKPOCKET_STEAL} mana drains straight out of their pocket too. A wound doesn't count — only a real kill pays.`,
+  },
+  pickpocket: {
+    name: "Pickpocket",
+    cost: `${PICKPOCKET_COST} mana · keeps your turn`,
+    klass: "rogue",
+    desc: `Reach into an enemy stone's pocket in shared water and lift ${PICKPOCKET_STEAL} mana — no fight, no protection stops you, since nothing is actually striking the stone. Your turn continues: pick the pocket, then still make your move.`,
+  },
+  backstab: {
+    name: "Backstab",
+    cost: `${BACKSTAB_COST} mana`,
+    klass: "rogue",
+    desc: "A guaranteed strike at an enemy in shared water: Wards mean nothing to it. A Bulwark still turns it away, and a Blessed stone survives as a wound instead of a kill — but anything else goes down for good, and the mana you took from them on the kill is on top of the spend.",
+  },
+  grandHeist: {
+    name: "Grand Heist",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "rogue",
+    desc: "Teleport your furthest-along stone onto any enemy in shared water and take it — straight through shields, Wards, and Bulwarks — then empty their ENTIRE bank on the spot. A capture and a robbery in the same breath.",
+  },
 };
 
 const abilityTip = document.getElementById("ability-tip") as HTMLDivElement;
@@ -2209,6 +2245,10 @@ const DOCK_COST: Record<string, number> = {
   heal: HEAL_COST,
   benediction: 0,
   sanctifiedGround: 0,
+  larceny: 0,
+  pickpocket: PICKPOCKET_COST,
+  backstab: BACKSTAB_COST,
+  grandHeist: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
 const DOCK_NAMES: Record<string, string> = {
@@ -2232,6 +2272,10 @@ const DOCK_NAMES: Record<string, string> = {
   heal: "Heal",
   benediction: "Benediction",
   sanctifiedGround: "Sanctified",
+  larceny: "Larceny",
+  pickpocket: "Pickpocket",
+  backstab: "Backstab",
+  grandHeist: "Grand Heist",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
  *  so the goal is visible from turn one. Archer's ult (Rain of Arrows) is
@@ -2273,6 +2317,12 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "heal" },
     { ability: "benediction", ult: true },
   ],
+  rogue: [
+    { ability: "larceny", passive: true },
+    { ability: "pickpocket" },
+    { ability: "backstab" },
+    { ability: "grandHeist", ult: true },
+  ],
 };
 /** Ground-ring tint while targeting — the caster's class color (the ring
  *  texture is drawn white so this is a plain material recolor, see tick()). */
@@ -2288,6 +2338,10 @@ const DOCK_RING_TINTS: Record<PlayerClass, number> = {
   // wounded scars, dock gems). Lockstep with index.html's
   // data-class="cleric" blocks, same rule as the necromancer's.
   cleric: 0xe0b341,
+  // Moonlit steel — the rogue's whole visual language (dock, ribbon, procs,
+  // ability tip). Lockstep with index.html's data-class="rogue" blocks,
+  // same rule as every other class's.
+  rogue: 0x9fb4c9,
 };
 /** What the ribbon asks the player to do, per armed ability. */
 const RIBBON_COPY: Record<ArmedKind, string> = {
@@ -2300,6 +2354,9 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   warpath: "tap an enemy to end on",
   bless: "tap one of your stones to bless",
   heal: "tap a wounded stone to mend",
+  pickpocket: "tap a glowing enemy stone",
+  backstab: "tap a glowing enemy stone",
+  grandHeist: "tap an enemy to strike",
 };
 
 /** Class the dock is currently built for — rebuild only on change. */
@@ -2423,6 +2480,20 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
       if ((p.benedictionTargets ?? []).length === 0)
         return { state: "noafford", reason: "Your army is already blessed" };
+      return { state: "ready" };
+    case "pickpocket": {
+      if ((p.pickpocketTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < PICKPOCKET_COST) return { state: "noafford", reason: needCharges(PICKPOCKET_COST) };
+      return { state: "noafford", reason: "No mana worth taking nearby" };
+    }
+    case "backstab": {
+      if ((p.backstabTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < BACKSTAB_COST) return { state: "noafford", reason: needCharges(BACKSTAB_COST) };
+      return { state: "noafford", reason: "No enemies in shared water" };
+    }
+    case "grandHeist":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.grandHeistTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
   }
   return { state: "noafford" };
@@ -2549,7 +2620,13 @@ function armAbility(kind: ArmedKind) {
                 ? (p.blessTargets ?? [])
                 : kind === "heal"
                   ? (p.healTargets ?? [])
-                  : p.bulwarkTargets, // bulwark / bulwarkReinforced
+                  : kind === "pickpocket"
+                    ? (p.pickpocketTargets ?? [])
+                    : kind === "backstab"
+                      ? (p.backstabTargets ?? [])
+                      : kind === "grandHeist"
+                        ? (p.grandHeistTargets ?? [])
+                        : p.bulwarkTargets, // bulwark / bulwarkReinforced
   );
   if (ids.size === 0) return;
   armed = { kind, targetIds: ids };
@@ -2609,6 +2686,15 @@ function fireArmed(tokenId: number) {
       break;
     case "heal":
       sendToServer({ type: "usePower", action: { kind: "heal", targetTokenId: tokenId } });
+      break;
+    case "pickpocket":
+      sendToServer({ type: "usePower", action: { kind: "pickpocket", targetTokenId: tokenId } });
+      break;
+    case "backstab":
+      sendToServer({ type: "usePower", action: { kind: "backstab", targetTokenId: tokenId } });
+      break;
+    case "grandHeist":
+      sendToServer({ type: "usePower", action: { kind: "grandHeist", targetTokenId: tokenId } });
       break;
   }
   flashDockButton(kind, "fired");
@@ -3479,7 +3565,12 @@ function announceFromState(msg: {
   lastBulwarkBlock?: { tokenIds: number[] } | null;
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
-  lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+  lastUltimate?: {
+    kind: "blinkStrike" | "warpath" | "grandHeist";
+    targetTokenId: number;
+    sweptTokenIds: number[];
+    drained?: number;
+  } | null;
   lastChargeSweep?: { sweptTokenIds: number[] } | null;
   lastReflip?: { player: PlayerId } | null;
   lastRevive?: { tokenId: number; tile: number } | null;
@@ -3492,6 +3583,8 @@ function announceFromState(msg: {
   lastBenediction?: { tokenIds: number[] } | null;
   lastWound?: { tokenIds: number[] } | null;
   lastMend?: { tokenIds: number[] } | null;
+  lastPickpocket?: { targetTokenId: number; stolen: number } | null;
+  lastBackstab?: { targetTokenId: number } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -3578,6 +3671,24 @@ function announceFromState(msg: {
   if (msg.lastMend && msg.lastMend.tokenIds.length > 0) {
     const owner = msg.state.tokens.find((t) => t.id === msg.lastMend!.tokenIds[0])?.owner;
     if (classOf(owner) === "cleric") showProc("cleric", "Sanctified Ground", "sanctifiedGround");
+  }
+  // Rogue's Pickpocket keeps the turn (Bless's contract) — a proc, not a
+  // returning announcement. Turn-keeping means lastMovePlayer is stale (a
+  // prior commit's value, same reason Bless can't use it either); but
+  // Pickpocket never passes the turn AT ALL, so whoever currently holds it
+  // (state.currentPlayer) must be the caster — a simpler, equally sound
+  // derivation than Bless's own "the target's owner" trick (which doesn't
+  // apply here since Pickpocket's target is the ENEMY's stone, not the
+  // caster's own).
+  if (msg.lastPickpocket) {
+    const caster = msg.state.currentPlayer;
+    if (classOf(caster) === "rogue") {
+      showProc("rogue", "Pickpocket!", "pickpocket");
+      const isMe = caster === myRole;
+      const subject = isMe ? "You" : playerLabel(caster);
+      const target = isMe ? "their" : "your";
+      showAnnouncement(`${subject} picked ${target} pocket for ${msg.lastPickpocket.stolen} mana`, "capture");
+    }
   }
 
   // Bulwark actually blocking a capture is its own signal, independent of
@@ -3699,18 +3810,39 @@ function announceFromState(msg: {
     return;
   }
 
+  if (msg.lastBackstab && msg.lastMovePlayer) {
+    const who = playerLabel(msg.lastMovePlayer);
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : who;
+    const target = isMe ? "opponent's" : "your";
+    const targetToken = msg.state.tokens.find((t) => t.id === msg.lastBackstab!.targetTokenId);
+    const wounded = targetToken && targetToken.position !== -1; // still on board = the blessing absorbed it
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Backstab!", "backstab");
+    showAnnouncement(
+      wounded
+        ? `${subject} backstabbed ${target} token — the blessing broke instead${chargeFor(msg.lastMovePlayer)}`
+        : `${subject} backstabbed ${target} token for good${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
   if (msg.lastUltimate && msg.lastMovePlayer) {
     const who = playerLabel(msg.lastMovePlayer);
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
     const target = isMe ? "opponent's" : "your";
-    const label = msg.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
+    const label =
+      msg.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : msg.lastUltimate.kind === "warpath" ? "Warpath" : "Grand Heist";
     const sweptCount = msg.lastUltimate.sweptTokenIds.length;
     const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
+    const drained = msg.lastUltimate.drained ?? 0;
+    const heistPhrase = drained > 0 ? ` and emptied ${target} bank for ${drained} mana` : "";
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, `${label}!`, msg.lastUltimate.kind);
     showAnnouncement(
-      `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}!${chargeFor(msg.lastMovePlayer)}`,
+      `${subject} unleashed ${label} — captured ${target} token${sweptCount > 0 ? "s" : ""}${sweepPhrase}${heistPhrase}!${chargeFor(msg.lastMovePlayer)}`,
       "ultimate",
     );
     return;
@@ -5044,6 +5176,7 @@ const GUIDE_SPREADS: [string, string][] = [
        <li data-goto="6"><span>The Warrior</span><i></i><b>VI</b></li>
        <li data-goto="7"><span>The Necromancer</span><i></i><b>VII</b></li>
        <li data-goto="8"><span>The Cleric</span><i></i><b>VIII</b></li>
+       <li data-goto="9"><span>The Rogue</span><i></i><b>IX</b></li>
      </ol>`,
     `<h2>How to Read This Book</h2>
      <p>Tap any entry in the contents to open its chapter directly.</p>
@@ -5113,7 +5246,7 @@ const GUIDE_SPREADS: [string, string][] = [
      fills your <span class="gold">mana</span> — up to two banked at once.
      Spend mana to fire your class's active power, offered as a button
      beside your coins whenever you can afford it.</p>`,
-    `<div class="runner">Master Killer &middot; the five classes</div>
+    `<div class="runner">Master Killer &middot; the six classes</div>
      <ul>
        <li><b>The Archer</b> strikes from range — free Snipes on the water,
        Pushes and the heavy Charged Shot to knock enemies home.</li>
@@ -5125,6 +5258,8 @@ const GUIDE_SPREADS: [string, string][] = [
        each stone sent home and raises the dead back onto the board.</li>
        <li><b>The Cleric</b> refuses the trade — blesses stones with a
        second life, so the first killing blow only wounds them.</li>
+       <li><b>The Rogue</b> robs the table — every kill drains the enemy's
+       mana too, and Pickpocket lifts it clean with no fight at all.</li>
      </ul>
      <p>Each class keeps its own chapter in this book — and each hides an
      <span class="gold">ultimate</span>, earned by landing on shield tiles
@@ -5281,6 +5416,37 @@ const GUIDE_SPREADS: [string, string][] = [
      <p>The Cleric wins by refusing to lose stones: each blessing costs the
      enemy a full extra blow, and the army that keeps its crew keeps the
      race.</p>`,
+  ],
+  [
+    `<h2>The Rogue</h2>
+     <ul>
+       <li><b>Larceny</b> (passive, free): every stone you send home for
+       good pays twice — your own mana climbs as usual, and
+       ${PICKPOCKET_STEAL} mana drains straight out of the enemy's pocket
+       too. A wound doesn't count; only a real kill pays.</li>
+       <li><b>Pickpocket</b> (active, ${PICKPOCKET_COST} mana, keeps your
+       turn): reach into an enemy stone's pocket in shared water and lift
+       ${PICKPOCKET_STEAL} mana — no fight, and no protection stops you,
+       since nothing is actually striking the stone. Pick the pocket, then
+       still make your move.</li>
+       <li><b>Backstab</b> (active, ${BACKSTAB_COST} mana): a guaranteed
+       strike at an enemy in shared water. Wards mean nothing to it — a
+       Bulwark still turns it away, and a Blessed stone survives as a
+       wound instead of a kill, same as any other blow — but anything
+       else goes down for good.</li>
+     </ul>`,
+    `<div class="runner">The Rogue &middot; continued</div>
+     <ul>
+       <li><b>Grand Heist</b> (active, spends your ultimate): land on a
+       shield tile three times running, then teleport your furthest-along
+       stone onto any enemy in shared water and take it — straight through
+       shields, Wards, and Bulwarks — then empty their ENTIRE bank on the
+       spot. A capture and a robbery in the same breath.</li>
+     </ul>
+     <p>The Rogue wins by making the enemy poor: every kill drains their
+     purse as well as their stone, and a well-timed Pickpocket can drop a
+     Mage's Ward or starve a Cleric's next prayer without a fight at
+     all.</p>`,
   ],
 ];
 
@@ -5441,6 +5607,19 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // player-facing tavern voice, telling people what to LOOK FOR, not a diff.
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-07-21-the-take",
+    date: "July 21, 2026",
+    title: "The Take",
+    items: [
+      "<b>A sixth captain takes the table: the ROGUE.</b> Pick the moonlit seal at the class table — a thief plays for the enemy's purse, not just their stones.",
+      "<b>Larceny</b> (passive): every stone you send home for good drains a mana straight out of the enemy's pocket too, on top of your own income. A wound doesn't count — only a real kill pays.",
+      "<b>Pickpocket</b> (1 mana, and it KEEPS your turn): reach into an enemy stone's pocket in shared water and lift a mana — no fight, and no Ward, Bulwark, or shield tile stops you, since nothing is actually striking the stone.",
+      "<b>Backstab</b> (2 mana): a guaranteed strike at an enemy in shared water. Wards mean nothing to it — a Bulwark still turns it away, and a Blessed stone survives as a wound instead of a kill, same as any other blow.",
+      "<b>Grand Heist</b> (ultimate): three shield landings in a row, then teleport your furthest-along stone onto any enemy in shared water and take it — straight through shields, Wards, and Bulwarks — then empty their entire bank on the spot.",
+      "<b>A Mage caught below full bank loses the Ward instantly</b> — Pickpocket is the one tool in the game that can force that without a single capture.",
+    ],
+  },
   {
     id: "2026-07-21-the-light-arrives",
     date: "July 21, 2026",
@@ -5893,7 +6072,7 @@ setInterval(() => {
 const dockDemoParam =
   location.hostname === "localhost" ? new URLSearchParams(location.search).get("dockdemo") : null;
 if (dockDemoParam !== null) {
-  const cls: PlayerClass = ["archer", "mage", "warrior", "necromancer", "cleric"].includes(dockDemoParam)
+  const cls: PlayerClass = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"].includes(dockDemoParam)
     ? (dockDemoParam as PlayerClass)
     : "warrior";
   menuEl.classList.remove("show");
@@ -5927,6 +6106,9 @@ if (dockDemoParam !== null) {
       thrall: { p1: null, p2: null },
       reviveSpawnTile: cls === "necromancer" && d.charges >= REVIVE_COST ? 8 : null,
       exhumeTargets: cls === "necromancer" && d.ult ? [4] : [],
+      pickpocketTargets: cls === "rogue" && d.charges >= PICKPOCKET_COST ? [4] : [],
+      backstabTargets: cls === "rogue" && d.charges >= BACKSTAB_COST ? [4] : [],
+      grandHeistTargets: cls === "rogue" && d.ult ? [4] : [],
     };
     currentPowerMoves =
       cls === "warrior"

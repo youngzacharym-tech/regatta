@@ -510,11 +510,88 @@ export const BLESSING_CAP = 3;
  *  a fresh one is to speak. */
 export const HEAL_COST = 2;
 
+/** Rogue's Larceny (passive, free, added 2026-07-21): every REAL kill the
+ *  Rogue lands drains this much mana from the victim's owner, on top of the
+ *  Rogue's own normal capture income — the one ability in the game that
+ *  touches the OPPONENT's bank directly rather than the mover's own. Wired
+ *  into resolveTurn (the shared landing-capture/Charge-sweep-equivalent
+ *  path) and applyBackstab (Rogue's own standalone execute); Grand Heist
+ *  does NOT also apply this — its own "drain the entire bank" is the
+ *  bigger, ultimate-tier version of the same idea, not a stack on top of
+ *  it. Like Cleric's wound split, a WOUND (a blessed victim surviving the
+ *  hit) is not a real kill and does not trigger this — same "wounds pay
+ *  the standard capture charge but none of the bespoke per-class income"
+ *  rule Necromancer's soul bounty already follows.
+ *  STARTING VALUE, not yet sim-tuned (Rogue is new this session) — revisit
+ *  once batch-random-master-killer-games.ts has real numbers for it. */
+export const ROGUE_STEAL_ON_CAPTURE = 1;
+
+/** Rogue's Pickpocket: 1 mana, steals PICKPOCKET_STEAL mana from a
+ *  targeted enemy in shared water WITHOUT capturing it — no capture means
+ *  no protection applies (Ward/Bulwark/Blessing/a shield tile are all
+ *  irrelevant to a theft that never touches the stone itself), so its
+ *  target pool is gated only by the enemy having something worth stealing.
+ *  Keeps the turn, same convention as Re-flip/Revive. Deliberately NOT a
+ *  net-zero transfer (spend 1, foe loses 1, mover does not get the stolen
+ *  mana back) — a real cost paid for a real cost inflicted, not a free
+ *  relocation of resources. STARTING VALUE, not yet sim-tuned. */
+export const PICKPOCKET_COST = 1;
+/** How much of the target's bank Pickpocket drains. See PICKPOCKET_COST. */
+export const PICKPOCKET_STEAL = 1;
+
+/** Rogue's Backstab: spends the full bank (CHARGE_CAP) for a guaranteed
+ *  execute at a target in shared water — pierces Ward by construction
+ *  (nothing in its target pool or apply path ever checks isWarded, the
+ *  same "pierce by omission" idiom Charged Shot already uses), but
+ *  deliberately does NOT pierce Bulwark (excluded from the target pool
+ *  outright) or Blessing (a blessed victim is WOUNDED, not killed, same
+ *  as every other non-ultimate ability) — "only ultimates truly pierce
+ *  Bulwark/Blessing" stays a clean, unbroken rule across the whole
+ *  roster; Backstab earning an early exception here risked exactly the
+ *  kind of catastrophic blowout this codebase's history is full of
+ *  (Push's extra-turn attempts, the self-advance rider, etc.) for a
+ *  precedent that was never validated by simulation.
+ *
+ *  DOES NOT REFUND on a real kill — a deliberate break from Push/Charged
+ *  Shot's send-home refund, which exists because THEIR send-home is
+ *  conditional (distance/collision has to cooperate). Backstab's hit is
+ *  unconditional by design (it never fails to connect), so an early
+ *  version that ALSO refunded made it a net -1-mana cost for an
+ *  always-available guaranteed kill: it outcompeted every other action in
+ *  the game (backstab/g hit 10-16 in the first balance pass — more than
+ *  twice Charged Shot's own rate — blowing out 4 of 5 non-mirror matchups
+ *  62-76% rogue-favored). Still refunds 1 on a WOUND (breaking a blessing
+ *  always pays the breaker, per HEAL_COST's own trace) since that outcome
+ *  isn't guaranteed the same way.
+ *
+ *  Removing the refund alone (5000/matchup after the fix): archer-vs-rogue
+ *  30.3/69.7 -> 46.1/53.9, mage-vs-rogue 35.8/64.2 -> 52.5/47.5,
+ *  cleric-vs-rogue 37.6/62.4 -> 48.0/52.0 — all landed near healthy.
+ *  warrior-vs-rogue only reached 38.3/61.7 and necromancer-vs-rogue stayed
+ *  at 37.6/62.4, both still rogue-favored. Tried removing Larceny's own
+ *  drain from just Backstab's kill branch (a "guaranteed hit already earns
+ *  its value, don't also stack the passive" theory, same shape as Grand
+ *  Heist not stacking it) — barely moved either (warrior 61.7->61.4, necro
+ *  62.4->59.3), so Larceny isn't the driver; reverted. Best-supported
+ *  explanation: Mage's Ward doesn't even block Backstab (pierced by
+ *  design) yet mage-vs-rogue normalized anyway — because Mage is
+ *  independently the roster's strongest class, not because it specifically
+ *  answers Backstab. Cleric's Blessing genuinely converts some kills to
+ *  wounds, a real structural answer. Warrior and Necromancer have neither
+ *  kind of help, AND were already this project's two weakest-tuned classes
+ *  before Rogue existed (Necromancer was losing every matchup pre-Rogue;
+ *  Warrior has needed the most cross-session tuning attention of any class
+ *  historically) — this reads as Rogue's raw power widening an existing
+ *  gap more than a Rogue-specific flaw. NOT yet fixed — a real lever
+ *  (Backstab's own frequency/cost, or a Warrior/Necromancer-side answer)
+ *  needs its own dedicated pass, deliberately not guessed at further here. */
+export const BACKSTAB_COST = CHARGE_CAP;
+
 // ============================================================================
 // TYPES
 // ============================================================================
 
-export type PlayerClass = "archer" | "mage" | "warrior" | "necromancer" | "cleric";
+export type PlayerClass = "archer" | "mage" | "warrior" | "necromancer" | "cleric" | "rogue";
 
 export interface PowerState {
   classes: Record<PlayerId, PlayerClass>;
@@ -662,7 +739,16 @@ export type PowerAction =
    *  on-board army. getBenedictionTargets is the shared oracle (empty pool
    *  = nothing would change = not castable; a blessing that blesses no one
    *  is a misclick, not a choice). */
-  | { kind: "benediction" };
+  | { kind: "benediction" }
+  /** Rogue's Pickpocket: targets an enemy in shared water (see
+   *  getPickpocketTargets) but the effect is bank-level, not stone-level —
+   *  the target only anchors the UI's "tap a stone" flow. */
+  | { kind: "pickpocket"; targetTokenId: number }
+  /** Rogue's Backstab: a guaranteed execute at a target in shared water. */
+  | { kind: "backstab"; targetTokenId: number }
+  /** Rogue's Grand Heist ultimate: teleport-capture like Blink Strike/
+   *  Warpath, plus draining the target owner's entire bank. */
+  | { kind: "grandHeist"; targetTokenId: number };
 
 // ============================================================================
 // STATE
@@ -1394,6 +1480,19 @@ function resolveTurn(
       for (const id of mendedTokenIds) vitality[id] = "blessed";
       nextPower = { ...nextPower, vitality };
     }
+  }
+
+  // Rogue's Larceny (passive): every REAL kill (never a wound — see
+  // ROGUE_STEAL_ON_CAPTURE's doc) drains the foe's bank too, on top of
+  // whatever the mover's own capture income already paid above.
+  if (power.classes[mover] === "rogue" && kills.length > 0) {
+    nextPower = {
+      ...nextPower,
+      charges: {
+        ...nextPower.charges,
+        [foe]: Math.max(0, nextPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE * kills.length),
+      },
+    };
   }
 
   const extraTurn = landsOnShield;
@@ -2594,4 +2693,203 @@ export function applyExhume(
     extraTurn: false,
   };
   return { state: nextState, power: resetTurnFlags(nextPower), returnedTo: landing };
+}
+
+// ============================================================================
+// ROGUE (added 2026-07-21) — the thief. Passive: LARCENY — every real kill
+// the Rogue lands drains ROGUE_STEAL_ON_CAPTURE mana from the victim's
+// owner too (wired into resolveTurn and applyBackstab; see
+// ROGUE_STEAL_ON_CAPTURE's doc for why Grand Heist doesn't also stack it).
+// Actives: PICKPOCKET (PICKPOCKET_COST) drains a target's bank directly
+// without capturing — no protection applies, since nothing is attacking the
+// stone itself. BACKSTAB (BACKSTAB_COST, the full bank) is a guaranteed
+// execute that pierces Ward but respects Bulwark and the wound split, same
+// as every other non-ultimate ability. Ultimate: GRAND HEIST teleport-
+// captures like Blink Strike, pierces everything (Bulwark and Blessing
+// included — every ultimate does), and drains the victim's ENTIRE
+// remaining bank on the kill. The class has no new PowerState field of its
+// own — every effect reads and writes the existing `charges` map, on
+// either side of the board.
+// ============================================================================
+
+/** Rogue's Pickpocket: valid targets are enemy stones in shared water that
+ *  actually have mana worth stealing (power.charges[foe] >= 1) — a target
+ *  pool that offered a 0-mana stone would be a legal-but-worthless trap,
+ *  the exact failure mode this codebase has burned real sessions on before
+ *  (see PUSH_WARD_DISTANCE=0's own history). Since the effect is bank-level
+ *  rather than stone-level, shield tiles, Ward, and Bulwark are all
+ *  irrelevant here — reused directly from getRainOfArrowsTargets's "any
+ *  enemy on a contested tile" pool (that function already resolves
+ *  possession/thrall correctly via effectiveOwner) rather than
+ *  reimplementing the same contested-zone walk. Affordability
+ *  (PICKPOCKET_COST) baked in, uniform for every target. */
+export function getPickpocketTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < PICKPOCKET_COST) return [];
+  const foe = otherPlayerId(mover);
+  if (power.charges[foe] < 1) return [];
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Rogue's Pickpocket: spends PICKPOCKET_COST, drains PICKPOCKET_STEAL from
+ *  the foe's bank (floored at 0 — the oracle already guarantees at least 1
+ *  is there, but the floor stays as defensive hygiene against a stale
+ *  target id from a race). Does NOT end the turn (Re-flip/Bless's
+ *  contract) and does not touch the board at all — no tokens move, no
+ *  vitality/Bulwark/thrall bookkeeping applies, since nothing was
+ *  captured. Leaves the shield streak untouched, same as Re-flip. */
+export function applyPickpocket(power: PowerState, mover: PlayerId): PowerState {
+  const foe = otherPlayerId(mover);
+  return {
+    ...power,
+    charges: {
+      ...power.charges,
+      [mover]: power.charges[mover] - PICKPOCKET_COST,
+      [foe]: Math.max(0, power.charges[foe] - PICKPOCKET_STEAL),
+    },
+  };
+}
+
+/** Rogue's Backstab: valid targets are enemy stones in shared water, minus
+ *  shield-tile occupants and Bulwarked ones (both fully block it, same as
+ *  every other non-ultimate ability) — Ward is deliberately never checked
+ *  here at all, "pierced" by simple omission, the same idiom
+ *  getChargedShotTargets already uses. Affordability (the full bank,
+ *  BACKSTAB_COST) baked in. */
+export function getBackstabTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < BACKSTAB_COST) return [];
+  return getRainOfArrowsTargets(state, power, mover).filter((id) => {
+    const t = state.tokens.find((tok) => tok.id === id)!;
+    return !onShieldTile(t) && !isBulwarked(power, t);
+  });
+}
+
+/** Rogue's Backstab: spends BACKSTAB_COST for a guaranteed hit — no
+ *  distance/collision math at all (unlike Push/Charged Shot's knockback,
+ *  this is a direct strike, not a shove that might merely fall short of
+ *  home), so it always resolves as either a WOUND (target is blessed —
+ *  Cleric's split, exactly as Push/Charged Shot already honor it) or a
+ *  real kill. A wound still refunds 1 charge (breaking a blessing always
+ *  pays the breaker, HEAL_COST's own trace) but does NOT trigger Larceny —
+ *  wounds pay the standard capture charge and nothing else, same rule
+ *  Necromancer's soul bounty already follows. A real kill does NOT refund
+ *  (see BACKSTAB_COST's doc for why an early refunded version blew out
+ *  the balance sim) but DOES clear the target's thrall/Bulwark/vitality
+ *  bookkeeping (same hygiene every other capture path carries) and
+ *  triggers Larceny's own drain on top. Never lands the mover on a
+ *  shield (breaks any live streak, no token of the mover's moves at all). */
+export function applyBackstab(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; woundedTokenId: number | null } {
+  const foe = otherPlayerId(mover);
+  const woundsInstead = isBlessed(power, targetTokenId);
+  const tokens = woundsInstead
+    ? state.tokens
+    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
+
+  let spentPower: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST },
+  };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover,
+    );
+  } else {
+    // NO refund here, deliberately, unlike Push/Charged Shot's send-home
+    // refund — those are CONDITIONAL (distance/collision has to cooperate),
+    // so refunding treats an incidental send-home as "really a capture."
+    // Backstab is unconditional BY DESIGN (it never fails to connect), so
+    // refunding on top of that guarantee made it a net -1-mana cost for an
+    // always-available kill — it outcompeted every other action in the
+    // game (backstab/g hit 10-16 in the first balance pass, more than
+    // twice Charged Shot's own rate, and blew out 4 of 5 matchups 62-76%
+    // rogue-favored). A real, unrefunded BACKSTAB_COST spend for a
+    // guaranteed hit is the correct price for "always works."
+    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
+    // TRIED AND REVERTED: removing Larceny's stack from just this branch
+    // (testing whether "guaranteed kill + flat foe-drain on top" was the
+    // double-dip still overpowering Warrior/Necromancer after the refund
+    // fix) barely moved either matchup (warrior 61.7->61.4, necro
+    // 62.4->59.3 at 5000 games) — Larceny's 1-mana drain isn't the
+    // driver. The remaining skew is Backstab's raw guaranteed-capture
+    // power against the two classes with no per-token defense (Ward/
+    // Blessing), not this passive. Reverted; see BACKSTAB_COST's own doc
+    // for the open thread this leaves.
+    spentPower = {
+      ...spentPower,
+      charges: {
+        ...spentPower.charges,
+        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE),
+      },
+    };
+  }
+  spentPower = breakShieldStreak(spentPower, mover);
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null,
+  };
+}
+
+/** Rogue's Grand Heist ultimate: same target eligibility as Blink Strike/
+ *  Warpath — Rain of Arrows' pool (every protection pierced), empty if the
+ *  mover has no on-board token to relocate. */
+export function getGrandHeistTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (!findMostAdvancedToken(state, power, mover)) return [];
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Rogue's Grand Heist: instantly relocates the mover's most-advanced
+ *  on-board token onto the target's tile, capturing it — bypassing shield
+ *  tiles, Ward, and Bulwark, same as every other ultimate — then drains
+ *  the target owner's ENTIRE remaining bank, not just ROGUE_STEAL_ON_
+ *  CAPTURE's flat amount (Larceny's own drain is deliberately NOT also
+ *  applied here — this supersedes it as the bigger, ultimate-tier version
+ *  of the same idea, not a stack on top of it). Spends ultimateReady, not
+ *  a charge; still grants exactly 1 charge back on the capture, matching
+ *  Blink Strike/Warpath's own economy. Always ends the turn — no
+ *  extra-turn interaction. */
+export function applyGrandHeist(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState } {
+  const mine = findMostAdvancedToken(state, power, mover)!;
+  const target = state.tokens.find((t) => t.id === targetTokenId)!;
+  const foe = otherPlayerId(mover);
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: target.position };
+    if (t.id === targetTokenId) return { ...t, position: -1 };
+    return t;
+  });
+  let nextPower: PowerState = clearCapturedBulwarks(
+    { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } },
+    [targetTokenId],
+  );
+  nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
+  nextPower = clearVitality(nextPower, [targetTokenId]);
+  nextPower = addCharge(nextPower, mover);
+  nextPower = { ...nextPower, charges: { ...nextPower.charges, [foe]: 0 } };
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower) };
 }

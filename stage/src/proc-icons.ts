@@ -46,7 +46,11 @@ export type ProcIconId =
   | "heal"
   | "benediction"
   | "sanctifiedGround"
-  | "wound";
+  | "wound"
+  | "larceny"
+  | "pickpocket"
+  | "backstab"
+  | "grandHeist";
 
 // Fixed frame gold — matches the plate/frame trim, constant across classes.
 const GOLD = "var(--gold-text, #e8c87e)";
@@ -80,6 +84,17 @@ const HALO = (cx: number, cy: number, rx = 9): string =>
 const STONE_PATH = "M15 40 L15 20 Q15 11 24 11 Q33 11 33 20 L33 40 Z";
 const STONE = `<path d="${STONE_PATH}" ${MAIN} ${BODY}/>`;
 const GROUND = `<path d="M6 40 L42 40" ${GOLD_DETAIL}/>` + `<path d="M42 ${40 - 1.8} L${42 + 1.8} 40 L42 ${40 + 1.8} L${42 - 1.8} 40 Z" fill="${GOLD}"/>`;
+
+// Rogue family: one dagger held low, reused so Larceny / Pickpocket /
+// Backstab / Grand Heist stay siblings (the warrior shield rule) — a coin
+// motif carries the theft half of the identity across the same four icons.
+const DAGGER =
+  `<path d="M24 6 L28.5 23 L24 28 L19.5 23 Z" ${MAIN} ${BODY}/>` +
+  `<path d="M15 28 L33 28" ${MAIN}/>` +
+  `<path d="M21.5 28 L21.5 38 L26.5 38 L26.5 28" ${MAIN}/>` +
+  diamond(24, 40.5);
+const COIN = (cx: number, cy: number, r = 6): string =>
+  `<circle cx="${cx}" cy="${cy}" r="${r}" ${MAIN} ${BODY}/>` + `<circle cx="${cx}" cy="${cy}" r="${r * 0.45}" ${DETAIL}/>`;
 
 export const PROC_ICONS: Record<ProcIconId, string> = {
   // Archer active: a token shoved sideways by force — a solid wedge of it
@@ -392,5 +407,42 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<circle cx="37" cy="24" r="1.7" fill="${GOLD}"/>` +
       `<circle cx="41" cy="30" r="1.4" fill="${GOLD}"/>` +
       `<circle cx="44" cy="36" r="1.1" fill="${GOLD}"/>`,
+  ),
+
+  // Rogue passive: the class identity glyph — dagger low, a coin held
+  // just behind it, quiet until spent.
+  larceny: wrap(
+    DAGGER + COIN(35, 14, 6) + `<circle cx="30" cy="10" r="4" ${DETAIL} ${BODY}/>`,
+  ),
+
+  // Rogue active (1 mana): the coin lifted clean off an unseen pocket,
+  // rising on its own trail.
+  pickpocket: wrap(
+    DAGGER +
+      COIN(33, 13, 6.5) +
+      `<path d="M33 21 L33 30" ${GOLD_DETAIL}/>` +
+      `<path d="M29 26 L33 30 L37 26" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Rogue active (2 mana): the dagger's tip alone, struck true — no
+  // flourish, just the one guaranteed hit.
+  backstab: wrap(
+    DAGGER +
+      `<path d="M24 2 L24 5.5" ${GOLD_DETAIL}/>` +
+      `<path d="M18 4 L20.5 7.5" ${GOLD_DETAIL}/>` +
+      `<path d="M30 4 L27.5 7.5" ${GOLD_DETAIL}/>` +
+      diamond(24, 1.5, 1.6, GOLD),
+  ),
+
+  // Rogue ultimate: the dagger at the center of the whole haul — every
+  // coin in reach, taken at once.
+  grandHeist: wrap(
+    DAGGER +
+      COIN(9, 12, 5) +
+      COIN(39, 10, 5.5) +
+      COIN(37, 25, 4) +
+      COIN(7, 27, 4) +
+      `<path d="M19 22 A24 24 0 0 0 4 8" ${GOLD_DETAIL}/>` +
+      `<path d="M29 22 A24 24 0 0 1 44 8" ${GOLD_DETAIL}/>`,
   ),
 };

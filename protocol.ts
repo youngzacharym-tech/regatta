@@ -237,6 +237,12 @@ export type ServerMessage =
          *  same visibility rule as bulwarkedTokenIds (the rings are
          *  visible board truth for both seats). */
         vitality?: Record<number, "blessed" | "wounded">;
+        /** Rogue (2026-07-21): Pickpocket / Backstab pools for the CURRENT
+         *  player (affordability baked in) and Grand Heist's ultimate pool
+         *  (gated on ultimateReady like every ultimate list). */
+        pickpocketTargets?: number[];
+        backstabTargets?: number[];
+        grandHeistTargets?: number[];
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
        *  (no token of the pusher's own moves), so it gets its own "how did
@@ -280,7 +286,15 @@ export type ServerMessage =
        *  `sweptTokenIds` is Warpath's extra captures along the way (always
        *  empty for Blink Strike, which never sweeps). Server-computed,
        *  never re-derived client-side. */
-      lastUltimate?: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+      lastUltimate?: {
+        kind: "blinkStrike" | "warpath" | "grandHeist";
+        targetTokenId: number;
+        sweptTokenIds: number[];
+        /** Grand Heist only: how much of the target owner's bank was
+         *  actually drained (server-computed). Absent for blinkStrike/
+         *  warpath — they don't touch charges at all. */
+        drained?: number;
+      } | null;
       /** Master Killer mode only: Mage's Re-flip just resolved on this
        *  broadcast. Deliberately separate from lastChargeEvent, which nets
        *  to null when the replacement flip is a zero (the spent charge is
@@ -327,6 +341,14 @@ export type ServerMessage =
       /** Master Killer mode only: Sanctified Ground fired — the cleric's
        *  shield landing mended these wounded stones back to blessed. */
       lastMend?: { tokenIds: number[] } | null;
+      /** Master Killer mode only: Rogue's Pickpocket just resolved on this
+       *  broadcast — bank-level, not board-level: no token moved, but the
+       *  target owner's charges dropped by `stolen`. */
+      lastPickpocket?: { targetTokenId: number; stolen: number } | null;
+      /** Master Killer mode only: Rogue's Backstab just resolved on this
+       *  broadcast — a guaranteed hit, either a kill or a wound (lastWound
+       *  carries that half, same as Push/Charged Shot). */
+      lastBackstab?: { targetTokenId: number } | null;
     }
   | {
       type: "gameOver";
@@ -409,7 +431,14 @@ export type ClientMessage =
         | { kind: "heal"; targetTokenId: number }
         /** Cleric's Benediction: no payload — the client gates on
          *  power.benedictionTargets being non-empty. */
-        | { kind: "benediction" };
+        | { kind: "benediction" }
+        /** Rogue's Pickpocket: targets an enemy in shared water, but the
+         *  effect is bank-level — the client gates on
+         *  power.pickpocketTargets; the server re-validates against the
+         *  same shared oracle. */
+        | { kind: "pickpocket"; targetTokenId: number }
+        | { kind: "backstab"; targetTokenId: number }
+        | { kind: "grandHeist"; targetTokenId: number };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

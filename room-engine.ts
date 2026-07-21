@@ -45,6 +45,7 @@ import {
 import { pickBotMove } from "./bot";
 import type { ChatMsg } from "./protocol";
 import {
+  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -53,16 +54,20 @@ import {
   applyChargedShot as mkApplyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyGrandHeist,
   applyHeal,
+  applyPickpocket,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
   applyRevive,
   applyWarpath,
+  BACKSTAB_COST,
   BLESS_COST,
   breakShieldStreak,
   canReflipAgain,
   CHARGE_CAP,
+  getBackstabTargets,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
@@ -70,13 +75,16 @@ import {
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getExhumeTargets,
+  getGrandHeistTargets,
   getHealTargets,
   getLegalPowerMoves,
+  getPickpocketTargets,
   getPushTargets,
   getReviveSpawnTile,
   getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
+  PICKPOCKET_COST,
   REVIVE_COST,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
@@ -117,7 +125,7 @@ export const CHAT_TEXT_MAX = 200;
 export const OPPONENT_AWAY_MS = 20_000;
 export const OPPONENT_LEFT_MS = 120_000;
 
-export const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric"];
+export const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
 
 // ============================================================================
 // WIRE-SAFE POWER STATE — PowerState is plain JSON now (safeTokens, its one
@@ -233,6 +241,12 @@ export interface PublicPower {
   /** Every token's blessed/wounded state — public table-state (the rings
    *  are visible board truth, same idea as bulwarkedTokenIds). ADDITIVE. */
   vitality?: Record<number, "blessed" | "wounded">;
+  /** Rogue (2026-07-21): Pickpocket / Backstab target pools for the CURRENT
+   *  player (affordability baked in), and Grand Heist's ultimate pool
+   *  (gated on ultimateReady here like every ultimate's list). ADDITIVE. */
+  pickpocketTargets?: number[];
+  backstabTargets?: number[];
+  grandHeistTargets?: number[];
   /** How many Re-flips the CURRENT player has already fired this turn —
    *  drives the client's Re-flip button gate (charges alone can't: a Mage
    *  at the REFLIPS_PER_TURN cap may still hold a charge, e.g. after a
@@ -276,7 +290,15 @@ export type RoomEvent =
       lastBulwarkBlock: { tokenIds: number[] } | null;
       lastChargeEvent: { player: PlayerId; delta: number } | null;
       lastRainOfArrows: { targetTokenId: number | null } | null;
-      lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+      lastUltimate: {
+        kind: "blinkStrike" | "warpath" | "grandHeist";
+        targetTokenId: number;
+        sweptTokenIds: number[];
+        /** Grand Heist only: how much of the target owner's bank was
+         *  actually drained (before/after diff, server-computed). Absent
+         *  for blinkStrike/warpath — they don't touch charges at all. */
+        drained?: number;
+      } | null;
       /** Warrior's Charge was just EXECUTED this commit (vs the normal move
        *  it was offered on). lastMove's chargeSweepCaptures is only a
        *  PREVIEW list — this is the authoritative "it actually happened"
@@ -327,6 +349,15 @@ export type RoomEvent =
       /** Sanctified Ground fired: the cleric's shield landing mended these
        *  wounded stones back to blessed. */
       lastMend?: { tokenIds: number[] } | null;
+      /** Rogue's Pickpocket just resolved on this commit — bank-level, not
+       *  board-level: no token moved, but the target owner's charges
+       *  dropped by `stolen` (server-computed, never re-derived
+       *  client-side — same discipline as every other announcement here). */
+      lastPickpocket?: { targetTokenId: number; stolen: number } | null;
+      /** Rogue's Backstab just resolved on this commit — a guaranteed hit,
+       *  either a kill (see `captures`/lastWound's absence) or a wound
+       *  (lastWound carries it, same as Push/Charged Shot). */
+      lastBackstab?: { targetTokenId: number } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -391,7 +422,12 @@ export interface RoomDoc {
    *  commit that announces it — two separate commits/events. */
   zeroFlipChargeBefore: number | null;
   lastRainOfArrows: { targetTokenId: number | null } | null;
-  lastUltimate: { kind: "blinkStrike" | "warpath"; targetTokenId: number; sweptTokenIds: number[] } | null;
+  lastUltimate: {
+    kind: "blinkStrike" | "warpath" | "grandHeist";
+    targetTokenId: number;
+    sweptTokenIds: number[];
+    drained?: number;
+  } | null;
   lastBulwark: { tokenId: number; reinforced?: boolean } | null;
   lastBulwarkBlock: { tokenIds: number[] } | null;
   /** See RoomEvent's doc: set only on the commit where a Re-flip resolved.
@@ -418,6 +454,10 @@ export interface RoomDoc {
   lastBenediction?: { tokenIds: number[] } | null;
   lastWound?: { tokenIds: number[] } | null;
   lastMend?: { tokenIds: number[] } | null;
+  /** See RoomEvent's docs — the rogue's announcement slots (2026-07-21).
+   *  Docs persisted before these fields existed read as undefined ≙ null. */
+  lastPickpocket?: { targetTokenId: number; stolen: number } | null;
+  lastBackstab?: { targetTokenId: number } | null;
 }
 
 // ============================================================================
@@ -455,7 +495,13 @@ export type RoomActionInput =
         | { kind: "heal"; targetTokenId: number }
         /** Cleric's Benediction: no payload — getBenedictionTargets is the
          *  shared oracle (empty pool = not castable). */
-        | { kind: "benediction" };
+        | { kind: "benediction" }
+        /** Rogue's Pickpocket: targets an enemy in shared water, but the
+         *  effect is bank-level (getPickpocketTargets is the shared
+         *  oracle). */
+        | { kind: "pickpocket"; targetTokenId: number }
+        | { kind: "backstab"; targetTokenId: number }
+        | { kind: "grandHeist"; targetTokenId: number };
     }
   | { op: "newMatch" }
   | { op: "chat"; text: string };
@@ -583,6 +629,14 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
         ? getBenedictionTargets(doc.state, p, mover)
         : [],
     vitality: { ...(doc.mk.vitality ?? {}) },
+    pickpocketTargets:
+      doc.mk.classes[mover] === "rogue" ? getPickpocketTargets(doc.state, p, mover) : [],
+    backstabTargets:
+      doc.mk.classes[mover] === "rogue" ? getBackstabTargets(doc.state, p, mover) : [],
+    grandHeistTargets:
+      doc.mk.classes[mover] === "rogue" && doc.mk.ultimateReady[mover]
+        ? getGrandHeistTargets(doc.state, p, mover)
+        : [],
     reflipsUsedThisTurn: p.reflipsUsedThisTurn,
   };
 }
@@ -647,6 +701,8 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastBenediction: doc.lastBenediction ?? null,
     lastWound: doc.lastWound ?? null,
     lastMend: doc.lastMend ?? null,
+    lastPickpocket: doc.lastPickpocket ?? null,
+    lastBackstab: doc.lastBackstab ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -673,6 +729,7 @@ export function freshMatchFields(
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
   | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
   | "lastBless" | "lastHeal" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
+  | "lastPickpocket" | "lastBackstab"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -708,6 +765,8 @@ export function freshMatchFields(
     lastBenediction: null,
     lastWound: null,
     lastMend: null,
+    lastPickpocket: null,
+    lastBackstab: null,
     rescueAttempted: false,
   };
 }
@@ -847,6 +906,9 @@ export function applyAction(
       if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
       if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
+      if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "backstab") return { doc: applyMkSimple(doc, seat, "backstab", a.targetTokenId, now) };
+      if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
@@ -958,6 +1020,23 @@ function validateUsePower(
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (getBenedictionTargets(doc.state, p(), seat).length === 0) return "Benediction would bless no one";
       return null;
+    case "pickpocket":
+      if (cls !== "rogue") return "Only a Rogue can Pickpocket";
+      // Pickpocket keeps the SAME flip alive (Bless's contract, see
+      // applyMkPickpocket) — there has to be one to keep.
+      if (doc.currentFlip === null) return "No flip yet";
+      if (!getPickpocketTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Pickpocket target";
+      return null;
+    case "backstab":
+      if (cls !== "rogue") return "Only a Rogue can Backstab";
+      if (doc.mk.charges[seat] < BACKSTAB_COST) return "No charge available";
+      if (!getBackstabTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Backstab target";
+      return null;
+    case "grandHeist":
+      if (cls !== "rogue") return "Only a Rogue can Grand Heist";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (!getGrandHeistTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Grand Heist target";
+      return null;
   }
 }
 
@@ -985,6 +1064,8 @@ const CLEAR_SLOTS = {
   lastBenediction: null,
   lastWound: null,
   lastMend: null,
+  lastPickpocket: null,
+  lastBackstab: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -1060,7 +1141,7 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
-  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume" | "heal",
+  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume" | "heal" | "backstab" | "grandHeist",
   tokenId: number,
   now: number,
   reinforced = false,
@@ -1121,6 +1202,28 @@ function applyMkSimple(
       r = applyHeal(doc.state, power, tokenId, seat);
       slots = { lastHeal: { tokenId } };
       break;
+    case "backstab": {
+      const rr = applyBackstab(doc.state, power, tokenId, seat);
+      r = rr;
+      // Same wounds-aren't-captures scoreboard rule as applyMkMove's — a
+      // Backstab either kills (1) or wounds (0), never both.
+      capsGained = rr.woundedTokenId === null ? 1 : 0;
+      slots = {
+        lastBackstab: { targetTokenId: tokenId },
+        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null,
+      };
+      break;
+    }
+    case "grandHeist": {
+      const heistFoe: PlayerId = seat === "p1" ? "p2" : "p1";
+      const foeChargesBefore = power.charges[heistFoe];
+      const rr = applyGrandHeist(doc.state, power, tokenId, seat);
+      r = { ...rr, sweptTokenIds: [] };
+      capsGained = 1;
+      const drained = foeChargesBefore - rr.power.charges[heistFoe];
+      slots = { lastUltimate: { kind: "grandHeist", targetTokenId: tokenId, sweptTokenIds: [], drained } };
+      break;
+    }
   }
   const delta = r.power.charges[seat] - chargesBefore;
   let next: RoomDoc = {
@@ -1249,6 +1352,42 @@ function applyMkBlessing(doc: RoomDoc, seat: PlayerId, tokenId: number, now: num
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Rogue's Pickpocket does NOT end the turn — Bless's exact commit
+ *  contract (see applyMkBlessing): the SAME flip stays live and the move
+ *  list is recomputed, which matters here more than for most turn-keepers
+ *  — draining the foe below CHARGE_CAP can drop their Ward mid-turn,
+ *  immediately unlocking a capture the mover's own move list didn't offer
+ *  a moment ago. `stolen` is the amount actually drained (foe's real
+ *  before/after difference, not just PICKPOCKET_STEAL) so the
+ *  announcement never overstates a theft the oracle's own floor already
+ *  capped. */
+function applyMkPickpocket(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const foe = otherSeat(seat);
+  const foeChargesBefore = doc.mk!.charges[foe];
+  const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
+  const power = applyPickpocket(fromWirePower(doc.mk!), seat);
+  const currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
+  const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  const stolen = foeChargesBefore - nextPower.charges[foe];
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastPickpocket: { targetTokenId: tokenId, stolen },
+    zeroFlipChargeBefore:
+      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - PICKPOCKET_COST : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 /** Corpse Explosion ends the turn (Push's shape): its own commit fn only
  *  because the blast's announce payload is richer than applyMkSimple's
  *  one-token slots. */
@@ -1359,6 +1498,20 @@ function autoSkipDelay(doc: RoomDoc): number {
       (getBlessTargets(doc.state, p, mover).length > 0 ||
         getHealTargets(doc.state, p, mover).length > 0 ||
         (doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0))
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    // A human Rogue with a dead flip but a castable Pickpocket/Backstab
+    // (the former turn-keeping, the latter turn-ending like Heal/Corpse
+    // Explosion — same "don't silently auto-skip a meaningful action"
+    // reasoning either way) gets the same window.
+    if (
+      doc.mk.classes[mover] === "rogue" &&
+      doc.currentFlip !== null &&
+      doc.currentFlip !== 0 &&
+      (getPickpocketTargets(doc.state, p, mover).length > 0 ||
+        getBackstabTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0))
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
@@ -1529,6 +1682,12 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkSimple(doc, seat, "heal", action.targetTokenId, now);
     case "benediction":
       return applyMkBenediction(doc, seat, now);
+    case "pickpocket":
+      return applyMkPickpocket(doc, seat, action.targetTokenId, now);
+    case "backstab":
+      return applyMkSimple(doc, seat, "backstab", action.targetTokenId, now);
+    case "grandHeist":
+      return applyMkSimple(doc, seat, "grandHeist", action.targetTokenId, now);
   }
 }
 

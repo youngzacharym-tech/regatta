@@ -23,6 +23,7 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -31,7 +32,9 @@ import {
   applyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyGrandHeist,
   applyHeal,
+  applyPickpocket,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -42,6 +45,7 @@ import {
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   effectiveOwner,
+  getBackstabTargets,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
@@ -49,14 +53,17 @@ import {
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getExhumeTargets,
+  getGrandHeistTargets,
   getHealTargets,
   getLegalPowerMoves,
+  getPickpocketTargets,
   getPushTargets,
   getReviveSpawnTile,
   getWarpathTargets,
   isBlessed,
   isBulwarked,
   isWarded,
+  NECRO_CHARGE_CAP,
   possessorOf,
   PUSH_DISTANCE,
   PUSH_WARD_DISTANCE,
@@ -509,6 +516,59 @@ function scoreBenediction(poolSize: number, rand: () => number): number {
   return 250 + 120 * poolSize + rand() * 20;
 }
 
+/** Score Rogue's Pickpocket — a TURN-KEEPING drain (Bless's contract) with
+ *  zero board effect, so its value lives entirely in what the foe's bank
+ *  was about to buy them. Every class's strongest tool needs the FULL
+ *  bank (Charged Shot, Reinforced Bulwark, Backstab, Bless/Heal both cost
+ *  it, Revive/Corpse Explosion at their own cap) — draining a foe sitting
+ *  AT their cap denies that outright, so it clears a real, always-positive
+ *  bar. A Mage at the cap is the standout case: the drain also drops Ward
+ *  THIS INSTANT, scored near scorePush's own Ward-removal tier. Below the
+ *  cap, biased NEGATIVE on purpose — this file's own established
+ *  discipline (see scoreBulwark's history note) against a small flat
+ *  positive reflexively out-competing a genuine capture chance every
+ *  single turn. STARTING VALUES, not yet sim-tuned. */
+function scorePickpocket(power: PowerState, foe: PlayerId, rand: () => number): number {
+  const cap = power.classes[foe] === "necromancer" ? NECRO_CHARGE_CAP : CHARGE_CAP;
+  const atCap = power.charges[foe] >= cap;
+  const dropsWard = power.classes[foe] === "mage" && atCap;
+  let score = dropsWard ? 260 : atCap ? 90 : -40;
+  score += rand() * 20;
+  return score;
+}
+
+/** Score Rogue's Backstab: a guaranteed hit, scored like Blink Strike/
+ *  Warpath's guaranteed capture — EXCEPT when the target is Cleric-blessed,
+ *  where it only wounds (real value: a charge refund and the shelter
+ *  denied, but the stone survives) rather than truly killing, so it's
+ *  priced closer to a soft push than a real capture. Spends the full bank
+ *  (BACKSTAB_COST), same "has to clear a real bar" discipline as Charged
+ *  Shot/Reinforced Bulwark's own full-bank scoring. STARTING VALUES, not
+ *  yet sim-tuned. */
+function scoreBackstab(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  const wounds = isBlessed(power, targetId);
+  let score = (wounds ? 260 : 460) + target.position * 10;
+  score += rand() * 20;
+  return score;
+}
+
+/** Score Rogue's Grand Heist: scoreUltimateStrike's guaranteed-capture
+ *  baseline, plus a bonus scaled by the bank it would ALSO drain on the
+ *  kill — the fuller the foe's bank, the more this ultimate is "a capture
+ *  AND a robbery" rather than just a capture, tying the score back to the
+ *  ability's own signature effect instead of treating it as a bare
+ *  Blink Strike reskin. STARTING VALUE, not yet sim-tuned. */
+function scoreGrandHeist(
+  state: GameState,
+  power: PowerState,
+  targetId: number,
+  foe: PlayerId,
+  rand: () => number,
+): number {
+  return scoreUltimateStrike(state, targetId, rand) + power.charges[foe] * 30;
+}
+
 /**
  * Pick the best action for the current player this turn: a plain/powered
  * move, Push, Re-flip, or Charge (on an eligible move) — whichever scores
@@ -724,6 +784,35 @@ function pickStandardPowerAction(
     }
   }
 
+  if (cls === "rogue") {
+    const rogueFoe: PlayerId = mover === "p1" ? "p2" : "p1";
+    // The oracles are the whole gate (affordability baked in) — mirror
+    // validateUsePower exactly, same as every class above.
+    for (const targetId of getPickpocketTargets(state, power, mover)) {
+      const score = scorePickpocket(power, rogueFoe, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "pickpocket", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getBackstabTargets(state, power, mover)) {
+      const score = scoreBackstab(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "backstab", targetTokenId: targetId };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      for (const targetId of getGrandHeistTargets(state, power, mover)) {
+        const score = scoreGrandHeist(state, power, targetId, rogueFoe, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "grandHeist", targetTokenId: targetId };
+        }
+      }
+    }
+  }
+
   return best;
 }
 
@@ -793,6 +882,13 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
     for (const id of getHealTargets(state, power, mover)) out.push({ kind: "heal", targetTokenId: id });
     if (power.ultimateReady[mover] && getBenedictionTargets(state, power, mover).length > 0) {
       out.push({ kind: "benediction" });
+    }
+  }
+  if (cls === "rogue") {
+    for (const id of getPickpocketTargets(state, power, mover)) out.push({ kind: "pickpocket", targetTokenId: id });
+    for (const id of getBackstabTargets(state, power, mover)) out.push({ kind: "backstab", targetTokenId: id });
+    if (power.ultimateReady[mover]) {
+      for (const id of getGrandHeistTargets(state, power, mover)) out.push({ kind: "grandHeist", targetTokenId: id });
     }
   }
   return out;
@@ -884,6 +980,15 @@ const MK_EVAL_THRALL_MENACE = 15;
  *  strictly worse than dying to anyone else — so exposure to one is
  *  priced up, the eval-shaped version of "don't feed the graveyard". */
 const MK_EVAL_NECRO_PREY_SCALE = 1.25;
+/** Threat scale on tokens exposed to a ROGUE enemy: a death against one
+ *  also drains ROGUE_STEAL_ON_CAPTURE mana from the victim's own bank
+ *  (Larceny) on top of the token itself — strictly worse than dying to a
+ *  class that only takes the stone, so exposure is priced up, the same
+ *  "don't feed it" idea MK_EVAL_NECRO_PREY_SCALE already prices for the
+ *  necromancer. Lower than the necromancer's own scale (1.25) since a
+ *  flat 1-mana drain is a smaller bonus than a full soul bounty + corpse.
+ *  STARTING VALUE, not yet sim-tuned. */
+const MK_EVAL_ROGUE_PREY_SCALE = 1.1;
 /** A necromancer holding ultimateReady while a live Exhume target exists (a
  *  foe token has escaped): the held flag is priced LOW, not at
  *  MK_EVAL_ULTIMATE. For this class the ultimate is Exhume, not a
@@ -975,11 +1080,17 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
     ) {
       // Dying to a necromancer pays their full soul bounty and banks a
       // corpse — exposure to one is priced up (MK_EVAL_NECRO_PREY_SCALE).
-      // A BLESSED token's exposure is discounted instead: it survives the
-      // first hit (MK_EVAL_BLESSED_THREAT_SCALE).
-      const threatScale =
-        (power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1) *
-        (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
+      // Dying to a rogue drains a mana too (Larceny) — a smaller version
+      // of the same idea (MK_EVAL_ROGUE_PREY_SCALE). A BLESSED token's
+      // exposure is discounted instead: it survives the first hit
+      // (MK_EVAL_BLESSED_THREAT_SCALE).
+      const preyScale =
+        power.classes[foe] === "necromancer"
+          ? MK_EVAL_NECRO_PREY_SCALE
+          : power.classes[foe] === "rogue"
+            ? MK_EVAL_ROGUE_PREY_SCALE
+            : 1;
+      const threatScale = preyScale * (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
       for (const e of state.tokens) {
         if (effectiveOwner(power, e) === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER)
           continue;
@@ -1140,6 +1251,38 @@ function mkBlessingValue(
   return best;
 }
 
+/** Value of Pickpocket: a turn-keeping cast (applyPickpocket's contract —
+ *  the SAME flip stays live), same shape as mkBlessingValue — the best
+ *  same-flip follow-up on the post-drain board. Meaningful beyond the
+ *  eval's own MK_EVAL_CHARGE bookkeeping: draining a Mage below CHARGE_CAP
+ *  can drop their Ward THIS SAME FLIP, which the follow-up move search
+ *  will actually see and price (a capture unavailable a moment ago may
+ *  now be on the table). */
+function mkPickpocketValue(
+  state: GameState,
+  power: PowerState,
+  c: Extract<PowerAction, { kind: "pickpocket" }>,
+  flip: number,
+  me: PlayerId,
+): number {
+  void c; // uniform signature with mkBlessingValue's; the target id doesn't affect the drain
+  const nextPower = applyPickpocket(power, me);
+  if (flip === 0) return evaluateMK(state, nextPower, me);
+  const moves = getLegalPowerMoves(state, nextPower, flip);
+  if (moves.length === 0) return evaluateMK(state, nextPower, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin
+      ? MK_WIN_VALUE
+      : (() => {
+          const q = applyPowerMove(state, nextPower, m, me, SIM_RAND);
+          return mkValueAfterAction(q.state, q.power, me);
+        })();
+    if (v > best) best = v;
+  }
+  return best;
+}
+
 /** Simulate one non-reflip candidate through the same pure apply* functions
  *  the server executes with. */
 function mkSimulate(
@@ -1175,6 +1318,16 @@ function mkSimulate(
       return applyHeal(state, power, c.targetTokenId, mover);
     case "benediction":
       return applyBenediction(state, power, mover);
+    case "backstab":
+      return applyBackstab(state, power, c.targetTokenId, mover);
+    case "grandHeist":
+      return applyGrandHeist(state, power, c.targetTokenId, mover);
+    case "pickpocket":
+      // Never actually reached in practice (pickHardPowerAction intercepts
+      // "pickpocket" early via mkPickpocketValue, same as "bless"'s own
+      // early intercept above) — kept for switch exhaustiveness, same
+      // defensive completeness "bless" already has here.
+      return { state, power: applyPickpocket(power, mover) };
   }
 }
 
@@ -1245,6 +1398,9 @@ function pickHardPowerAction(
     } else if (c.kind === "bless") {
       // Turn-keeping, same-flip follow-up valuation — see mkBlessingValue.
       value = mkBlessingValue(state, power, c, flip, mover);
+    } else if (c.kind === "pickpocket") {
+      // Turn-keeping, same-flip follow-up valuation — see mkPickpocketValue.
+      value = mkPickpocketValue(state, power, c, flip, mover);
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);
