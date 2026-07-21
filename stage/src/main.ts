@@ -1954,37 +1954,37 @@ const moveIndexByToken = new Map<number, number>();
 const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; klass: PlayerClass }> = {
   reflip: {
     name: "Re-flip",
-    cost: "1 charge each · keeps your turn",
+    cost: "1 mana each · keeps your turn",
     klass: "mage",
-    desc: `Don't like your roll? Flip all four coins again instead of moving — up to ${REFLIPS_PER_TURN} times a turn, one charge each. Mind your Ward: it only holds at a full bank, so any re-flip from a full bank drops it — unless the new flip is a zero, which banks the charge right back.`,
+    desc: `Don't like your roll? Flip all four coins again instead of moving — up to ${REFLIPS_PER_TURN} times a turn, one mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it — unless the new flip is a zero, which pays the mana right back.`,
   },
   push: {
     name: "Push",
-    cost: "1 charge",
+    cost: "1 mana",
     klass: "archer",
-    desc: "Shove an enemy stone in shared water back one pace. Push it onto your own stone or off the board and it's sent home — and the charge comes right back.",
+    desc: "Shove an enemy stone in shared water back one pace. Push it onto your own stone or off the board and it's sent home — and the mana comes right back.",
   },
   chargedShot: {
     name: "Charged Shot",
-    cost: `${CHARGE_CAP} charges`,
+    cost: `${CHARGE_CAP} mana`,
     klass: "archer",
-    desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces — ${CHARGED_SHOT_WARD_DISTANCE} if Warded, the one shot that can reach a Warded stone. Send it home and one charge comes back.`,
+    desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces — ${CHARGED_SHOT_WARD_DISTANCE} if Warded, the one shot that can reach a Warded stone. Send it home and one mana comes back.`,
   },
   charge: {
     name: "Charge",
-    cost: "1 charge",
+    cost: "1 mana",
     klass: "warrior",
     desc: "Turn this move into a sweep: one enemy stone between your start and landing is captured too, Warded or not.",
   },
   bulwark: {
     name: "Bulwark",
-    cost: "1 charge",
+    cost: "1 mana",
     klass: "warrior",
     desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate still punches through. Fades after a few turns, or the moment it saves the stone.",
   },
   bulwarkReinforced: {
     name: "Reinforced Bulwark",
-    cost: `${CHARGE_CAP} charges`,
+    cost: `${CHARGE_CAP} mana`,
     klass: "warrior",
     desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down. A plain Push can't budge it; only a Charged Shot moves it.",
   },
@@ -2004,7 +2004,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Snipe",
     cost: "Passive · always on",
     klass: "archer",
-    desc: "Every landing in shared water also fells an unprotected enemy stone exactly one tile ahead of where you land — a free second capture, no charge, no aiming. Shields, Wards, and Bulwarks turn it.",
+    desc: "Every landing in shared water also fells an unprotected enemy stone exactly one tile ahead of where you land — a free second capture, no mana, no aiming. Shields, Wards, and Bulwarks turn it.",
   },
   rainOfArrows: {
     name: "Rain of Arrows",
@@ -2014,9 +2014,9 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   ward: {
     name: "Ward",
-    cost: "Passive · while your bank is full",
+    cost: "Passive · while your mana is full",
     klass: "mage",
-    desc: "While you hold a full charge bank, your most-advanced stone is shielded: it cannot be captured or targeted. Spend below full and the Ward falls until the bank refills. Warriors, thralls, and ultimates pierce it.",
+    desc: "While your mana is full, your most-advanced stone is shielded: it cannot be captured or targeted. Spend any mana and the Ward falls until you refill. Warriors, thralls, and ultimates pierce it.",
   },
   wardBreaker: {
     name: "Ward Breaker",
@@ -2026,15 +2026,15 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   revive: {
     name: "Revive",
-    cost: `${REVIVE_COST} souls · keeps your turn`,
+    cost: `${REVIVE_COST} mana · keeps your turn`,
     klass: "necromancer",
     desc: `Raise the enemy stone you last killed as your THRALL, on the very tile it died. For ${THRALL_TURNS} of your turns it fights for you — it moves on your flips, kills like any stone, and its blade ignores the Mage's Ward — but it can never leave shared water, and then it crumbles home. Your flip stands: the risen dead may be the one that moves.`,
   },
   corpseExplosion: {
     name: "Corpse Explosion",
-    cost: `${CORPSE_EXPLOSION_COST} souls`,
+    cost: `${CORPSE_EXPLOSION_COST} mana`,
     klass: "necromancer",
-    desc: "Detonate the marked corpse instead of raising it: every unprotected enemy stone beside the grave is blasted one tile back — a blocked landing sends it all the way home. The blast desecrates the corpse (no thrall, no souls from its kills), and shields, Wards, and Bulwarks all turn it. The same grave, two rites: burn it now, or raise it at a full bank.",
+    desc: "Detonate the marked corpse instead of raising it: every unprotected enemy stone beside the grave is blasted one tile back — a blocked landing sends it all the way home. The blast desecrates the corpse (no thrall, no mana from its kills), and shields, Wards, and Bulwarks all turn it. The same grave, two rites: burn it now, or raise it at full mana.",
   },
   exhume: {
     name: "Exhume",
@@ -2049,7 +2049,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Soul Harvest",
     cost: "Passive · always on",
     klass: "necromancer",
-    desc: `Your kills feed you: every enemy stone you send home banks ${REVIVE_COST} souls — filling even the third gem, which no other income can touch — and leaves its corpse marked on the tile where it fell. While you hold a full bank, the marked body cannot rise on its own: the soul is yours until you spend it.`,
+    desc: `Your kills feed you: every enemy stone you send home pays ${REVIVE_COST} mana — filling even your third crystal, the Soul Gem, which no other income can touch — and leaves its corpse marked where it fell. While your mana is full, the marked body cannot rise on its own: the soul is yours until you spend it.`,
   },
 };
 
@@ -2277,7 +2277,7 @@ type DockState = "ready" | "noafford" | "spent";
 function abilityState(ability: string, charges: number, reflipsUsed: number): { state: DockState; reason?: string } {
   const p = currentPower!;
   const mySide: PlayerId = myRole ?? "p1";
-  const needCharges = (n: number) => (n === 1 ? "Need a charge" : `Need ${n} charges`);
+  const needCharges = (n: number) => (n === 1 ? "Need 1 mana" : `Need ${n} mana`);
   switch (ability) {
     case "reflip":
       if (reflipsUsed >= REFLIPS_PER_TURN) return { state: "spent", reason: "No re-flips left this turn" };
@@ -2317,14 +2317,14 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
     case "corpseExplosion": {
       if ((p.corpseExplosionTargets ?? []).length > 0) return { state: "ready" };
       if (!p.corpse?.[mySide]) return { state: "noafford", reason: "No corpse — kill to mark one" };
-      if (charges < CORPSE_EXPLOSION_COST) return { state: "noafford", reason: `Need ${CORPSE_EXPLOSION_COST} souls` };
+      if (charges < CORPSE_EXPLOSION_COST) return { state: "noafford", reason: `Need ${CORPSE_EXPLOSION_COST} mana` };
       return { state: "noafford", reason: "No enemies near the grave" };
     }
     case "revive": {
       if ((p.reviveSpawnTile ?? null) !== null) return { state: "ready" };
       if (p.thrall?.[mySide]) return { state: "noafford", reason: "Your thrall still serves" };
       if (!p.corpse?.[mySide]) return { state: "noafford", reason: "No corpse — kill to mark one" };
-      if (charges < REVIVE_COST) return { state: "noafford", reason: `Need ${REVIVE_COST} souls` };
+      if (charges < REVIVE_COST) return { state: "noafford", reason: `Need ${REVIVE_COST} mana` };
       return { state: "noafford", reason: "Revive not castable" };
     }
     case "exhume":
@@ -2747,9 +2747,9 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
     case "ward":
       return {
         name: "Warded",
-        cost: "while the Mage holds a full bank",
+        cost: "while the Mage holds full mana",
         klass: "mage",
-        desc: "The Mage's most-advanced stone is shielded: it cannot be captured or targeted — except by a Warrior's Ward Breaker, a thrall's blade, or an ultimate. The Ward falls the moment the Mage spends below a full bank.",
+        desc: "The Mage's most-advanced stone is shielded: it cannot be captured or targeted — except by a Warrior's Ward Breaker, a thrall's blade, or an ultimate. The Ward falls the moment the Mage spends any mana.",
       };
     case "bulwark": {
       const turns = currentPower.bulwarkTurns?.[tokenId];
@@ -2771,8 +2771,8 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         cost: "cannot re-enter play",
         klass: "necromancer",
         desc: theirs
-          ? "The enemy Necromancer holds this stone's soul: while their soul bank stays full, it cannot leave your hand. The claim lapses the moment they spend below a full bank — or resolves when they detonate or raise the corpse."
-          : "You hold this stone's soul: while your soul bank stays full, it cannot re-enter the enemy's hand. Spend below a full bank and they may reclaim it.",
+          ? "The enemy Necromancer holds this stone's soul: while their mana stays full, it cannot leave your hand. The claim lapses the moment they spend any mana — or resolves when they detonate or raise the corpse."
+          : "You hold this stone's soul: while your mana stays full, it cannot re-enter the enemy's hand. Spend any mana and they may reclaim it.",
       };
     }
     case "shieldTile":
@@ -2780,7 +2780,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: "Shield Tile",
         cost: "safe ground",
         klass: "warrior",
-        desc: "A stone standing here cannot be captured, and LANDING here grants an extra turn plus a charge. Chain three shield landings in a row to awaken your ultimate.",
+        desc: "A stone standing here cannot be captured, and LANDING here grants an extra turn plus a mana. Chain three shield landings in a row to awaken your ultimate.",
       };
   }
   return null;
@@ -2854,8 +2854,8 @@ canvas.addEventListener("pointerdown", (e) => {
         cost: mine ? "your kill lies here" : "the enemy's kill lies here",
         klass: "necromancer",
         desc: mine
-          ? "The stone you killed here is marked. Spend 2 souls on Corpse Explosion to blast everything beside this grave, or a full bank of 3 on Revive to raise it as your thrall — right on this tile. While your bank is full, its owner cannot bring it back."
-          : "The enemy Necromancer killed a stone here and marked its corpse. If their soul bank dips below full, re-enter that stone from your hand to reclaim the soul — otherwise expect an explosion from this grave, or the corpse rising against you.",
+          ? "The stone you killed here is marked. Spend 2 mana on Corpse Explosion to blast everything beside this grave, or all 3 on Revive to raise it as your thrall — right on this tile. While your mana is full, its owner cannot bring it back."
+          : "The enemy Necromancer killed a stone here and marked its corpse. If their mana dips below full, re-enter that stone from your hand to reclaim the soul — otherwise expect an explosion from this grave, or the corpse rising against you.",
       });
       return;
     }
@@ -4981,7 +4981,7 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
        stone and the Ward breaks — captured all the same.</li>
-       <li><b>Charge</b> (active, 1 charge): make your move a sweep — one
+       <li><b>Charge</b> (active, 1 mana): make your move a sweep — one
        enemy stone in shared water between where you started and where you
        land is captured too, Warded or not.</li>
        <li>The Warrior is the one class no Ward can stop cold — everyone
@@ -4989,12 +4989,12 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
     `<div class="runner">The Warrior &middot; continued</div>
      <ul>
-       <li><b>Bulwark</b> (active, 1 charge): raise a shield over one of
+       <li><b>Bulwark</b> (active, 1 mana): raise a shield over one of
        YOUR OWN stones — it cannot be captured or swept by Charge, and a
        Push can only shove it, never send it home. An enemy ultimate still
        punches through. It fades after a few of your turns unused, or the
        instant it saves the stone.</li>
-       <li><b>Reinforced Bulwark</b> (active, spends both charges): the
+       <li><b>Reinforced Bulwark</b> (active, spends both mana): the
        same shield with everything doubled — it lasts twice as many turns,
        and it shrugs off the first save instead of fading. A plain Push
        can't budge it at all; only a Charged Shot still moves it. Only the
@@ -5010,25 +5010,25 @@ const GUIDE_SPREADS: [string, string][] = [
     `<h2>The Necromancer</h2>
      <ul>
        <li><b>Soul Harvest</b> (passive, free): your kills feed you. Every
-       enemy stone you send home banks ${REVIVE_COST} souls — filling even
+       enemy stone you send home pays ${REVIVE_COST} mana — filling even
        your third gem, the SOUL GEM, which no other income can touch — and
        leaves its corpse marked on the tile where it fell. Only the
        freshest corpse keeps its soul.</li>
-       <li><b>Soul Claim</b>: while you hold a full soul bank, the marked
+       <li><b>Soul Claim</b>: while your mana is full, the marked
        body cannot re-enter from the enemy's hand — the soul is yours
-       until you spend it. Let the bank lapse and they may reclaim it.</li>
-       <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} souls):
+       until you spend it. Spend below full and they may reclaim it.</li>
+       <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} mana):
        detonate the marked corpse instead of raising it — every unprotected
        enemy stone beside the grave is blasted a tile back, all the way
        home if nothing's free behind it. The blast desecrates the corpse:
-       no thrall, and its casualties yield no souls.</li>
+       no thrall, and its casualties yield no mana.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
-       <li><b>Revive</b> (active, spends all ${REVIVE_COST} souls): raise
+       <li><b>Revive</b> (active, spends all ${REVIVE_COST} mana): raise
        the marked corpse as your THRALL, on the very tile it died. For
        ${THRALL_TURNS} of your turns it fights for you — it moves on your
-       flips, kills like any stone (its kills pay full souls and mark new
+       flips, kills like any stone (its kills pay full mana and mark new
        corpses), and its blade ignores the Mage's Ward — but it can never
        leave shared water, and then it crumbles home. Your flip stands:
        the risen dead may be the one that moves.</li>
@@ -5204,10 +5204,11 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
     date: "July 20, 2026",
     title: "The Dead Fight Back",
     items: [
-      "<b>The Necromancer, reforged.</b> His kills now bank <b>3 souls</b> and mark the fallen enemy's corpse on the tile where it died. Fill all three gems — the round third one is the <b>Soul Gem</b>, and only a kill can light it — then cast <b>Revive</b>: the corpse rises as your <b>thrall</b> and fights for YOU for three of your turns.",
-      "<b>Chain necromancy.</b> A thrall's kills pay full souls and mark fresh corpses. Keep killing and the graveyard keeps giving.",
-      "<b>Corpse Explosion.</b> The grave's second rite: spend 2 souls to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
-      "<b>Soul Claim.</b> While your soul bank is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
+      "<b>Charges are MANA now.</b> One word, one meaning: abilities cost mana, and the Warrior's Charge is just the Charge again.",
+      "<b>The Necromancer, reforged.</b> His kills now pay <b>3 mana</b> and mark the fallen enemy's corpse on the tile where it died. Fill all three crystals — the round third one is the <b>Soul Gem</b>, and only a kill can light it — then cast <b>Revive</b>: the corpse rises as your <b>thrall</b> and fights for YOU for three of your turns.",
+      "<b>Chain necromancy.</b> A thrall's kills pay full mana and mark fresh corpses. Keep killing and the graveyard keeps giving.",
+      "<b>Corpse Explosion.</b> The grave's second rite: spend 2 mana to detonate the marked corpse instead — every unprotected enemy beside it is blasted back, all the way home if nothing's free behind. Burn it now, or raise it at a full bank.",
+      "<b>Soul Claim.</b> While your mana is full, the marked body cannot re-enter play — the soul is yours until you spend it.",
       "<b>Tap anything glowing.</b> Every mark on the board now explains itself — tap a thrall, a Ward, a Bulwark, a shield tile, or the grave itself for a card telling you exactly what it does and how long it lasts.",
       "<b>A claimed stone tells you so.</b> When the enemy Necromancer holds your fallen stone's soul, the piece waiting in your hand wears their cold shackle-ring — tap it to see why it can't be played and what breaks the claim.",
       "<b>The graveyard reads at a glance.</b> Corpses are little gravestones now (no more X), and possession runs on temperature: YOUR thrall wears a warm red shackle-ring with a floating turns-left counter, the enemy's glows cold blue — even in a Necromancer mirror you always know whose dead are whose.",
