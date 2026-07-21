@@ -23,12 +23,15 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBless,
+  applyBenediction,
   applyBlinkStrike,
   applyBulwark,
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyHeal,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -39,15 +42,19 @@ import {
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   effectiveOwner,
+  getBenedictionTargets,
+  getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getExhumeTargets,
+  getHealTargets,
   getLegalPowerMoves,
   getPushTargets,
   getReviveSpawnTile,
   getWarpathTargets,
+  isBlessed,
   isBulwarked,
   isWarded,
   possessorOf,
@@ -137,6 +144,18 @@ const MK_STD_NECRO_CAPTURE_SCALE = 2.5;
  *  thralls already in). */
 const MK_STD_NECRO_HUNT = 65;
 
+/** What a capture that only WOUNDS a blessed stone is worth to the standard
+ *  tier, plus a per-tile scale on the victim's progress: below a kill's
+ *  400+, but a real objective — the blow strips a blessing the enemy paid
+ *  BLESS_COST for, pays the standard charge, staggers the stone back, and
+ *  above all makes the stone MORTAL again (breaking the blessing on an
+ *  advanced runner is the only way to ever stop it, hence the progress
+ *  scale). Only ever non-zero in cleric matchups (vitality is empty
+ *  otherwise), so the six pre-cleric matchups' scoring is byte-identical,
+ *  same rand() draws and all. */
+const MK_STD_WOUND_VALUE = 160;
+const MK_STD_WOUND_PER_TILE = 8;
+
 /** Same shape of scoring bot.ts uses for a plain move, extended with the
  *  power-derived capture sets (bonus snipe / charge sweep) so a Master
  *  Killer move that happens to snipe or sweep scores appropriately higher
@@ -144,7 +163,9 @@ const MK_STD_NECRO_HUNT = 65;
  *  necromancer levers above; their defaults are exact no-ops, so a call
  *  that doesn't pass them (every non-necromancer call site) scores
  *  byte-identically to the pre-necromancer formula, same rand() draws and
- *  all. */
+ *  all. `power` feeds the wound split (a blessed victim survives its
+ *  capture and pays no charge — see MK_STD_WOUND_VALUE); omitted or with
+ *  an empty vitality map it is an exact no-op too. */
 function scoreMove(
   state: GameState,
   m: PowerMove,
@@ -154,19 +175,31 @@ function scoreMove(
   raceScale = 1,
   captureScale = 1,
   huntPerTarget = 0,
+  power?: PowerState,
 ): number {
   let score = 0;
   const allCaptures = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
+  const wounds = power ? allCaptures.filter((id) => isBlessed(power, id)) : [];
+  const kills = wounds.length > 0 ? allCaptures.filter((id) => !wounds.includes(id)) : allCaptures;
 
   if (m.causesWin) score += 1000;
-  if (allCaptures.length > 0) {
+  if (kills.length > 0) {
     const victimProgress = Math.max(
-      ...allCaptures.map((id) => state.tokens.find((t) => t.id === id)?.position ?? 0),
+      ...kills.map((id) => state.tokens.find((t) => t.id === id)?.position ?? 0),
     );
     // Each additional capture in the same move (Snipe/Charge stacking) is
     // worth a real but diminishing bonus — multi-capture moves should win
     // ties against single captures without becoming a blowout auto-pick.
-    score += (400 + victimProgress * 10 + (allCaptures.length - 1) * 150) * captureScale;
+    score += (400 + victimProgress * 10 + (kills.length - 1) * 150) * captureScale;
+  }
+  // captureScale rides the wound value too: for the necromancer (2.5) a
+  // break isn't just tempo — it re-arms the class's whole kill economy
+  // (the NEXT hit on that stone pays the bounty and marks the corpse), so
+  // the hunt must price it like the setup step it is. Exact no-op for
+  // every class whose scale is 1.
+  for (const id of wounds) {
+    const pos = state.tokens.find((t) => t.id === id)?.position ?? 0;
+    score += (MK_STD_WOUND_VALUE + MK_STD_WOUND_PER_TILE * pos) * captureScale;
   }
   if (m.landsOnShield) score += 250 + shieldExtra;
   if (m.to === PATH_LENGTH_PER_PLAYER) score += 300;
@@ -437,6 +470,45 @@ function scoreExhume(rand: () => number): number {
   return 600 + rand() * 20;
 }
 
+/** Score Cleric's Bless — a TURN-KEEPING cast (applyBless's contract), so
+ *  this is not "instead of the move" but "before it": any winning score
+ *  just fires the cast first and the loop re-decides with the same flip.
+ *  The discipline the file's thrice-fixed defensive-overspend bug demands
+ *  is therefore about MANA, not tempo: a threatened stone (the same
+ *  bulwarkFacesThreat window) is the premium buy — the very next enemy
+ *  landing pays them nothing — while a quiet bless on an advanced stone
+ *  is a modest race-insurance purchase that only fires when the mana has
+ *  no better use pending. */
+function scoreBless(state: GameState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  let score = bulwarkFacesThreat(state, target) ? 220 + target.position * 5 : 40 + target.position * 4;
+  score += rand() * 20;
+  return score;
+}
+
+/** Score Cleric's Heal — a TURN-ENDING cast (unlike Bless; see
+ *  HEAL_COST's doc), so it pays the full tempo price and gets the full
+ *  tempo discipline: under live threat the mend is worth a move (the
+ *  incoming kill becomes a wound again — priced near a capture, below a
+ *  win); quiet mends fall to the file's standard negative-floor rule so
+ *  they only fire on a well-advanced stone when nothing better is on
+ *  offer. */
+function scoreHeal(state: GameState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  let score = bulwarkFacesThreat(state, target) ? 300 + target.position * 5 : -30 + target.position * 3;
+  score += rand() * 20;
+  return score;
+}
+
+/** Score Cleric's Benediction: spends only the banked ultimateReady flag
+ *  (scoreUltimateStrike's "don't sit on it" reasoning), and its value IS
+ *  its pool — every stone it would bless is a future kill denied. Scaled
+ *  per target so a one-stone benediction stays below a real capture while
+ *  a full-army one outranks anything short of a win. */
+function scoreBenediction(poolSize: number, rand: () => number): number {
+  return 250 + 120 * poolSize + rand() * 20;
+}
+
 /**
  * Pick the best action for the current player this turn: a plain/powered
  * move, Push, Re-flip, or Charge (on an eligible move) — whichever scores
@@ -494,7 +566,7 @@ function pickStandardPowerAction(
   const huntPerTarget = necro ? MK_STD_NECRO_HUNT : 0;
 
   for (const m of moves) {
-    const score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale, huntPerTarget);
+    const score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale, huntPerTarget, power);
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "move", move: m };
@@ -509,7 +581,7 @@ function pickStandardPowerAction(
     // sim (~40% of all turns in a warrior mirror game) that traced back to
     // the +20 nudge below always winning over an empty-sweep plain move.
     if (cls === "warrior" && m.chargeAvailable && m.chargeSweepCaptures.length > 0 && charges >= 1) {
-      const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand) + 20; // small "use the cool ability" nudge
+      const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand, 0, 1, 1, 0, power) + 20; // small "use the cool ability" nudge
       if (chargeScore > bestScore) {
         bestScore = chargeScore;
         best = { kind: "charge", move: m };
@@ -623,6 +695,35 @@ function pickStandardPowerAction(
     }
   }
 
+  if (cls === "cleric") {
+    // The oracles are the whole gate (affordability baked in) — mirror
+    // validateUsePower exactly, same as every class above.
+    for (const targetId of getBlessTargets(state, power, mover)) {
+      const score = scoreBless(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "bless", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getHealTargets(state, power, mover)) {
+      const score = scoreHeal(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "heal", targetTokenId: targetId };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      const pool = getBenedictionTargets(state, power, mover);
+      if (pool.length > 0) {
+        const score = scoreBenediction(pool.length, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "benediction" };
+        }
+      }
+    }
+  }
+
   return best;
 }
 
@@ -686,6 +787,13 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
     // Same one-candidate collapse: every escaped token is equally escaped.
     const exhumeTargets = getExhumeTargets(state, power, mover);
     if (exhumeTargets.length > 0) out.push({ kind: "exhume", targetTokenId: exhumeTargets[0] });
+  }
+  if (cls === "cleric") {
+    for (const id of getBlessTargets(state, power, mover)) out.push({ kind: "bless", targetTokenId: id });
+    for (const id of getHealTargets(state, power, mover)) out.push({ kind: "heal", targetTokenId: id });
+    if (power.ultimateReady[mover] && getBenedictionTargets(state, power, mover).length > 0) {
+      out.push({ kind: "benediction" });
+    }
   }
   return out;
 }
@@ -795,6 +903,21 @@ const MK_EVAL_EXHUME_HELD = 20;
  *  simulated thrall (same-flip follow-up + MK_EVAL_THRALL) carries the
  *  real value. */
 const MK_EVAL_REVIVE_BIAS = 20;
+/** Cleric (2026-07-21): a live blessing on an own on-board stone. Priced
+ *  above MK_EVAL_BULWARK's 12 — it never expires and denies the attacker
+ *  the kill's whole economy — but well under a capture's swing, so hard
+ *  spends the bank on one only when the position justifies it (the
+ *  threat-discount below carries the real defensive value). */
+const MK_EVAL_BLESSED = 20;
+/** A wounded stone: mostly a Heal option — small, so hard actually mends
+ *  when threatened rather than hoarding the mana. */
+const MK_EVAL_WOUNDED = 4;
+/** How much of the normal capture-threat penalty a BLESSED token still
+ *  pays: it survives the first hit, so its exposure is real but heavily
+ *  discounted (the attacker must spend two turns, and the first pays them
+ *  nothing). Not zero — a blessed stone deep in enemy reach still ties
+ *  down the Heal budget. */
+const MK_EVAL_BLESSED_THREAT_SCALE = 0.4;
 /** Live shield-streak progress toward that ultimate, per landing banked. */
 const MK_EVAL_STREAK = 12;
 /** An active Bulwark on an own token — insurance, real but modest (it
@@ -852,7 +975,11 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
     ) {
       // Dying to a necromancer pays their full soul bounty and banks a
       // corpse — exposure to one is priced up (MK_EVAL_NECRO_PREY_SCALE).
-      const threatScale = power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1;
+      // A BLESSED token's exposure is discounted instead: it survives the
+      // first hit (MK_EVAL_BLESSED_THREAT_SCALE).
+      const threatScale =
+        (power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1) *
+        (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
       for (const e of state.tokens) {
         if (effectiveOwner(power, e) === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER)
           continue;
@@ -865,6 +992,8 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
       }
     }
     if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
+    if (power.vitality[t.id] === "blessed") score += MK_EVAL_BLESSED;
+    if (power.vitality[t.id] === "wounded") score += MK_EVAL_WOUNDED;
   }
   // A valid banked corpse is a Revive waiting on funding.
   const corpse = power.corpse[player];
@@ -979,6 +1108,38 @@ function mkReflipValue(state: GameState, power: PowerState, me: PlayerId): numbe
   return value;
 }
 
+/** Value of Bless: a turn-keeping cast (applyBless's contract — the SAME
+ *  flip stays live, no re-roll), so its value is the best same-flip
+ *  follow-up on the post-cast board — mkReviveValue's exact shape, and the
+ *  same trap it exists to avoid: mkValueAfterAction's own-turn arm would
+ *  average over a fresh flip the mover never gets. (Heal ends the turn and
+ *  values through the normal mkSimulate path.) The spent mana is priced by
+ *  MK_EVAL_CHARGE, the blessing by MK_EVAL_BLESSED and the threat discount
+ *  — so hard blesses when the exchange plus the follow-up beats holding. */
+function mkBlessingValue(
+  state: GameState,
+  power: PowerState,
+  c: Extract<PowerAction, { kind: "bless" }>,
+  flip: number,
+  me: PlayerId,
+): number {
+  const r = applyBless(state, power, c.targetTokenId, me);
+  if (flip === 0) return evaluateMK(r.state, r.power, me);
+  const moves = getLegalPowerMoves(r.state, r.power, flip);
+  if (moves.length === 0) return evaluateMK(r.state, r.power, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin
+      ? MK_WIN_VALUE
+      : (() => {
+          const q = applyPowerMove(r.state, r.power, m, me, SIM_RAND);
+          return mkValueAfterAction(q.state, q.power, me);
+        })();
+    if (v > best) best = v;
+  }
+  return best;
+}
+
 /** Simulate one non-reflip candidate through the same pure apply* functions
  *  the server executes with. */
 function mkSimulate(
@@ -1008,6 +1169,12 @@ function mkSimulate(
       return applyCorpseExplosion(state, power, mover);
     case "exhume":
       return applyExhume(state, power, c.targetTokenId, mover);
+    case "bless":
+      return applyBless(state, power, c.targetTokenId, mover);
+    case "heal":
+      return applyHeal(state, power, c.targetTokenId, mover);
+    case "benediction":
+      return applyBenediction(state, power, mover);
   }
 }
 
@@ -1075,6 +1242,9 @@ function pickHardPowerAction(
     } else if (c.kind === "revive") {
       // Denial urgency the one-ply search can't see — see MK_EVAL_REVIVE_BIAS.
       value = mkReviveValue(state, power, flip, mover) + MK_EVAL_REVIVE_BIAS;
+    } else if (c.kind === "bless") {
+      // Turn-keeping, same-flip follow-up valuation — see mkBlessingValue.
+      value = mkBlessingValue(state, power, c, flip, mover);
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);

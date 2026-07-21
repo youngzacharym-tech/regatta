@@ -231,6 +231,7 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
     bulwarkSaves: { 2: 2 },
     corpse: { p1: null, p2: null },
     thrall: { p1: null, p2: null },
+    vitality: {},
   };
   const blockedDoc: RoomDoc = {
     ...base,

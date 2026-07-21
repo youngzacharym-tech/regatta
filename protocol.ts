@@ -226,6 +226,17 @@ export type ServerMessage =
          *  CURRENT player, if they're a Necromancer with ultimateReady and
          *  it's their turn — empty otherwise. */
         exhumeTargets?: number[];
+        /** Cleric (2026-07-21): Bless / Heal pools for the CURRENT player
+         *  (affordability baked in — empty = not castable) and
+         *  Benediction's would-change pool (gated on ultimateReady like
+         *  every ultimate list). */
+        blessTargets?: number[];
+        healTargets?: number[];
+        benedictionTargets?: number[];
+        /** Every token's blessed/wounded state — public table-state, the
+         *  same visibility rule as bulwarkedTokenIds (the rings are
+         *  visible board truth for both seats). */
+        vitality?: Record<number, "blessed" | "wounded">;
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
        *  (no token of the pusher's own moves), so it gets its own "how did
@@ -300,6 +311,22 @@ export type ServerMessage =
        *  server-computed, never re-derived client-side, same reasoning as
        *  lastUltimate. */
       lastExhume?: { targetTokenId: number; returnedTo: number } | null;
+      /** Master Killer mode only: Cleric's Bless / Heal just resolved on
+       *  this broadcast — same one-token announce lifecycle as lastBulwark. */
+      lastBless?: { tokenId: number } | null;
+      lastHeal?: { tokenId: number } | null;
+      /** Master Killer mode only: Cleric's Benediction ultimate — the ids
+       *  it blessed. Server-computed from the shared oracle. */
+      lastBenediction?: { tokenIds: number[] } | null;
+      /** Master Killer mode only: one or more blessings BROKE on this
+       *  broadcast — a capture/knockback resolved as a wound instead of a
+       *  kill (any path). Positions are already in `state`; this is the
+       *  authoritative "announce the survival" signal, never re-derived
+       *  client-side. */
+      lastWound?: { tokenIds: number[] } | null;
+      /** Master Killer mode only: Sanctified Ground fired — the cleric's
+       *  shield landing mended these wounded stones back to blessed. */
+      lastMend?: { tokenIds: number[] } | null;
     }
   | {
       type: "gameOver";
@@ -374,7 +401,15 @@ export type ClientMessage =
         /** Corpse Explosion: no payload — the marked corpse is the
          *  epicenter; the client gates on power.corpseExplosionTargets. */
         | { kind: "corpseExplosion" }
-        | { kind: "exhume"; targetTokenId: number };
+        | { kind: "exhume"; targetTokenId: number }
+        /** Cleric's Bless / Heal: target one of the caster's OWN stones —
+         *  the client gates on power.blessTargets / power.healTargets;
+         *  the server re-validates against the same shared oracles. */
+        | { kind: "bless"; targetTokenId: number }
+        | { kind: "heal"; targetTokenId: number }
+        /** Cleric's Benediction: no payload — the client gates on
+         *  power.benedictionTargets being non-empty. */
+        | { kind: "benediction" };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

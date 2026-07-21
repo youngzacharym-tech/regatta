@@ -10,6 +10,8 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
 import {
+  BLESS_COST,
+  BLESSING_CAP,
   BULWARK_REINFORCED_SAVES,
   BULWARK_REINFORCED_TURNS,
   BULWARK_TURNS,
@@ -19,14 +21,18 @@ import {
   CHARGED_SHOT_WARD_DISTANCE,
   CORPSE_EXPLOSION_COST,
   EXHUME_RETURN_POSITION,
+  HEAL_COST,
   NECRO_CHARGE_CAP,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
   REFLIPS_PER_TURN,
   REVIVE_COST,
+  SOUL_BOUNTY_CHARGES,
   THRALL_TURNS,
   ULTIMATE_STREAK,
+  applyBless,
+  applyBenediction,
   applyBlinkStrike,
   applyBulwark,
   applyCharge,
@@ -42,9 +48,13 @@ import {
   canReflipAgain,
   consumeBulwarkBlocks,
   effectiveOwner,
+  applyHeal,
+  getBenedictionTargets,
+  getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkBlockedIds,
   getBulwarkTargets,
+  getHealTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getExhumeTargets,
@@ -2097,6 +2107,393 @@ function check(name: string, cond: boolean, detail?: string) {
       r3.power.bulwarked[4] === undefined && r3.power.bulwarkSaves[4] === undefined,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: Bless / Heal target pools and casts
+// ---------------------------------------------------------------------------
+{
+  // Bless pool: own on-board stones with no vitality entry, full bank only.
+  const s = state("p1", { 0: 5, 1: 2, 4: 8 });
+  const pwBroke = power({ p1: "cleric" }, { p1: BLESS_COST - 1 });
+  check("Bless: empty pool below the full bank", getBlessTargets(s, pwBroke, "p1").length === 0);
+
+  const pw = power({ p1: "cleric" }, { p1: BLESS_COST });
+  const pool = getBlessTargets(s, pw, "p1");
+  check("Bless: own on-board stones eligible (contested and private lane alike)", pool.includes(0) && pool.includes(1));
+  check("Bless: reserve and enemy stones excluded", !pool.includes(2) && !pool.includes(4));
+
+  const pwBlessed: PowerState = { ...pw, vitality: { 0: "blessed", 1: "wounded" } };
+  const pool2 = getBlessTargets(s, pwBlessed, "p1");
+  check("Bless: already-blessed and wounded stones excluded (Heal's job)", !pool2.includes(0) && !pool2.includes(1));
+
+  // A stone possessed AGAINST the cleric is not theirs to bless.
+  const pwPoss: PowerState = {
+    ...power({ p1: "cleric", p2: "necromancer" }, { p1: BLESS_COST }),
+    thrall: { p1: null, p2: { tokenId: 0, turnsLeft: 2 } },
+  };
+  check("Bless: a stone possessed against the cleric is excluded", !getBlessTargets(s, pwPoss, "p1").includes(0));
+
+  // The cast: spends the mana, flags the stone, KEEPS the turn (Revive's
+  // contract — no streak interaction, no board movement).
+  const pwStreak: PowerState = { ...pw, shieldStreak: { p1: 2, p2: 0 } };
+  const r = applyBless(s, pwStreak, 0, "p1");
+  check("Bless: spends BLESS_COST", r.power.charges.p1 === 0);
+  check("Bless: flags the stone blessed", r.power.vitality[0] === "blessed");
+  check("Bless: keeps the turn (Revive's contract)", r.state.currentPlayer === "p1");
+  check("Bless: leaves the shield streak alone", r.power.shieldStreak.p1 === 2);
+  check("Bless: moves no tokens", r.state.tokens.find((t) => t.id === 0)!.position === 5);
+
+  // Heal pool: wounded stones only, HEAL_COST affordability baked in.
+  const pwW: PowerState = { ...power({ p1: "cleric" }, { p1: HEAL_COST }), vitality: { 0: "wounded", 1: "blessed" } };
+  const healPool = getHealTargets(s, pwW, "p1");
+  check("Heal: wounded stones only", healPool.includes(0) && !healPool.includes(1) && healPool.length === 1);
+  const pwWBroke: PowerState = { ...pwW, charges: { p1: 0, p2: 0 } };
+  check("Heal: empty pool when unaffordable", getHealTargets(s, pwWBroke, "p1").length === 0);
+
+  const rh = applyHeal(s, pwW, 0, "p1");
+  check("Heal: mends wounded back to blessed", rh.power.vitality[0] === "blessed");
+  check("Heal: spends HEAL_COST", rh.power.charges.p1 === 0);
+  check("Heal: ends the turn (the mend pays tempo — unlike Bless)", rh.state.currentPlayer === "p2");
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: the wound split on the landing-capture path
+// ---------------------------------------------------------------------------
+{
+  // p2 archer at 6 flips 2 -> lands on 8 where p1 cleric's BLESSED stone
+  // stands. Legality is unchanged (blessing is not protection) — the move
+  // still lists the capture — but resolution wounds instead of kills.
+  const s = state("p2", { 0: 8, 4: 6 });
+  const pw: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "blessed" } };
+  const moves = getLegalPowerMoves(s, pw, 2);
+  const m = moves.find((mv) => mv.tokenId === 4 && mv.to === 8);
+  check("Wound: blessed enemy is still a legal capture target", !!m && m.captures.includes(0), JSON.stringify(m));
+
+  const r = applyPowerMove(s, pw, m!, "p2");
+  const victim = r.state.tokens.find((t) => t.id === 0)!;
+  check("Wound: blessed victim survives (not in reserve)", victim.position !== -1);
+  check("Wound: landing victim staggers back to the nearest free tile", victim.position === 7, `at ${victim.position}`);
+  check("Wound: vitality downgrades to wounded", r.power.vitality[0] === "wounded");
+  check("Wound: reported in the wounded list with its landing", r.wounded.length === 1 && r.wounded[0].tokenId === 0 && r.wounded[0].to === 7);
+  check("Wound: attacker occupies the landing tile", r.state.tokens.find((t) => t.id === 4)!.position === 8);
+  check("Wound: breaking the blessing pays the standard charge", r.power.charges.p2 === 1);
+
+  // Stagger-back walks past occupied tiles — 7 held by the victim's own
+  // sibling, so the retreat continues to 6... which the ATTACKER vacated
+  // (it moved 6 -> 8), so 6 is free.
+  const s2 = state("p2", { 0: 8, 1: 7, 4: 6 });
+  const m2 = getLegalPowerMoves(s2, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
+  const r2 = applyPowerMove(s2, pw, m2, "p2");
+  check("Wound: stagger walks past an occupied tile", r2.state.tokens.find((t) => t.id === 0)!.position === 6, `at ${r2.state.tokens.find((t) => t.id === 0)!.position}`);
+
+  // A WOUNDED (blessing already broken) stone dies for real, entry cleared.
+  const pwW: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "wounded" } };
+  const m3 = getLegalPowerMoves(s, pwW, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
+  const r3 = applyPowerMove(s, pwW, m3, "p2");
+  check("Wound: a wounded stone is killed for real", r3.state.tokens.find((t) => t.id === 0)!.position === -1);
+  check("Wound: the dead stone's vitality entry clears", r3.power.vitality[0] === undefined);
+  check("Wound: a real kill still pays the capture charge", r3.power.charges.p2 === 1);
+
+  // The retreat can leave the contested row into the victim's own private
+  // lane — and a cross-owner numeric match there is NOT a collision: p2's
+  // token 6 sits at ITS OWN private tile 3, a different physical square
+  // from p1's tile 3, so the wounded stone still retreats 4 -> 3.
+  const s4 = state("p2", { 0: 4, 5: 2, 6: 3 });
+  const pw4: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "blessed" } };
+  const m4 = getLegalPowerMoves(s4, pw4, 2).find((mv) => mv.tokenId === 5 && mv.to === 4);
+  check("Wound: setup — p2 archer can land on tile 4", !!m4 && m4!.captures.includes(0));
+  const r4 = applyPowerMove(s4, pw4, m4!, "p2");
+  check(
+    "Wound: retreat crosses into the victim's own private lane, ignoring cross-owner numeric matches",
+    r4.state.tokens.find((t) => t.id === 0)!.position === 3,
+    `at ${r4.state.tokens.find((t) => t.id === 0)!.position}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: wounds from Snipe, Charge sweep, and the no-charge-for-wounds rule
+// ---------------------------------------------------------------------------
+{
+  // Snipe a blessed target: it wounds and HOLDS its tile (never on the
+  // landing tile by construction).
+  const s = state("p2", { 0: 9, 4: 6 });
+  const pw: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "blessed" } };
+  const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
+  check("Wound/Snipe: blessed target still sniped", m.bonusCaptures.includes(0));
+  const r = applyPowerMove(s, pw, m, "p2");
+  const victim = r.state.tokens.find((t) => t.id === 0)!;
+  check("Wound/Snipe: sniped blessed stone holds its tile", victim.position === 9);
+  check("Wound/Snipe: wounded, not dead", r.power.vitality[0] === "wounded");
+  check("Wound/Snipe: a wound-only move still pays the standard charge", r.power.charges.p2 === 1);
+
+  // Charge sweep over a blessed enemy: wounded in place; a mortal enemy in
+  // the same sweep dies and pays the (single) capture charge.
+  const s2 = state("p2", { 0: 7 - 1, 4: 4 }); // p1 blessed at 6; warrior at 4 charges to 8? lane 5,6,7 — 7 is shield...
+  void s2;
+  const s3 = state("p2", { 0: 5, 4: 4 });
+  const pwW: PowerState = { ...power({ p1: "cleric", p2: "warrior" }, { p2: 1 }), vitality: { 0: "blessed" } };
+  const m3 = getLegalPowerMoves(s3, pwW, 2).find((mv) => mv.tokenId === 4 && mv.to === 6)!;
+  check("Wound/sweep: blessed enemy still listed in the sweep", m3.chargeSweepCaptures.includes(0));
+  const r3 = applyCharge(s3, pwW, m3, "p2");
+  const swept = r3.state.tokens.find((t) => t.id === 0)!;
+  check("Wound/sweep: swept blessed stone wounded in place", swept.position === 5 && r3.power.vitality[0] === "wounded");
+  check("Wound/sweep: charge spent, wound pays the standard charge back", r3.power.charges.p2 === 1);
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: wounds deny the necromancer's corpse and bounty
+// ---------------------------------------------------------------------------
+{
+  // Necromancer lands on a blessed cleric stone: wound — no soul bounty,
+  // no corpse marker. Only a FULL kill feeds the graveyard.
+  const s = state("p2", { 0: 8, 4: 6 });
+  const pw: PowerState = { ...power({ p1: "cleric", p2: "necromancer" }), vitality: { 0: "blessed" } };
+  const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
+  const r = applyPowerMove(s, pw, m, "p2");
+  check("Wound/necro: a wound pays the generic charge, never the bounty", r.power.charges.p2 === 1);
+  check("Wound/necro: no corpse marked", r.power.corpse.p2 === null);
+  check("Wound/necro: victim wounded, not killed", r.power.vitality[0] === "wounded" && r.state.tokens.find((t) => t.id === 0)!.position !== -1);
+
+  // Same landing against a WOUNDED stone: full kill, full bounty, corpse.
+  const pwW: PowerState = { ...power({ p1: "cleric", p2: "necromancer" }), vitality: { 0: "wounded" } };
+  const mW = getLegalPowerMoves(s, pwW, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
+  const rW = applyPowerMove(s, pwW, mW, "p2");
+  check("Wound/necro: killing a wounded stone pays the full bounty", rW.power.charges.p2 === SOUL_BOUNTY_CHARGES);
+  check("Wound/necro: and marks the corpse", rW.power.corpse.p2?.tokenId === 0 && rW.power.corpse.p2?.tile === 8);
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: ultimates pierce the blessing
+// ---------------------------------------------------------------------------
+{
+  // Rain of Arrows: archer's 3rd consecutive shield landing kills a blessed
+  // stone for real (rand pinned to pick the only pool member).
+  const s = state("p2", { 0: 9, 4: 6 });
+  const pw: PowerState = {
+    ...power({ p1: "cleric", p2: "archer" }),
+    shieldStreak: { p1: 0, p2: ULTIMATE_STREAK - 1 },
+    vitality: { 0: "blessed" },
+  };
+  const m = getLegalPowerMoves(s, pw, 1).find((mv) => mv.tokenId === 4 && mv.to === 7)!;
+  check("Pierce: setup — landing on the shield tile", m.landsOnShield);
+  const r = applyPowerMove(s, pw, m, "p2", () => 0);
+  check("Pierce: Rain of Arrows kills a blessed stone outright", r.state.tokens.find((t) => t.id === 0)!.position === -1);
+  check("Pierce: the dead stone's vitality entry clears", r.power.vitality[0] === undefined);
+  check("Pierce: rain reported", r.rainOfArrows?.targetTokenId === 0);
+
+  // Blink Strike: same pierce.
+  const s2 = state("p2", { 0: 9, 4: 6 });
+  const pw2: PowerState = {
+    ...power({ p1: "cleric", p2: "mage" }),
+    ultimateReady: { p1: false, p2: true },
+    vitality: { 0: "blessed" },
+  };
+  check("Pierce: Blink Strike lists the blessed stone", getBlinkStrikeTargets(s2, pw2, "p2").includes(0));
+  const r2 = applyBlinkStrike(s2, pw2, 0, "p2");
+  check("Pierce: Blink Strike kills through the blessing", r2.state.tokens.find((t) => t.id === 0)!.position === -1 && r2.power.vitality[0] === undefined);
+
+  // Warpath: primary AND swept blessed stones both die.
+  const s3 = state("p2", { 0: 9, 1: 7 + 1, 4: 5, 5: 11 });
+  const pw3: PowerState = {
+    ...power({ p1: "cleric", p2: "warrior" }),
+    ultimateReady: { p1: false, p2: true },
+    vitality: { 0: "blessed", 1: "blessed" },
+  };
+  const r3 = applyWarpath(s3, pw3, 0, "p2");
+  check("Pierce: Warpath primary blessed target dies", r3.state.tokens.find((t) => t.id === 0)!.position === -1);
+  check("Pierce: Warpath swept blessed target dies too", r3.state.tokens.find((t) => t.id === 1)!.position === -1 && r3.sweptTokenIds.includes(1));
+  check("Pierce: both vitality entries clear", r3.power.vitality[0] === undefined && r3.power.vitality[1] === undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: blessing absorbs knockback send-homes (Push / Charged Shot / blast)
+// ---------------------------------------------------------------------------
+{
+  // Push that WOULD send home (collision behind): blessed target is wounded
+  // and holds its ground; the pusher gets no refund.
+  const s = state("p1", { 0: 6, 4: 8, 5: 7 }); // p2's 4 at 8, its own 5 at 7 -> push collides
+  const pw: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: 1 }), vitality: { 4: "blessed" } };
+  check("Absorb/Push: blessed stone is still a push target", getPushTargets(s, pw, "p1").includes(4));
+  const r = applyPush(s, pw, 4, "p1");
+  const target = r.state.tokens.find((t) => t.id === 4)!;
+  check("Absorb/Push: target holds its ground", target.position === 8);
+  check("Absorb/Push: wounded, not sent home", r.power.vitality[4] === "wounded");
+  check("Absorb/Push: reported", r.woundedTokenId === 4);
+  check("Absorb/Push: breaking the blessing refunds the charge", r.power.charges.p1 === 1);
+
+  // A soft shove (free tile behind) displaces a blessed stone normally.
+  const s2 = state("p1", { 0: 6, 4: 9 });
+  const r2 = applyPush(s2, pw, 4, "p1");
+  check("Absorb/Push: soft shove still moves a blessed stone", r2.state.tokens.find((t) => t.id === 4)!.position === 8);
+  check("Absorb/Push: blessing intact through a soft shove", r2.power.vitality[4] === "blessed");
+  check("Absorb/Push: no wound reported on a soft shove", r2.woundedTokenId === null);
+
+  // A WOUNDED stone pushed home dies and loses its entry.
+  const pwW: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: 1 }), vitality: { 4: "wounded" } };
+  const rW = applyPush(s, pwW, 4, "p1");
+  check("Absorb/Push: a wounded stone still dies to a send-home", rW.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Absorb/Push: its entry clears", rW.power.vitality[4] === undefined);
+  check("Absorb/Push: the kill refunds as usual", rW.power.charges.p1 === 1);
+
+  // Charged Shot send-home vs blessed: absorbed the same way.
+  const s3 = state("p1", { 0: 6, 4: 6 + CHARGED_SHOT_DISTANCE - 3, 5: 0 });
+  void s3;
+  const sC = state("p1", { 0: 11, 4: 3 + CHARGED_SHOT_DISTANCE }); // underflow-adjacent: 4 at 3+4=7? shield... pick plain positions
+  void sC;
+  // Simple: target at position 2 (own lane) is off the contested row —
+  // Charged Shot pool needs contested. Use target at 4: knockback 4 -> 0
+  // via CHARGED_SHOT_DISTANCE=4, landing 0 is its own lane (free) — soft.
+  // For a send-home use a target at 4 with distance 4 -> 0 occupied by its
+  // own sibling.
+  const s4 = state("p1", { 0: 6, 4: 4, 5: 0 });
+  const pw4: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: CHARGE_CAP }), vitality: { 4: "blessed" } };
+  check("Absorb/Shot: blessed stone targetable", getChargedShotTargets(s4, pw4, "p1").includes(4));
+  const r4 = applyChargedShot(s4, pw4, 4, "p1");
+  check("Absorb/Shot: blessed target wounded in place", r4.state.tokens.find((t) => t.id === 4)!.position === 4 && r4.power.vitality[4] === "wounded");
+  check("Absorb/Shot: full bank spent, break refunds one", r4.power.charges.p1 === 1);
+  check("Absorb/Shot: reported", r4.woundedTokenId === 4);
+
+  // Corpse Explosion: a blessed victim whose knockback would send home is
+  // wounded in place instead; a mortal one still goes home.
+  const s5 = state("p1", { 0: 5, 4: 6, 5: 5 });
+  void s5;
+  const s6 = state("p1", { 4: 6, 5: 5 });
+  const pw6: PowerState = {
+    ...power({ p1: "necromancer", p2: "cleric" }, { p1: CORPSE_EXPLOSION_COST }),
+    corpse: { p1: { tokenId: 6, tile: 6 }, p2: null },
+    vitality: { 4: "blessed" },
+  };
+  // Victims: p2's 4 at 6 (blessed, knockback 6->5 collides with its own 5
+  // -> absorbed wound) and p2's 5 at 5 (mortal, knockback 5->4... free? 4
+  // is empty numerically -> soft shove).
+  const r6 = applyCorpseExplosion(s6, pw6, "p1");
+  check("Absorb/Blast: blessed victim wounded in place", r6.state.tokens.find((t) => t.id === 4)!.position === 6 && r6.power.vitality[4] === "wounded");
+  check("Absorb/Blast: reported in woundedTokenIds, not sentHomeIds", r6.woundedTokenIds.includes(4) && !r6.sentHomeIds.includes(4));
+  check("Absorb/Blast: mortal victim still shoved", r6.state.tokens.find((t) => t.id === 5)!.position === 4);
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: Sanctified Ground (shield landings mend) + Benediction
+// ---------------------------------------------------------------------------
+{
+  // Cleric lands on the shield tile with two wounded stones: both mend.
+  const s = state("p1", { 0: 6, 1: 4, 2: 5 });
+  const pw: PowerState = { ...power({ p1: "cleric" }), vitality: { 1: "wounded", 2: "wounded" } };
+  const m = getLegalPowerMoves(s, pw, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  check("Mend: setup — shield landing", m.landsOnShield);
+  const r = applyPowerMove(s, pw, m, "p1");
+  check("Mend: all wounded stones return to blessed", r.power.vitality[1] === "blessed" && r.power.vitality[2] === "blessed");
+  check("Mend: reported", r.mendedTokenIds.length === 2 && r.mendedTokenIds.includes(1) && r.mendedTokenIds.includes(2));
+  check("Mend: shield landing still grants charge + extra turn", r.power.charges.p1 === 1 && r.state.currentPlayer === "p1");
+
+  // A cleric-mirror shield landing mends only the MOVER's wounded stones.
+  const sM = state("p1", { 0: 6, 1: 4, 5: 9 });
+  const pwM: PowerState = { ...power({ p1: "cleric", p2: "cleric" }), vitality: { 1: "wounded", 5: "wounded" } };
+  const mM = getLegalPowerMoves(sM, pwM, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  const rM = applyPowerMove(sM, pwM, mM, "p1");
+  check("Mend: mirror — only the mover's stones mend", rM.power.vitality[1] === "blessed" && rM.power.vitality[5] === "wounded");
+
+  // A NON-cleric shield landing mends nothing.
+  const pwN: PowerState = { ...power({ p1: "archer", p2: "cleric" }), vitality: { 5: "wounded" } };
+  const sN = state("p1", { 0: 6, 5: 9 });
+  const mN = getLegalPowerMoves(sN, pwN, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
+  const rN = applyPowerMove(sN, pwN, mN, "p1");
+  check("Mend: non-cleric landings mend nothing", rN.power.vitality[5] === "wounded" && rN.mendedTokenIds.length === 0);
+
+  // Benediction: pool = every own on-board stone not already blessed;
+  // the cast blesses them all, spends the flag, ends the turn, and leaves
+  // the shield streak alone.
+  const sB = state("p1", { 0: 5, 1: 2, 2: 8 });
+  const pwB: PowerState = {
+    ...power({ p1: "cleric" }),
+    ultimateReady: { p1: true, p2: false },
+    shieldStreak: { p1: 2, p2: 0 },
+    vitality: { 2: "wounded", 0: "blessed" },
+  };
+  const poolB = getBenedictionTargets(sB, pwB, "p1");
+  check("Benediction: pool is the unblessed on-board army", poolB.includes(1) && poolB.includes(2) && !poolB.includes(0) && !poolB.includes(3));
+  const rB = applyBenediction(sB, pwB, "p1");
+  check("Benediction: blesses the army", rB.power.vitality[1] === "blessed" && rB.power.vitality[2] === "blessed" && rB.power.vitality[0] === "blessed");
+  check("Benediction: spends the flag, ends the turn", rB.power.ultimateReady.p1 === false && rB.state.currentPlayer === "p2");
+  check("Benediction: leaves the shield streak alone (ultimate rule)", rB.power.shieldStreak.p1 === 2);
+  check("Benediction: reports who it blessed", rB.blessedTokenIds.length === 2);
+
+  // All-blessed army: empty pool = not castable.
+  const pwAll: PowerState = { ...pwB, vitality: { 0: "blessed", 1: "blessed", 2: "blessed" } };
+  const sAll = state("p1", { 0: 5, 1: 2, 2: 8 });
+  check("Benediction: empty pool when nothing would change", getBenedictionTargets(sAll, pwAll, "p1").length === 0);
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: the blessed blade pierces Ward
+// ---------------------------------------------------------------------------
+{
+  // p1 cleric's BLESSED stone lands on the mage's warded (most-advanced,
+  // full-bank) stone: legal, captures, breaksWard — the Ward Breaker /
+  // thrall exception's third member.
+  const s = state("p1", { 0: 6, 4: 8 });
+  const pw: PowerState = { ...power({ p1: "cleric", p2: "mage" }, { p2: CHARGE_CAP }), vitality: { 0: "blessed" } };
+  check("Blessed blade: setup — target is warded", isWarded(s, pw, s.tokens.find((t) => t.id === 4)!));
+  const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
+  check("Blessed blade: a blessed stone may strike a Warded enemy", !!m && m!.captures.includes(4), JSON.stringify(m));
+  check("Blessed blade: the strike breaks the Ward", !!m && m!.breaksWard);
+
+  // The cleric's MORTAL stone is still blocked, and so is a WOUNDED one.
+  const pwMortal: PowerState = power({ p1: "cleric", p2: "mage" }, { p2: CHARGE_CAP });
+  const mMortal = getLegalPowerMoves(s, pwMortal, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
+  check("Blessed blade: a mortal stone is still Ward-blocked", !mMortal);
+  const pwWound: PowerState = { ...pwMortal, vitality: { 0: "wounded" } };
+  const mWound = getLegalPowerMoves(s, pwWound, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
+  check("Blessed blade: a wounded stone's light is broken — no pierce", !mWound);
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: BLESSING_CAP — the light shelters two at a time
+// ---------------------------------------------------------------------------
+{
+  // Parametrized against BLESSING_CAP: the first CAP stones blessed, the
+  // rest mortal — the light is spoken for.
+  const s = state("p1", { 0: 5, 1: 6, 2: 8, 3: 2 });
+  const atCap: Record<number, "blessed" | "wounded"> = {};
+  for (let id = 0; id < BLESSING_CAP; id++) atCap[id] = "blessed";
+  const pwAtCap: PowerState = { ...power({ p1: "cleric" }, { p1: BLESS_COST }), vitality: { ...atCap } };
+  check("Cap: Bless pool empties at BLESSING_CAP live blessings", getBlessTargets(s, pwAtCap, "p1").length === 0);
+  const pwOneDown: PowerState = { ...pwAtCap, vitality: { ...atCap, 0: "wounded" } };
+  check("Cap: a wounded entry frees a slot (broken light doesn't count)", getBlessTargets(s, pwOneDown, "p1").length > 0);
+  // Heal counts against the same cap: at cap, the wounded stone can't mend.
+  const pwHealBlocked: PowerState = {
+    ...power({ p1: "cleric" }, { p1: HEAL_COST }),
+    vitality: { ...atCap, [BLESSING_CAP]: "wounded" },
+  };
+  check("Cap: Heal pool empties at the cap too", getHealTargets(s, pwHealBlocked, "p1").length === 0);
+  // Benediction, the ultimate, exceeds the cap freely — its pool is every
+  // on-board stone not already blessed.
+  const pwUlt: PowerState = { ...pwAtCap, ultimateReady: { p1: true, p2: false } };
+  check("Cap: Benediction ignores the cap (ultimate)", getBenedictionTargets(s, pwUlt, "p1").length === 4 - BLESSING_CAP);
+  // A cleric MIRROR: the foe's blessings never count against mine.
+  const sM = state("p1", { 0: 5, 5: 9, 6: 10, 7: 8 });
+  const foeCap: Record<number, "blessed" | "wounded"> = {};
+  for (let id = 4; id < 4 + BLESSING_CAP; id++) foeCap[id] = "blessed";
+  const pwM: PowerState = { ...power({ p1: "cleric", p2: "cleric" }, { p1: BLESS_COST }), vitality: foeCap };
+  check("Cap: mirror — only my own blessings count", getBlessTargets(sM, pwM, "p1").includes(0));
+}
+
+// ---------------------------------------------------------------------------
+// Cleric: blessing rides through escape and Exhume
+// ---------------------------------------------------------------------------
+{
+  // An escaped blessed token dragged back by Exhume keeps its blessing —
+  // it never died; it came home in glory and got dragged back.
+  const s = state("p2", { 0: PATH_LENGTH_PER_PLAYER });
+  const pw: PowerState = {
+    ...power({ p1: "cleric", p2: "necromancer" }),
+    ultimateReady: { p1: false, p2: true },
+    vitality: { 0: "blessed" },
+  };
+  const r = applyExhume(s, pw, 0, "p2");
+  check("Exhume: a blessed returner keeps its blessing", r.power.vitality[0] === "blessed");
+  check("Exhume: dragged to the return tile", r.state.tokens.find((t) => t.id === 0)!.position === EXHUME_RETURN_POSITION);
 }
 
 // ---------------------------------------------------------------------------

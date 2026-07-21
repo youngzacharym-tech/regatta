@@ -349,6 +349,9 @@ var REVIVE_COST = 3;
 var CORPSE_EXPLOSION_COST = 2;
 var CORPSE_EXPLOSION_RADIUS = 1;
 var EXHUME_RETURN_POSITION = 11;
+var BLESS_COST = 2;
+var BLESSING_CAP = 3;
+var HEAL_COST = 2;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
@@ -360,7 +363,8 @@ function initialPowerState() {
     bulwarked: {},
     bulwarkSaves: {},
     corpse: { p1: null, p2: null },
-    thrall: { p1: null, p2: null }
+    thrall: { p1: null, p2: null },
+    vitality: {}
   };
 }
 function resetTurnFlags(power) {
@@ -451,6 +455,25 @@ function clearThrallIfCaptured(power, capturedIds) {
   for (const pl of hit) thrall[pl] = null;
   return { ...power, thrall };
 }
+function isBlessed(power, tokenId) {
+  return power.vitality[tokenId] === "blessed";
+}
+function clearVitality(power, capturedIds) {
+  if (!capturedIds.some((id) => power.vitality[id] !== void 0)) return power;
+  const vitality = { ...power.vitality };
+  for (const id of capturedIds) delete vitality[id];
+  return { ...power, vitality };
+}
+function staggerBackTile(tokens, victim) {
+  for (let tile = victim.position - 1; tile >= 0; tile--) {
+    const contested = BOARD_LAYOUT[tile].isContested;
+    const occupied = tokens.some(
+      (t) => t.id !== victim.id && t.position === tile && (t.owner === victim.owner || contested)
+    );
+    if (!occupied) return tile;
+  }
+  return -1;
+}
 function getLegalPowerMoves(state, power, flip) {
   if (state.winner !== null) return [];
   if (flip <= 0) return [];
@@ -501,7 +524,7 @@ function getLegalPowerMoves(state, power, flip) {
     if (enemy) {
       if (onShieldTile(enemy) || isBulwarked(power, enemy)) continue;
       if (isWarded(state, power, enemy)) {
-        if (cls !== "warrior" && !isThrall) continue;
+        if (cls !== "warrior" && !isThrall && !isBlessed(power, token.id)) continue;
         breaksWard = true;
         captures = [enemy.id];
       } else {
@@ -579,26 +602,46 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
   const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
   power = streakResult.power;
   const rainOfArrows = streakResult.rainOfArrows;
-  const finalCaptures = rainOfArrows?.targetTokenId != null ? [...allCaptures, rainOfArrows.targetTokenId] : allCaptures;
-  const tokens = state.tokens.map((t) => {
+  const woundIds = allCaptures.filter((id) => power.vitality[id] === "blessed");
+  const kills = allCaptures.filter((id) => !woundIds.includes(id));
+  if (rainOfArrows?.targetTokenId != null) kills.push(rainOfArrows.targetTokenId);
+  let tokens = state.tokens.map((t) => {
     if (t.id === tokenId) return { ...t, position: to };
-    if (finalCaptures.includes(t.id)) return { ...t, position: -1 };
+    if (kills.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
+  const wounded = [];
+  for (const id of woundIds) {
+    const pre = state.tokens.find((t) => t.id === id);
+    if (pre.position === to) {
+      const current = tokens.find((t) => t.id === id);
+      const retreat = staggerBackTile(tokens, current);
+      tokens = tokens.map((t) => t.id === id ? { ...t, position: retreat } : t);
+      wounded.push({ tokenId: id, to: retreat });
+    } else {
+      wounded.push({ tokenId: id, to: pre.position });
+    }
+  }
   let bulwarked = power.bulwarked;
   let bulwarkSaves = power.bulwarkSaves;
-  if (finalCaptures.some((id) => bulwarked[id] !== void 0)) {
+  if (kills.some((id) => bulwarked[id] !== void 0)) {
     bulwarked = { ...bulwarked };
     bulwarkSaves = { ...bulwarkSaves };
-    for (const id of finalCaptures) {
+    for (const id of kills) {
       delete bulwarked[id];
       delete bulwarkSaves[id];
     }
   }
   let nextPower = { ...power, bulwarked, bulwarkSaves };
-  nextPower = clearThrallIfCaptured(nextPower, finalCaptures);
+  nextPower = clearThrallIfCaptured(nextPower, kills);
+  nextPower = clearVitality(nextPower, kills);
+  if (woundIds.length > 0) {
+    const vitality = { ...nextPower.vitality };
+    for (const id of woundIds) vitality[id] = "wounded";
+    nextPower = { ...nextPower, vitality };
+  }
   const foe = otherPlayerId(mover);
-  const soulKills = power.classes[mover] === "necromancer" ? finalCaptures.filter((id) => state.tokens.find((t) => t.id === id)?.owner === foe) : [];
+  const soulKills = power.classes[mover] === "necromancer" ? kills.filter((id) => state.tokens.find((t) => t.id === id)?.owner === foe) : [];
   if (soulKills.length > 0) {
     nextPower = grantKillBounty(nextPower, mover, soulKills.length);
     nextPower = {
@@ -606,8 +649,22 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
       corpse: { ...nextPower.corpse, [mover]: { tokenId: soulKills[soulKills.length - 1], tile: to } }
     };
     if (landsOnShield) nextPower = addCharge(nextPower, mover);
-  } else if (finalCaptures.length > 0 || landsOnShield) {
+  } else if (kills.length > 0 || woundIds.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
+  }
+  const mendedTokenIds = [];
+  if (power.classes[mover] === "cleric" && landsOnShield) {
+    for (const [idStr, v] of Object.entries(nextPower.vitality)) {
+      const id = Number(idStr);
+      if (v === "wounded" && state.tokens.find((t) => t.id === id)?.owner === mover) {
+        mendedTokenIds.push(id);
+      }
+    }
+    if (mendedTokenIds.length > 0) {
+      const vitality = { ...nextPower.vitality };
+      for (const id of mendedTokenIds) vitality[id] = "blessed";
+      nextPower = { ...nextPower, vitality };
+    }
   }
   const extraTurn = landsOnShield;
   const nextState = {
@@ -617,7 +674,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     winner: causesWin ? mover : null,
     extraTurn
   };
-  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows };
+  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows, wounded, mendedTokenIds };
 }
 function applyPowerMove(state, power, move, mover, rand = Math.random) {
   const allCaptures = [...move.captures, ...move.bonusCaptures];
@@ -675,15 +732,23 @@ function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
   const cost = pushCost(state, power, target);
   const landing = computePushLanding(state, power, target);
-  const sendsHome = landing === -1;
-  const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
+  const sendsHome = landing === -1 && !woundsInstead;
+  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let spentPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost }
   };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover
+    );
+  }
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -693,7 +758,11 @@ function applyPush(state, power, targetTokenId, mover) {
     winner: null,
     extraTurn: false
   };
-  return { state: nextState, power: resetTurnFlags(spentPower) };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null
+  };
 }
 function getChargedShotTargets(state, power, mover) {
   if (power.charges[mover] !== CHARGE_CAP) return [];
@@ -703,15 +772,23 @@ function getChargedShotTargets(state, power, mover) {
 function applyChargedShot(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
   const landing = computeChargedShotLanding(state, power, target);
-  const sendsHome = landing === -1;
-  const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
+  const sendsHome = landing === -1 && !woundsInstead;
+  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let spentPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP }
   };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover
+    );
+  }
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -721,7 +798,11 @@ function applyChargedShot(state, power, targetTokenId, mover) {
     winner: null,
     extraTurn: false
   };
-  return { state: nextState, power: resetTurnFlags(spentPower) };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null
+  };
 }
 function applyReflip(power, mover) {
   return {
@@ -764,6 +845,7 @@ function applyBlinkStrike(state, power, targetTokenId, mover) {
     [targetTokenId]
   );
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
+  nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState = {
     tokens,
@@ -805,6 +887,7 @@ function applyWarpath(state, power, targetTokenId, mover) {
     allCaptures
   );
   nextPower = clearThrallIfCaptured(nextPower, allCaptures);
+  nextPower = clearVitality(nextPower, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState = {
     tokens,
@@ -941,10 +1024,15 @@ function applyCorpseExplosion(state, power, mover) {
   const victims = getCorpseExplosionTargets(state, power, mover).map((id) => state.tokens.find((t) => t.id === id)).sort((a, b) => Math.abs(a.position - corpse.tile) - Math.abs(b.position - corpse.tile));
   let tokens = state.tokens;
   const sentHomeIds = [];
+  const woundedTokenIds = [];
   let working = state;
   for (const victim of victims) {
     const current = working.tokens.find((t) => t.id === victim.id);
     const landing = computeKnockbackLanding(working, power, current, 1);
+    if (landing === -1 && isBlessed(power, victim.id)) {
+      woundedTokenIds.push(victim.id);
+      continue;
+    }
     if (landing === -1) sentHomeIds.push(victim.id);
     tokens = working.tokens.map((t) => t.id === victim.id ? { ...t, position: landing } : t);
     working = { ...working, tokens };
@@ -954,8 +1042,14 @@ function applyCorpseExplosion(state, power, mover) {
     charges: { ...power.charges, [mover]: power.charges[mover] - CORPSE_EXPLOSION_COST },
     corpse: { ...power.corpse, [mover]: null }
   };
+  if (woundedTokenIds.length > 0) {
+    const vitality = { ...nextPower.vitality };
+    for (const id of woundedTokenIds) vitality[id] = "wounded";
+    nextPower = { ...nextPower, vitality };
+  }
   nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
+  nextPower = clearVitality(nextPower, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
     tokens,
@@ -969,6 +1063,7 @@ function applyCorpseExplosion(state, power, mover) {
     power: resetTurnFlags(nextPower),
     struckTokenIds: victims.map((v) => v.id),
     sentHomeIds,
+    woundedTokenIds,
     tile: corpse.tile
   };
 }
@@ -995,6 +1090,66 @@ function getExhumeTargets(state, power, mover) {
   void power;
   const foe = otherPlayerId(mover);
   return state.tokens.filter((t) => t.owner === foe && t.position >= PATH_LENGTH_PER_PLAYER).map((t) => t.id);
+}
+function liveBlessings(state, power, mover) {
+  return Object.entries(power.vitality).filter(
+    ([id, v]) => v === "blessed" && state.tokens.find((t) => t.id === Number(id))?.owner === mover
+  ).length;
+}
+function getBlessTargets(state, power, mover) {
+  if (power.charges[mover] < BLESS_COST) return [];
+  if (liveBlessings(state, power, mover) >= BLESSING_CAP) return [];
+  return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => power.vitality[t.id] === void 0).map((t) => t.id);
+}
+function applyBless(state, power, targetTokenId, mover) {
+  const spent = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BLESS_COST },
+    vitality: { ...power.vitality, [targetTokenId]: "blessed" }
+  };
+  return { state, power: spent };
+}
+function getHealTargets(state, power, mover) {
+  if (power.charges[mover] < HEAL_COST) return [];
+  if (liveBlessings(state, power, mover) >= BLESSING_CAP) return [];
+  return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => power.vitality[t.id] === "wounded").map((t) => t.id);
+}
+function applyHeal(state, power, targetTokenId, mover) {
+  const spent = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - HEAL_COST },
+    vitality: { ...power.vitality, [targetTokenId]: "blessed" }
+  };
+  const broken = breakShieldStreak(spent, mover);
+  const nextState = {
+    tokens: state.tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(broken) };
+}
+function getBenedictionTargets(state, power, mover) {
+  return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => power.vitality[t.id] !== "blessed").map((t) => t.id);
+}
+function applyBenediction(state, power, mover) {
+  const blessedTokenIds = getBenedictionTargets(state, power, mover);
+  const vitality = { ...power.vitality };
+  for (const id of blessedTokenIds) vitality[id] = "blessed";
+  const nextPower = {
+    ...power,
+    vitality,
+    ultimateReady: { ...power.ultimateReady, [mover]: false }
+  };
+  const nextState = {
+    tokens: state.tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), blessedTokenIds };
 }
 function applyExhume(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
@@ -1037,15 +1192,23 @@ var MK_STD_NECRO_SHIELD_EXTRA = 250;
 var MK_STD_NECRO_RACE_SCALE = 1;
 var MK_STD_NECRO_CAPTURE_SCALE = 2.5;
 var MK_STD_NECRO_HUNT = 65;
-function scoreMove(state, m, extraCaptures, rand, shieldExtra = 0, raceScale = 1, captureScale = 1, huntPerTarget = 0) {
+var MK_STD_WOUND_VALUE = 160;
+var MK_STD_WOUND_PER_TILE = 8;
+function scoreMove(state, m, extraCaptures, rand, shieldExtra = 0, raceScale = 1, captureScale = 1, huntPerTarget = 0, power) {
   let score = 0;
   const allCaptures = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
+  const wounds = power ? allCaptures.filter((id) => isBlessed(power, id)) : [];
+  const kills = wounds.length > 0 ? allCaptures.filter((id) => !wounds.includes(id)) : allCaptures;
   if (m.causesWin) score += 1e3;
-  if (allCaptures.length > 0) {
+  if (kills.length > 0) {
     const victimProgress = Math.max(
-      ...allCaptures.map((id) => state.tokens.find((t) => t.id === id)?.position ?? 0)
+      ...kills.map((id) => state.tokens.find((t) => t.id === id)?.position ?? 0)
     );
-    score += (400 + victimProgress * 10 + (allCaptures.length - 1) * 150) * captureScale;
+    score += (400 + victimProgress * 10 + (kills.length - 1) * 150) * captureScale;
+  }
+  for (const id of wounds) {
+    const pos = state.tokens.find((t) => t.id === id)?.position ?? 0;
+    score += (MK_STD_WOUND_VALUE + MK_STD_WOUND_PER_TILE * pos) * captureScale;
   }
   if (m.landsOnShield) score += 250 + shieldExtra;
   if (m.to === PATH_LENGTH_PER_PLAYER) score += 300;
@@ -1161,6 +1324,21 @@ function scoreRevive(state, power, spawnTile, rand) {
 function scoreExhume(rand) {
   return 600 + rand() * 20;
 }
+function scoreBless(state, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  let score = bulwarkFacesThreat(state, target) ? 220 + target.position * 5 : 40 + target.position * 4;
+  score += rand() * 20;
+  return score;
+}
+function scoreHeal(state, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  let score = bulwarkFacesThreat(state, target) ? 300 + target.position * 5 : -30 + target.position * 3;
+  score += rand() * 20;
+  return score;
+}
+function scoreBenediction(poolSize, rand) {
+  return 250 + 120 * poolSize + rand() * 20;
+}
 function pickBotPowerAction(state, power, moves, flip, rand = Math.random, difficulty = "standard") {
   if (difficulty === "easy") return pickEasyPowerAction(state, power, moves, flip, rand);
   if (difficulty === "hard") return pickHardPowerAction(state, power, moves, flip, rand);
@@ -1178,13 +1356,13 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
   const captureScale = necro ? MK_STD_NECRO_CAPTURE_SCALE : 1;
   const huntPerTarget = necro ? MK_STD_NECRO_HUNT : 0;
   for (const m of moves) {
-    const score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale, huntPerTarget);
+    const score = scoreMove(state, m, [], rand, shieldExtra, raceScale, captureScale, huntPerTarget, power);
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "move", move: m };
     }
     if (cls === "warrior" && m.chargeAvailable && m.chargeSweepCaptures.length > 0 && charges >= 1) {
-      const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand) + 20;
+      const chargeScore = scoreMove(state, m, m.chargeSweepCaptures, rand, 0, 1, 1, 0, power) + 20;
       if (chargeScore > bestScore) {
         bestScore = chargeScore;
         best = { kind: "charge", move: m };
@@ -1281,6 +1459,32 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       }
     }
   }
+  if (cls === "cleric") {
+    for (const targetId of getBlessTargets(state, power, mover)) {
+      const score = scoreBless(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "bless", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getHealTargets(state, power, mover)) {
+      const score = scoreHeal(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "heal", targetTokenId: targetId };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      const pool = getBenedictionTargets(state, power, mover);
+      if (pool.length > 0) {
+        const score = scoreBenediction(pool.length, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "benediction" };
+        }
+      }
+    }
+  }
   return best;
 }
 function enumerateCandidates(state, power, moves) {
@@ -1328,6 +1532,13 @@ function enumerateCandidates(state, power, moves) {
     const exhumeTargets = getExhumeTargets(state, power, mover);
     if (exhumeTargets.length > 0) out.push({ kind: "exhume", targetTokenId: exhumeTargets[0] });
   }
+  if (cls === "cleric") {
+    for (const id of getBlessTargets(state, power, mover)) out.push({ kind: "bless", targetTokenId: id });
+    for (const id of getHealTargets(state, power, mover)) out.push({ kind: "heal", targetTokenId: id });
+    if (power.ultimateReady[mover] && getBenedictionTargets(state, power, mover).length > 0) {
+      out.push({ kind: "benediction" });
+    }
+  }
   return out;
 }
 function pickEasyPowerAction(state, power, moves, flip, rand) {
@@ -1352,6 +1563,9 @@ var MK_EVAL_THRALL_MENACE = 15;
 var MK_EVAL_NECRO_PREY_SCALE = 1.25;
 var MK_EVAL_EXHUME_HELD = 20;
 var MK_EVAL_REVIVE_BIAS = 20;
+var MK_EVAL_BLESSED = 20;
+var MK_EVAL_WOUNDED = 4;
+var MK_EVAL_BLESSED_THREAT_SCALE = 0.4;
 var MK_EVAL_STREAK = 12;
 var MK_EVAL_BULWARK = 12;
 var MK_WIN_VALUE = 1e6;
@@ -1382,7 +1596,7 @@ function mkEvalSide(state, power, player) {
     const tile = BOARD_LAYOUT[t.position];
     if (tile.type === "shield") score += MK_EVAL_SHIELD_TILE;
     if (tile.isContested && tile.type !== "shield" && !isWarded(state, power, t) && !isBulwarked(power, t)) {
-      const threatScale = power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1;
+      const threatScale = (power.classes[foe] === "necromancer" ? MK_EVAL_NECRO_PREY_SCALE : 1) * (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
       for (const e of state.tokens) {
         if (effectiveOwner(power, e) === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER)
           continue;
@@ -1393,6 +1607,8 @@ function mkEvalSide(state, power, player) {
       }
     }
     if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
+    if (power.vitality[t.id] === "blessed") score += MK_EVAL_BLESSED;
+    if (power.vitality[t.id] === "wounded") score += MK_EVAL_WOUNDED;
   }
   const corpse = power.corpse[player];
   if (corpse && state.tokens.find((t) => t.id === corpse.tokenId)?.position === -1) {
@@ -1474,6 +1690,21 @@ function mkReflipValue(state, power, me) {
   }
   return value;
 }
+function mkBlessingValue(state, power, c, flip, me) {
+  const r = applyBless(state, power, c.targetTokenId, me);
+  if (flip === 0) return evaluateMK(r.state, r.power, me);
+  const moves = getLegalPowerMoves(r.state, r.power, flip);
+  if (moves.length === 0) return evaluateMK(r.state, r.power, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin ? MK_WIN_VALUE : (() => {
+      const q = applyPowerMove(r.state, r.power, m, me, SIM_RAND);
+      return mkValueAfterAction(q.state, q.power, me);
+    })();
+    if (v > best) best = v;
+  }
+  return best;
+}
 function mkSimulate(state, power, c, mover) {
   switch (c.kind) {
     case "move":
@@ -1496,6 +1727,12 @@ function mkSimulate(state, power, c, mover) {
       return applyCorpseExplosion(state, power, mover);
     case "exhume":
       return applyExhume(state, power, c.targetTokenId, mover);
+    case "bless":
+      return applyBless(state, power, c.targetTokenId, mover);
+    case "heal":
+      return applyHeal(state, power, c.targetTokenId, mover);
+    case "benediction":
+      return applyBenediction(state, power, mover);
   }
 }
 function mkReviveValue(state, power, flip, me) {
@@ -1527,6 +1764,8 @@ function pickHardPowerAction(state, power, moves, flip, rand) {
       value = mkReflipValue(state, power, mover);
     } else if (c.kind === "revive") {
       value = mkReviveValue(state, power, flip, mover) + MK_EVAL_REVIVE_BIAS;
+    } else if (c.kind === "bless") {
+      value = mkBlessingValue(state, power, c, flip, mover);
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);
@@ -1552,7 +1791,7 @@ var CHAT_MAX = 40;
 var CHAT_TEXT_MAX = 200;
 var OPPONENT_AWAY_MS = 2e4;
 var OPPONENT_LEFT_MS = 12e4;
-var MK_CLASSES = ["archer", "mage", "warrior", "necromancer"];
+var MK_CLASSES = ["archer", "mage", "warrior", "necromancer", "cleric"];
 function toWirePower(p) {
   return { ...p };
 }
@@ -1574,7 +1813,10 @@ function fromWirePower(w) {
     // deploy ships a rules change, not just a schema one, and the old
     // fields simply stop being read.)
     corpse: w.corpse ?? { p1: null, p2: null },
-    thrall: w.thrall ?? { p1: null, p2: null }
+    thrall: w.thrall ?? { p1: null, p2: null },
+    // Docs persisted before the cleric existed have no vitality — no
+    // blessings in flight, which the empty map means exactly.
+    vitality: w.vitality ?? {}
   };
 }
 function sanitizeChat(text) {
@@ -1629,6 +1871,10 @@ function publicPower(doc) {
     reviveSpawnTile: doc.mk.classes[mover] === "necromancer" ? getReviveSpawnTile(doc.state, p, mover) : null,
     corpseExplosionTargets: doc.mk.classes[mover] === "necromancer" ? getCorpseExplosionTargets(doc.state, p, mover) : [],
     exhumeTargets: doc.mk.classes[mover] === "necromancer" && doc.mk.ultimateReady[mover] ? getExhumeTargets(doc.state, p, mover) : [],
+    blessTargets: doc.mk.classes[mover] === "cleric" ? getBlessTargets(doc.state, p, mover) : [],
+    healTargets: doc.mk.classes[mover] === "cleric" ? getHealTargets(doc.state, p, mover) : [],
+    benedictionTargets: doc.mk.classes[mover] === "cleric" && doc.mk.ultimateReady[mover] ? getBenedictionTargets(doc.state, p, mover) : [],
+    vitality: { ...doc.mk.vitality ?? {} },
     reflipsUsedThisTurn: p.reflipsUsedThisTurn
   };
 }
@@ -1678,6 +1924,11 @@ function stateEventOf(doc) {
     lastCorpseDenied: doc.lastCorpseDenied ?? null,
     lastCorpseExplosion: doc.lastCorpseExplosion ?? null,
     lastExhume: doc.lastExhume ?? null,
+    lastBless: doc.lastBless ?? null,
+    lastHeal: doc.lastHeal ?? null,
+    lastBenediction: doc.lastBenediction ?? null,
+    lastWound: doc.lastWound ?? null,
+    lastMend: doc.lastMend ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason
@@ -1716,6 +1967,11 @@ function freshMatchFields(variant) {
     lastCorpseDenied: null,
     lastCorpseExplosion: null,
     lastExhume: null,
+    lastBless: null,
+    lastHeal: null,
+    lastBenediction: null,
+    lastWound: null,
+    lastMend: null,
     rescueAttempted: false
   };
 }
@@ -1815,6 +2071,9 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
+      if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
+      if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
       const move = doc.currentPowerMoves[a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
     }
@@ -1889,6 +2148,20 @@ function validateUsePower(doc, seat, a) {
         return "Invalid move index";
       if (!doc.currentPowerMoves[a.moveIndex].chargeAvailable) return "Charge not available for that move";
       return null;
+    case "bless":
+      if (cls !== "cleric") return "Only a Cleric can Bless";
+      if (doc.currentFlip === null) return "No flip yet";
+      if (!getBlessTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Bless target";
+      return null;
+    case "heal":
+      if (cls !== "cleric") return "Only a Cleric can Heal";
+      if (!getHealTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Heal target";
+      return null;
+    case "benediction":
+      if (cls !== "cleric") return "Only a Cleric can cast Benediction";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getBenedictionTargets(doc.state, p(), seat).length === 0) return "Benediction would bless no one";
+      return null;
   }
 }
 var CLEAR_SLOTS = {
@@ -1907,6 +2180,11 @@ var CLEAR_SLOTS = {
   lastCorpseDenied: null,
   lastCorpseExplosion: null,
   lastExhume: null,
+  lastBless: null,
+  lastHeal: null,
+  lastBenediction: null,
+  lastWound: null,
+  lastMend: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null
@@ -1917,7 +2195,7 @@ function applyMkMove(doc, seat, move, now, rand) {
   const r = applyPowerMove(doc.state, fromWirePower(doc.mk), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
-  const caps = move.captures.length + move.bonusCaptures.length + rainHit;
+  const caps = move.captures.length + move.bonusCaptures.length + rainHit - r.wounded.length;
   const foeCorpse = doc.mk.corpse?.[foe] ?? null;
   const corpseDenied = foeCorpse !== null && move.tokenId === foeCorpse.tokenId && move.from === -1;
   let next = {
@@ -1932,7 +2210,9 @@ function applyMkMove(doc, seat, move, now, rand) {
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
     lastCorpseDenied: corpseDenied ? { tokenId: move.tokenId } : null,
-    lastRainOfArrows: r.rainOfArrows
+    lastRainOfArrows: r.rainOfArrows,
+    lastWound: r.wounded.length > 0 ? { tokenIds: r.wounded.map((w) => w.tokenId) } : null,
+    lastMend: r.mendedTokenIds.length > 0 ? { tokenIds: r.mendedTokenIds } : null
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1941,7 +2221,7 @@ function applyMkCharge(doc, seat, move, now, rand) {
   const r = applyCharge(doc.state, fromWirePower(doc.mk), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
-  const caps = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
+  const caps = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit - r.wounded.length;
   let next = {
     ...doc,
     ...CLEAR_SLOTS,
@@ -1954,7 +2234,9 @@ function applyMkCharge(doc, seat, move, now, rand) {
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
     lastRainOfArrows: r.rainOfArrows,
-    lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures }
+    lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures },
+    lastWound: r.wounded.length > 0 ? { tokenIds: r.wounded.map((w) => w.tokenId) } : null,
+    lastMend: r.mendedTokenIds.length > 0 ? { tokenIds: r.mendedTokenIds } : null
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1965,14 +2247,25 @@ function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
   let slots = {};
   let capsGained = 0;
   switch (kind) {
-    case "push":
-      r = applyPush(doc.state, power, tokenId, seat);
-      slots = { lastPush: { targetTokenId: tokenId } };
+    case "push": {
+      const rr = applyPush(doc.state, power, tokenId, seat);
+      r = rr;
+      slots = {
+        lastPush: { targetTokenId: tokenId },
+        // A blessing absorbed the send-home: announce the survival too.
+        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null
+      };
       break;
-    case "chargedShot":
-      r = applyChargedShot(doc.state, power, tokenId, seat);
-      slots = { lastChargedShot: { targetTokenId: tokenId } };
+    }
+    case "chargedShot": {
+      const rr = applyChargedShot(doc.state, power, tokenId, seat);
+      r = rr;
+      slots = {
+        lastChargedShot: { targetTokenId: tokenId },
+        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null
+      };
       break;
+    }
     case "blinkStrike": {
       const rr = applyBlinkStrike(doc.state, power, tokenId, seat);
       r = rr;
@@ -1997,6 +2290,10 @@ function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
       slots = { lastExhume: { targetTokenId: tokenId, returnedTo: rr.returnedTo } };
       break;
     }
+    case "heal":
+      r = applyHeal(doc.state, power, tokenId, seat);
+      slots = { lastHeal: { tokenId } };
+      break;
   }
   const delta = r.power.charges[seat] - chargesBefore;
   let next = {
@@ -2065,6 +2362,33 @@ function applyMkRevive(doc, seat, now) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
+function applyMkBlessing(doc, seat, tokenId, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const flip = doc.currentFlip;
+  const power = fromWirePower(doc.mk);
+  const r = applyBless(doc.state, power, tokenId, seat);
+  const currentPowerMoves = getLegalPowerMoves(r.state, r.power, flip);
+  const bulwarkResult = tickBulwarkForReflip(r.state, r.power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  let next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBless: { tokenId },
+    // A cast during a zero flip spends AFTER the flip commit banked the
+    // grant's baseline — applyMkRevive's exact bookkeeping, so the
+    // auto-skip commit still announces exactly the grant.
+    zeroFlipChargeBefore: doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - BLESS_COST : null
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
 function applyMkCorpseExplosion(doc, seat, now) {
   const chargesBefore = doc.mk.charges[seat];
   const r = applyCorpseExplosion(doc.state, fromWirePower(doc.mk), seat);
@@ -2078,7 +2402,25 @@ function applyMkCorpseExplosion(doc, seat, now) {
     currentPowerMoves: null,
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
-    lastCorpseExplosion: { tile: r.tile, struckTokenIds: r.struckTokenIds, sentHomeIds: r.sentHomeIds }
+    lastCorpseExplosion: { tile: r.tile, struckTokenIds: r.struckTokenIds, sentHomeIds: r.sentHomeIds },
+    lastWound: r.woundedTokenIds.length > 0 ? { tokenIds: r.woundedTokenIds } : null
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+function applyMkBenediction(doc, seat, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const r = applyBenediction(doc.state, fromWirePower(doc.mk), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBenediction: { tokenIds: r.blessedTokenIds }
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -2110,6 +2452,9 @@ function autoSkipDelay(doc) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
     if (doc.mk.classes[mover] === "necromancer" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getReviveSpawnTile(doc.state, p, mover) !== null || getCorpseExplosionTargets(doc.state, p, mover).length > 0)) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    if (doc.mk.classes[mover] === "cleric" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getBlessTargets(doc.state, p, mover).length > 0 || getHealTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
   }
@@ -2248,6 +2593,12 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkCorpseExplosion(doc, seat, now);
     case "exhume":
       return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
+    case "bless":
+      return applyMkBlessing(doc, seat, action.targetTokenId, now);
+    case "heal":
+      return applyMkSimple(doc, seat, "heal", action.targetTokenId, now);
+    case "benediction":
+      return applyMkBenediction(doc, seat, now);
   }
 }
 function commitTurnFlip(doc, now, rand) {

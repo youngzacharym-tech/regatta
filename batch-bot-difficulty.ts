@@ -32,7 +32,10 @@ import {
 } from "./rulebook.ts";
 import {
   applyBlinkStrike,
+  applyBless,
+  applyBenediction,
   applyBulwark,
+  applyHeal,
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
@@ -79,7 +82,7 @@ const HARD_VS_STANDARD_MIN = 55;
  *  hard-vs-standard, from the other side. */
 const STANDARD_VS_EASY_MIN = 55;
 
-const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior", "necromancer"];
+const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric"];
 const PAIRINGS: [BotDifficulty, BotDifficulty, number][] = [
   // [stronger, weaker, min stronger win%]
   ["standard", "easy", STANDARD_VS_EASY_MIN],
@@ -132,17 +135,25 @@ function takeTurnMK(
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
 
+  // Cleric Bless joined the turn-keeping club (applyBless's contract; Heal
+  // did NOT — it ends the turn, see HEAL_COST's doc) — same three-kind
+  // loop as batch-random-master-killer-games.ts's takeTurn.
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "revive") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
+    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless") &&
+    i <= REFLIPS_PER_TURN + CHARGE_CAP * 2 + 1;
     i++
   ) {
     if (action.kind === "reflip") {
       power = applyReflip(power, mover);
       flip = flipCoins();
       if (flip === 0) power = grantZeroFlipCharge(power, mover);
-    } else {
+    } else if (action.kind === "revive") {
       const r = applyRevive(state, power, mover);
+      state = r.state;
+      power = r.power;
+    } else {
+      const r = applyBless(state, power, action.targetTokenId, mover);
       state = r.state;
       power = r.power;
     }
@@ -151,7 +162,7 @@ function takeTurnMK(
     action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
   }
 
-  if (action === null || action.kind === "reflip" || action.kind === "revive") {
+  if (action === null || action.kind === "reflip" || action.kind === "revive" || action.kind === "bless") {
     // Skip breaks a live shield streak, matching room-engine's auto-skip
     // (see batch-random-master-killer-games.ts's dead-end branch).
     return { state: applyNoMove(state), power: breakShieldStreak(power, mover) };
@@ -185,6 +196,12 @@ function takeTurnMK(
     }
     case "exhume": {
       const r = applyExhume(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "heal":
+      return applyHeal(state, power, action.targetTokenId, mover);
+    case "benediction": {
+      const r = applyBenediction(state, power, mover);
       return { state: r.state, power: r.power };
     }
   }

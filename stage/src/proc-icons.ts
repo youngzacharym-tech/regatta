@@ -41,7 +41,12 @@ export type ProcIconId =
   | "thrallExpired"
   | "corpseDenied"
   | "exhume"
-  | "soulHarvest";
+  | "soulHarvest"
+  | "bless"
+  | "heal"
+  | "benediction"
+  | "sanctifiedGround"
+  | "wound";
 
 // Fixed frame gold — matches the plate/frame trim, constant across classes.
 const GOLD = "var(--gold-text, #e8c87e)";
@@ -63,6 +68,12 @@ const diamond = (x: number, y: number, r = 2.2, fill = "currentColor"): string =
 // Bulwark / Reinforced / Blocked! stay siblings instead of three shields.
 const SHIELD_PATH = "M13 13 Q24 16.5 35 13 C35 24 33 33 24 41 C15 33 13 24 13 13 Z";
 const SHIELD = `<path d="${SHIELD_PATH}" ${MAIN} ${BODY}/>`;
+
+// Cleric family: one floating halo ring over its subject, reused so Bless /
+// Heal / Benediction / the break stay siblings (the warrior shield rule) —
+// the halo whole while the light holds, broken when it doesn't.
+const HALO = (cx: number, cy: number, rx = 9): string =>
+  `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${rx * 0.34}" ${MAIN}/>`;
 
 // Necromancer family: one rounded headstone on a ground line, reused so
 // Raise Dead / Dark Resurrection stay siblings (the warrior shield rule).
@@ -304,6 +315,69 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       // Its interrupted flight, still hanging in the air behind it.
       `<path d="M40.5 5 L44.5 1.5" ${GOLD_DETAIL}/>` +
       `<path d="M42.5 12 L47 10.5" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Cleric active: the halo settling onto a stone — the second life granted.
+  bless: wrap(
+    HALO(24, 12) +
+      // Light descending from the halo onto the stone below.
+      `<path d="M17 17 L19.5 22.5" ${GOLD_DETAIL}/>` +
+      `<path d="M24 16.5 L24 22.5" ${GOLD_DETAIL}/>` +
+      `<path d="M31 17 L28.5 22.5" ${GOLD_DETAIL}/>` +
+      `<circle cx="24" cy="33" r="9" ${MAIN} ${BODY}/>` +
+      `<circle cx="24" cy="33" r="2" fill="${GOLD}"/>`,
+  ),
+
+  // Cleric active: the chalice poured over the scar — the blessing rekindled.
+  heal: wrap(
+    `<path d="M14 10 L34 10 C34 19 30 24 24 24 C18 24 14 19 14 10 Z" ${MAIN} ${BODY}/>` +
+      `<path d="M24 24 L24 33" ${MAIN}/>` +
+      `<path d="M16.5 38 C16.5 35 20 33 24 33 C28 33 31.5 35 31.5 38 Z" ${MAIN} ${BODY}/>` +
+      diamond(24, 41.5) +
+      // The light welling over the rim.
+      `<path d="M24 2 L25.6 5.8 L29.5 7 L25.6 8.2 L24 12 L22.4 8.2 L18.5 7 L22.4 5.8 Z" fill="${GOLD}"/>` +
+      `<circle cx="35" cy="14" r="1.3" fill="${GOLD}"/>` +
+      `<circle cx="12.5" cy="15" r="1.1" fill="${GOLD}"/>`,
+  ),
+
+  // Cleric ultimate: one wide dome of light over the whole army at once.
+  benediction: wrap(
+    `<path d="M6 30 A19 19 0 0 1 42 30" ${MAIN}/>` +
+      diamond(6, 30, 2) +
+      diamond(42, 30, 2) +
+      // The army beneath the dome.
+      `<circle cx="14" cy="37" r="4.5" ${DETAIL} ${BODY}/>` +
+      `<circle cx="24" cy="39" r="4.5" ${DETAIL} ${BODY}/>` +
+      `<circle cx="34" cy="37" r="4.5" ${DETAIL} ${BODY}/>` +
+      // Grace falling through the dome.
+      `<circle cx="24" cy="17" r="1.6" fill="${GOLD}"/>` +
+      `<circle cx="15" cy="21" r="1.2" fill="${GOLD}"/>` +
+      `<circle cx="33" cy="21" r="1.2" fill="${GOLD}"/>`,
+  ),
+
+  // Cleric passive: the shield tile as holy ground — the halo hovering over
+  // the tile's diamond, mending light rising from it.
+  sanctifiedGround: wrap(
+    `<path d="M24 22 L35 31 L24 40 L13 31 Z" ${MAIN} ${BODY}/>` +
+      HALO(24, 12) +
+      `<path d="M6 40 L42 40" ${GOLD_DETAIL}/>` +
+      // Mending light rising off the sanctified tile.
+      `<circle cx="16" cy="20" r="1.2" fill="${GOLD}"/>` +
+      `<circle cx="32" cy="20" r="1.2" fill="${GOLD}"/>` +
+      `<circle cx="24" cy="31" r="1.8" fill="${GOLD}"/>`,
+  ),
+
+  // The blessing BREAKS: the family halo split over the surviving stone —
+  // a shard falling, the stone still standing (that's the whole point).
+  wound: wrap(
+    `<path d="M15.2 10.5 A9 3.06 0 0 1 30 9.5" ${MAIN}/>` +
+      `<path d="M32.8 13.5 A9 3.06 0 0 1 18 14.8" ${MAIN}/>` +
+      // The falling shard.
+      diamond(35, 20, 2.2, GOLD) +
+      `<path d="M33.5 24 L31.5 27.5" ${GOLD_DETAIL}/>` +
+      // The stone beneath: struck, scarred, alive.
+      `<circle cx="24" cy="33" r="9" ${MAIN} ${BODY}/>` +
+      `<path d="M20 27.5 L23 31 L21.5 34 L25 37.5" ${DETAIL}/>`,
   ),
 
   // Necromancer passive: the reaper's scythe, souls gathered under the

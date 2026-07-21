@@ -56,6 +56,8 @@ const NEUTRAL_POWER: PowerState = {
   // corpse to revive, no thrall for effectiveOwner to reassign.
   corpse: { p1: null, p2: null },
   thrall: { p1: null, p2: null },
+  // Cleric-only state, equally inert here: no blessings anywhere.
+  vitality: {},
 };
 
 function sharedFieldsMatch(a: Move, b: PowerMove): boolean {

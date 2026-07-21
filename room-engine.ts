@@ -45,25 +45,32 @@ import {
 import { pickBotMove } from "./bot";
 import type { ChatMsg } from "./protocol";
 import {
+  applyBless,
+  applyBenediction,
   applyBlinkStrike,
   applyBulwark,
   applyCharge as mkApplyCharge,
   applyChargedShot as mkApplyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyHeal,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
   applyRevive,
   applyWarpath,
+  BLESS_COST,
   breakShieldStreak,
   canReflipAgain,
   CHARGE_CAP,
+  getBenedictionTargets,
+  getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getExhumeTargets,
+  getHealTargets,
   getLegalPowerMoves,
   getPushTargets,
   getReviveSpawnTile,
@@ -110,7 +117,7 @@ export const CHAT_TEXT_MAX = 200;
 export const OPPONENT_AWAY_MS = 20_000;
 export const OPPONENT_LEFT_MS = 120_000;
 
-export const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer"];
+export const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric"];
 
 // ============================================================================
 // WIRE-SAFE POWER STATE — PowerState is plain JSON now (safeTokens, its one
@@ -131,6 +138,9 @@ export interface WirePowerState {
    *  PowerState's docs. Plain JSON, rides the doc verbatim. */
   corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
   thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Cleric (2026-07-21): per-token blessed/wounded state — see
+   *  PowerState.vitality. Plain JSON, rides the doc verbatim. */
+  vitality: Record<number, "blessed" | "wounded">;
 }
 
 export function toWirePower(p: PowerState): WirePowerState {
@@ -160,6 +170,9 @@ export function fromWirePower(w: WirePowerState): PowerState {
     // fields simply stop being read.)
     corpse: w.corpse ?? { p1: null, p2: null },
     thrall: w.thrall ?? { p1: null, p2: null },
+    // Docs persisted before the cleric existed have no vitality — no
+    // blessings in flight, which the empty map means exactly.
+    vitality: w.vitality ?? {},
   };
 }
 
@@ -209,6 +222,17 @@ export interface PublicPower {
    *  castable) — the dock gate and the blast preview highlight. */
   corpseExplosionTargets: number[];
   exhumeTargets: number[];
+  /** Cleric (2026-07-21): Bless / Heal target pools for the CURRENT player
+   *  (affordability baked into the oracles — empty = not castable), and
+   *  Benediction's would-change pool (empty = not castable; gated on
+   *  ultimateReady here like every ultimate's list). ADDITIVE: older
+   *  events lack them. */
+  blessTargets?: number[];
+  healTargets?: number[];
+  benedictionTargets?: number[];
+  /** Every token's blessed/wounded state — public table-state (the rings
+   *  are visible board truth, same idea as bulwarkedTokenIds). ADDITIVE. */
+  vitality?: Record<number, "blessed" | "wounded">;
   /** How many Re-flips the CURRENT player has already fired this turn —
    *  drives the client's Re-flip button gate (charges alone can't: a Mage
    *  at the REFLIPS_PER_TURN cap may still hold a charge, e.g. after a
@@ -289,6 +313,20 @@ export type RoomEvent =
        *  walk actually landed the dragged token on (server-computed, never
        *  re-derived client-side). */
       lastExhume?: { targetTokenId: number; returnedTo: number } | null;
+      /** Cleric's Bless / Heal just resolved on this commit. */
+      lastBless?: { tokenId: number } | null;
+      lastHeal?: { tokenId: number } | null;
+      /** Cleric's Benediction ultimate — the ids it blessed. */
+      lastBenediction?: { tokenIds: number[] } | null;
+      /** One or more BLESSINGS BROKE on this commit — a capture/knockback
+       *  resolved as a wound instead of a kill (any path: landing, Snipe,
+       *  sweep, Push, Charged Shot, Corpse Explosion). Positions are in
+       *  `state`; this is the authoritative "announce the survival"
+       *  signal, never re-derived client-side. */
+      lastWound?: { tokenIds: number[] } | null;
+      /** Sanctified Ground fired: the cleric's shield landing mended these
+       *  wounded stones back to blessed. */
+      lastMend?: { tokenIds: number[] } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -373,6 +411,13 @@ export interface RoomDoc {
   lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
   /** See RoomEvent's doc: set only on the commit where an Exhume resolved. */
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
+  /** See RoomEvent's docs — the cleric's announcement slots (2026-07-21).
+   *  Docs persisted before these fields existed read as undefined ≙ null. */
+  lastBless?: { tokenId: number } | null;
+  lastHeal?: { tokenId: number } | null;
+  lastBenediction?: { tokenIds: number[] } | null;
+  lastWound?: { tokenIds: number[] } | null;
+  lastMend?: { tokenIds: number[] } | null;
 }
 
 // ============================================================================
@@ -403,7 +448,14 @@ export type RoomActionInput =
         /** Corpse Explosion: no payload — the marked corpse is the
          *  epicenter; getCorpseExplosionTargets is the shared oracle. */
         | { kind: "corpseExplosion" }
-        | { kind: "exhume"; targetTokenId: number };
+        | { kind: "exhume"; targetTokenId: number }
+        /** Cleric's Bless / Heal: target one of the caster's OWN stones
+         *  (Bulwark's shape) — the shared oracles are the whole gate. */
+        | { kind: "bless"; targetTokenId: number }
+        | { kind: "heal"; targetTokenId: number }
+        /** Cleric's Benediction: no payload — getBenedictionTargets is the
+         *  shared oracle (empty pool = not castable). */
+        | { kind: "benediction" };
     }
   | { op: "newMatch" }
   | { op: "chat"; text: string };
@@ -524,6 +576,13 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
       doc.mk.classes[mover] === "necromancer" && doc.mk.ultimateReady[mover]
         ? getExhumeTargets(doc.state, p, mover)
         : [],
+    blessTargets: doc.mk.classes[mover] === "cleric" ? getBlessTargets(doc.state, p, mover) : [],
+    healTargets: doc.mk.classes[mover] === "cleric" ? getHealTargets(doc.state, p, mover) : [],
+    benedictionTargets:
+      doc.mk.classes[mover] === "cleric" && doc.mk.ultimateReady[mover]
+        ? getBenedictionTargets(doc.state, p, mover)
+        : [],
+    vitality: { ...(doc.mk.vitality ?? {}) },
     reflipsUsedThisTurn: p.reflipsUsedThisTurn,
   };
 }
@@ -583,6 +642,11 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastCorpseDenied: doc.lastCorpseDenied ?? null,
     lastCorpseExplosion: doc.lastCorpseExplosion ?? null,
     lastExhume: doc.lastExhume ?? null,
+    lastBless: doc.lastBless ?? null,
+    lastHeal: doc.lastHeal ?? null,
+    lastBenediction: doc.lastBenediction ?? null,
+    lastWound: doc.lastWound ?? null,
+    lastMend: doc.lastMend ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -607,7 +671,8 @@ export function freshMatchFields(
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
-  | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume" | "rescueAttempted"
+  | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
+  | "lastBless" | "lastHeal" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -638,6 +703,11 @@ export function freshMatchFields(
     lastCorpseDenied: null,
     lastCorpseExplosion: null,
     lastExhume: null,
+    lastBless: null,
+    lastHeal: null,
+    lastBenediction: null,
+    lastWound: null,
+    lastMend: null,
     rescueAttempted: false,
   };
 }
@@ -774,6 +844,9 @@ export function applyAction(
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
+      if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
+      if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
@@ -867,6 +940,24 @@ function validateUsePower(
         return "Invalid move index";
       if (!doc.currentPowerMoves[a.moveIndex].chargeAvailable) return "Charge not available for that move";
       return null;
+    case "bless":
+      if (cls !== "cleric") return "Only a Cleric can Bless";
+      // Bless keeps the SAME flip alive (Revive's contract, see
+      // applyMkBlessing) — there has to be one to keep.
+      if (doc.currentFlip === null) return "No flip yet";
+      // Affordability is baked into the oracle (see getBlessTargets).
+      if (!getBlessTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Bless target";
+      return null;
+    case "heal":
+      // Heal ENDS the turn (Bulwark's shape) — no flip guard needed.
+      if (cls !== "cleric") return "Only a Cleric can Heal";
+      if (!getHealTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Heal target";
+      return null;
+    case "benediction":
+      if (cls !== "cleric") return "Only a Cleric can cast Benediction";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getBenedictionTargets(doc.state, p(), seat).length === 0) return "Benediction would bless no one";
+      return null;
   }
 }
 
@@ -889,6 +980,11 @@ const CLEAR_SLOTS = {
   lastCorpseDenied: null,
   lastCorpseExplosion: null,
   lastExhume: null,
+  lastBless: null,
+  lastHeal: null,
+  lastBenediction: null,
+  lastWound: null,
+  lastMend: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -900,7 +996,9 @@ function applyMkMove(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number,
   const r = applyPowerMove(doc.state, fromWirePower(doc.mk!), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
-  const caps = move.captures.length + move.bonusCaptures.length + rainHit;
+  // Wounds are not captures: a blessed victim survived, so the scoreboard
+  // must not count it (r.wounded ⊂ the move's capture lists).
+  const caps = move.captures.length + move.bonusCaptures.length + rainHit - r.wounded.length;
   // Corpse denial: the mover just re-entered the exact token the enemy
   // necromancer's corpse marker points at — the soul is reclaimed. Derived
   // here (the only path a reserve token re-enters by) so the client gets
@@ -921,6 +1019,8 @@ function applyMkMove(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
     lastCorpseDenied: corpseDenied ? { tokenId: move.tokenId } : null,
     lastRainOfArrows: r.rainOfArrows,
+    lastWound: r.wounded.length > 0 ? { tokenIds: r.wounded.map((w) => w.tokenId) } : null,
+    lastMend: r.mendedTokenIds.length > 0 ? { tokenIds: r.mendedTokenIds } : null,
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -930,7 +1030,9 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
   const r = mkApplyCharge(doc.state, fromWirePower(doc.mk!), move, seat, rand);
   const delta = r.power.charges[seat] - chargesBefore;
   const rainHit = r.rainOfArrows?.targetTokenId != null ? 1 : 0;
-  const caps = move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit;
+  // Same wounds-aren't-captures scoreboard rule as applyMkMove's.
+  const caps =
+    move.captures.length + move.bonusCaptures.length + move.chargeSweepCaptures.length + rainHit - r.wounded.length;
   let next: RoomDoc = {
     ...doc,
     ...CLEAR_SLOTS,
@@ -944,6 +1046,8 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
     lastRainOfArrows: r.rainOfArrows,
     lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures },
+    lastWound: r.wounded.length > 0 ? { tokenIds: r.wounded.map((w) => w.tokenId) } : null,
+    lastMend: r.mendedTokenIds.length > 0 ? { tokenIds: r.mendedTokenIds } : null,
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -951,11 +1055,12 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
 /** Push / Charged Shot / Blink Strike / Warpath / Bulwark / Exhume share
  *  one commit shape and differ only in which apply-fn runs and which slot
  *  announces. `reinforced` only means anything for kind "bulwark" (the
- *  full-bank cast). */
+ *  full-bank cast). (Bless/Heal are NOT here — they keep the turn, see
+ *  applyMkBlessing.) */
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
-  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume",
+  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume" | "heal",
   tokenId: number,
   now: number,
   reinforced = false,
@@ -966,14 +1071,25 @@ function applyMkSimple(
   let slots: Partial<RoomDoc> = {};
   let capsGained = 0;
   switch (kind) {
-    case "push":
-      r = mkApplyPush(doc.state, power, tokenId, seat);
-      slots = { lastPush: { targetTokenId: tokenId } };
+    case "push": {
+      const rr = mkApplyPush(doc.state, power, tokenId, seat);
+      r = rr;
+      slots = {
+        lastPush: { targetTokenId: tokenId },
+        // A blessing absorbed the send-home: announce the survival too.
+        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null,
+      };
       break;
-    case "chargedShot":
-      r = mkApplyChargedShot(doc.state, power, tokenId, seat);
-      slots = { lastChargedShot: { targetTokenId: tokenId } };
+    }
+    case "chargedShot": {
+      const rr = mkApplyChargedShot(doc.state, power, tokenId, seat);
+      r = rr;
+      slots = {
+        lastChargedShot: { targetTokenId: tokenId },
+        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null,
+      };
       break;
+    }
     case "blinkStrike": {
       const rr = applyBlinkStrike(doc.state, power, tokenId, seat);
       r = rr;
@@ -999,6 +1115,12 @@ function applyMkSimple(
       slots = { lastExhume: { targetTokenId: tokenId, returnedTo: rr.returnedTo } };
       break;
     }
+    case "heal":
+      // Turn-ending, Bulwark's shape (Bless is the turn-keeper — see
+      // applyMkBlessing).
+      r = applyHeal(doc.state, power, tokenId, seat);
+      slots = { lastHeal: { tokenId } };
+      break;
   }
   const delta = r.power.charges[seat] - chargesBefore;
   let next: RoomDoc = {
@@ -1090,6 +1212,43 @@ function applyMkRevive(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Cleric's Bless does NOT end the turn — Revive's exact commit contract
+ *  (see applyMkRevive): the SAME flip stays live and the move list is
+ *  recomputed (the board is untouched — only a vitality flag changed —
+ *  but the recompute keeps the turn-keeping shape uniform and
+ *  future-proof). The commit resets waitingSince, so a pending auto-skip
+ *  restarts against the recomputed list by construction. (Heal is
+ *  deliberately NOT here — it ends the turn via applyMkSimple; see
+ *  HEAL_COST's doc for the asymmetry's balance trace.) */
+function applyMkBlessing(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
+  const power = fromWirePower(doc.mk!);
+  const r = applyBless(doc.state, power, tokenId, seat);
+  const currentPowerMoves = getLegalPowerMoves(r.state, r.power, flip);
+  const bulwarkResult = tickBulwarkForReflip(r.state, r.power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBless: { tokenId },
+    // A cast during a zero flip spends AFTER the flip commit banked the
+    // grant's baseline — applyMkRevive's exact bookkeeping, so the
+    // auto-skip commit still announces exactly the grant.
+    zeroFlipChargeBefore:
+      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - BLESS_COST : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 /** Corpse Explosion ends the turn (Push's shape): its own commit fn only
  *  because the blast's announce payload is richer than applyMkSimple's
  *  one-token slots. */
@@ -1107,6 +1266,28 @@ function applyMkCorpseExplosion(doc: RoomDoc, seat: PlayerId, now: number): Room
     lastMovePlayer: seat,
     lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
     lastCorpseExplosion: { tile: r.tile, struckTokenIds: r.struckTokenIds, sentHomeIds: r.sentHomeIds },
+    lastWound: r.woundedTokenIds.length > 0 ? { tokenIds: r.woundedTokenIds } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Benediction ends the turn (its ultimate siblings' shape) — its own
+ *  commit fn only because the announce payload is the blessed id list,
+ *  not a single token slot. */
+function applyMkBenediction(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyBenediction(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBenediction: { tokenIds: r.blessedTokenIds },
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1162,6 +1343,22 @@ function autoSkipDelay(doc: RoomDoc): number {
       doc.currentFlip !== 0 &&
       (getReviveSpawnTile(doc.state, p, mover) !== null ||
         getCorpseExplosionTargets(doc.state, p, mover).length > 0)
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    // A human Cleric with a dead flip but a castable Bless/Heal (both
+    // turn-keeping — the cast banks real value before the skip lands, and
+    // Benediction ends the turn outright) gets the same window. Flip-zero
+    // stays a snappy skip, matching the necromancer's arm: the zero's
+    // charge grant is its compensation, and the game's rhythm keeps zeros
+    // fast.
+    if (
+      doc.mk.classes[mover] === "cleric" &&
+      doc.currentFlip !== null &&
+      doc.currentFlip !== 0 &&
+      (getBlessTargets(doc.state, p, mover).length > 0 ||
+        getHealTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0))
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
@@ -1326,6 +1523,12 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkCorpseExplosion(doc, seat, now);
     case "exhume":
       return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
+    case "bless":
+      return applyMkBlessing(doc, seat, action.targetTokenId, now);
+    case "heal":
+      return applyMkSimple(doc, seat, "heal", action.targetTokenId, now);
+    case "benediction":
+      return applyMkBenediction(doc, seat, now);
   }
 }
 

@@ -17,12 +17,15 @@
 
 import { initialState, flipCoins, applyNoMove, type GameState, type PlayerId } from "./rulebook.ts";
 import {
+  applyBless,
+  applyBenediction,
   applyBlinkStrike,
   applyBulwark,
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
   applyExhume,
+  applyHeal,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -46,7 +49,7 @@ import { pickBotPowerAction } from "./master-killer-bot.ts";
 const GAMES_PER_MATCHUP = Number(process.argv[2] ?? 2000);
 const MAX_TURNS_PER_GAME = 1000;
 
-const CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer"];
+const CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric"];
 
 interface GameResult {
   winner: PlayerId | null;
@@ -73,6 +76,11 @@ interface GameResult {
     corpseDeny: number; // corpse voided by the victim re-entering the marked token
     thrallExpired: number; // thralls that crumbled at full duration (vs being killed)
     exhume: number;
+    bless: number; // Cleric Bless casts
+    heal: number; // Cleric Heal casts
+    benediction: number; // Benediction ultimates fired
+    wound: number; // blessings broken (captures/knockbacks absorbed as wounds)
+    mend: number; // stones mended by Sanctified Ground shield landings
   };
 }
 
@@ -124,10 +132,17 @@ function takeTurn(
   // changed, so it recomputes moves and runs the same tickBulwarkForReflip
   // hook a Re-flip does: same-turn recompute, no expiry tick, yet the
   // fresh move list can reveal a Bulwark block the pre-revive one couldn't.
+  // Cleric Bless joined the turn-keeping club (applyBless's contract —
+  // same flip, no re-roll; Heal deliberately did NOT, see HEAL_COST's
+  // doc), so the loop handles three kinds. Bound: the Re-flip cap plus
+  // every mana the bank could fund across the turn-keepers (each Bless
+  // costs >= 1, Revive empties the bank), plus safety.
   let revives = 0;
+  let blessCasts = 0;
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "revive") && i <= REFLIPS_PER_TURN + CHARGE_CAP;
+    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless") &&
+    i <= REFLIPS_PER_TURN + CHARGE_CAP * 2 + 1;
     i++
   ) {
     if (action.kind === "reflip") {
@@ -135,11 +150,16 @@ function takeTurn(
       flips++;
       flip = flipCoins();
       if (flip === 0) power = grantZeroFlipCharge(power, mover);
-    } else {
+    } else if (action.kind === "revive") {
       const r = applyRevive(state, power, mover);
       state = r.state;
       power = r.power;
       revives++;
+    } else {
+      const r = applyBless(state, power, action.targetTokenId, mover);
+      state = r.state;
+      power = r.power;
+      blessCasts++;
     }
     moves = getLegalPowerMoves(state, power, flip);
     const sameTurnBulwark = tickBulwarkForReflip(state, power, flip);
@@ -154,15 +174,16 @@ function takeTurn(
   const turnUsage: Partial<GameResult["usage"]> = {
     ...(bulwarkBlockedThisTurn ? { bulwarkBlock: 1 } : {}),
     ...(revives > 0 ? { revive: revives } : {}),
+    ...(blessCasts > 0 ? { bless: blessCasts } : {}),
     ...(thrallExpiredThisTurn ? { thrallExpired: 1 } : {}),
   };
 
-  // A leftover "reflip"/"revive" here would mean the bot ignored its own
+  // A leftover turn-keeping action here would mean the bot ignored its own
   // per-turn guards past the loop's safety bound — shouldn't happen at
-  // runtime (pickBotPowerAction checks canReflipAgain / the shared revive
-  // oracle), but the return TYPE can't prove that statically, so it's
+  // runtime (pickBotPowerAction checks canReflipAgain / the shared
+  // oracles), but the return TYPE can't prove that statically, so it's
   // treated the same as "no action" rather than left unhandled.
-  if (action === null || action.kind === "reflip" || action.kind === "revive") {
+  if (action === null || action.kind === "reflip" || action.kind === "revive" || action.kind === "bless") {
     // No zero-flip grant here — it already happened on the flip commit
     // above (or inside the re-flip loop), matching the server's ordering.
     // The skip DOES break a live shield streak — room-engine's auto-skip
@@ -184,7 +205,8 @@ function takeTurn(
         power.corpse[foe]?.tokenId === action.move.tokenId && action.move.from === -1;
       const r = applyPowerMove(state, power, action.move, mover, rand);
       const rainHit = r.rainOfArrows?.targetTokenId != null;
-      const sweepSize = action.move.captures.length + action.move.bonusCaptures.length + (rainHit ? 1 : 0);
+      const sweepSize =
+        action.move.captures.length + action.move.bonusCaptures.length + (rainHit ? 1 : 0) - r.wounded.length;
       return {
         state: r.state,
         power: r.power,
@@ -196,6 +218,8 @@ function takeTurn(
           ...(rainHit ? { rainOfArrows: 1 } : {}),
           ...(thrallKill ? { thrallKill: 1 } : {}),
           ...(corpseDeny ? { corpseDeny: 1 } : {}),
+          ...(r.wounded.length > 0 ? { wound: r.wounded.length } : {}),
+          ...(r.mendedTokenIds.length > 0 ? { mend: r.mendedTokenIds.length } : {}),
         },
       };
     }
@@ -204,18 +228,29 @@ function takeTurn(
       const rainHit = r.rainOfArrows?.targetTokenId != null;
       const sweepSize =
         action.move.captures.length + action.move.bonusCaptures.length + action.move.chargeSweepCaptures.length +
-        (rainHit ? 1 : 0);
+        (rainHit ? 1 : 0) - r.wounded.length;
       return {
         state: r.state,
         power: r.power,
         flips,
         sweepSize,
-        usage: { ...turnUsage, ...(rainHit ? { charge: 1, rainOfArrows: 1 } : { charge: 1 }) },
+        usage: {
+          ...turnUsage,
+          ...(rainHit ? { charge: 1, rainOfArrows: 1 } : { charge: 1 }),
+          ...(r.wounded.length > 0 ? { wound: r.wounded.length } : {}),
+          ...(r.mendedTokenIds.length > 0 ? { mend: r.mendedTokenIds.length } : {}),
+        },
       };
     }
     case "push": {
       const r = applyPush(state, power, action.targetTokenId, mover);
-      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, push: 1 } };
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 0,
+        usage: { ...turnUsage, push: 1, ...(r.woundedTokenId !== null ? { wound: 1 } : {}) },
+      };
     }
     case "chargedShot": {
       const r = applyChargedShot(state, power, action.targetTokenId, mover);
@@ -225,7 +260,12 @@ function takeTurn(
         power: r.power,
         flips,
         sweepSize: 0,
-        usage: { ...turnUsage, chargedShot: 1, ...(sentHome ? { chargedShotSendsHome: 1 } : {}) },
+        usage: {
+          ...turnUsage,
+          chargedShot: 1,
+          ...(sentHome ? { chargedShotSendsHome: 1 } : {}),
+          ...(r.woundedTokenId !== null ? { wound: 1 } : {}),
+        },
       };
     }
     case "blinkStrike": {
@@ -265,13 +305,26 @@ function takeTurn(
         power: r.power,
         flips,
         sweepSize: 0,
-        usage: { ...turnUsage, corpseExplosion: 1, ...(r.sentHomeIds.length > 0 ? { explosionSendsHome: r.sentHomeIds.length } : {}) },
+        usage: {
+          ...turnUsage,
+          corpseExplosion: 1,
+          ...(r.sentHomeIds.length > 0 ? { explosionSendsHome: r.sentHomeIds.length } : {}),
+          ...(r.woundedTokenIds.length > 0 ? { wound: r.woundedTokenIds.length } : {}),
+        },
       };
     }
     case "exhume": {
       // A return, never an attack: no capture, no sweep — sweepSize stays 0.
       const r = applyExhume(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, exhume: 1 } };
+    }
+    case "heal": {
+      const r = applyHeal(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, heal: 1 } };
+    }
+    case "benediction": {
+      const r = applyBenediction(state, power, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, benediction: 1 } };
     }
   }
 }
@@ -302,6 +355,11 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     corpseDeny: 0,
     thrallExpired: 0,
     exhume: 0,
+    bless: 0,
+    heal: 0,
+    benediction: 0,
+    wound: 0,
+    mend: 0,
   };
   const rand = Math.random;
 
@@ -334,6 +392,12 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.corpseDeny) usage.corpseDeny++;
     if (r.usage.thrallExpired) usage.thrallExpired++;
     if (r.usage.exhume) usage.exhume++;
+    if (r.usage.bless) usage.bless++;
+    if (r.usage.heal) usage.heal++;
+    if (r.usage.benediction) usage.benediction++;
+    // Wounds/mends arrive as counts (several can land in one move).
+    usage.wound += r.usage.wound ?? 0;
+    usage.mend += r.usage.mend ?? 0;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -402,6 +466,11 @@ for (const [a, b] of matchups) {
   const avgCorpseDeny = mean(results.map((r) => r.usage.corpseDeny));
   const avgThrallExpired = mean(results.map((r) => r.usage.thrallExpired));
   const avgExhume = mean(results.map((r) => r.usage.exhume));
+  const avgBless = mean(results.map((r) => r.usage.bless));
+  const avgHeal = mean(results.map((r) => r.usage.heal));
+  const avgBenediction = mean(results.map((r) => r.usage.benediction));
+  const avgWound = mean(results.map((r) => r.usage.wound));
+  const avgMend = mean(results.map((r) => r.usage.mend));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
@@ -412,7 +481,9 @@ for (const [a, b] of matchups) {
       `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}` +
       `  revive/g=${avgRevive.toFixed(2)}  explode/g=${avgExplosion.toFixed(3)}  explodeHome/g=${avgExplosionHome.toFixed(3)}` +
       `  thrallKill/g=${avgThrallKill.toFixed(3)}  corpseDeny/g=${avgCorpseDeny.toFixed(3)}` +
-      `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}`,
+      `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
+      `  bless/g=${avgBless.toFixed(2)}  heal/g=${avgHeal.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
+      `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

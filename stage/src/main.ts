@@ -27,10 +27,13 @@ import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
 // branch that reads them is gated accordingly).
 import {
   CHARGE_CAP,
+  BLESS_COST,
+  BLESSING_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   CORPSE_EXPLOSION_COST,
   EXHUME_RETURN_POSITION,
+  HEAL_COST,
   isWarded,
   NECRO_CHARGE_CAP,
   REFLIPS_PER_TURN,
@@ -1218,12 +1221,17 @@ function ensureMkPieces() {
       const geoOf = (name: string) =>
         (gltf.scene.getObjectByName(name) as THREE.Mesh | undefined)?.geometry;
       const loaded: NonNullable<typeof classTokenGeos> = {};
-      for (const cls of ["archer", "mage", "warrior", "necromancer"] as const) {
+      // Per-class tolerance (was all-or-nothing): a class whose sculpt
+      // hasn't shipped in the glb yet simply keeps the classic blossom/star
+      // (applyTokenGeometries' own fallback) instead of dragging every
+      // OTHER class down with it — the seam that lets a new class's rules
+      // ship ahead of (or without) its Blender relief.
+      for (const cls of ["archer", "mage", "warrior", "necromancer", "cleric"] as const) {
         const red = geoOf(`token_${cls}_red`);
         const blue = geoOf(`token_${cls}_blue`);
         if (!red || !blue) {
-          console.error("pieces-mk.glb missing expected meshes", gltf.scene);
-          return; // classic sculpts remain — graceful fallback
+          console.warn(`pieces-mk.glb has no ${cls} sculpt — classic tokens for that class`);
+          continue;
         }
         // Same pivot rule as pieces.glb: local base at y = -0.08.
         for (const geo of [red, blue]) {
@@ -1402,7 +1410,7 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
 // the tiled wood textures, not these).
 // ---------------------------------------------------------------------------
-type StatusKind = "ward" | "bulwark" | "shieldTile" | "thrall" | "soulClaim";
+type StatusKind = "ward" | "bulwark" | "shieldTile" | "thrall" | "soulClaim" | "blessed" | "wounded";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
@@ -1413,6 +1421,11 @@ const STATUS_TINTS: Record<StatusKind, number> = {
   // Soul Claim on a RESERVE stone — the rig loop overrides with the claim
   // owner's temperature; this entry just keeps the map total.
   soulClaim: 0xd94a45,
+  // The cleric's consecrated gold (DOCK_RING_TINTS.cleric) — a live
+  // blessing burns full gold; a wounded stone's broken light is the same
+  // gold ashed down, so the pair reads as one story at a glance.
+  blessed: 0xe0b341,
+  wounded: 0x8a7448,
 };
 /** Dashed rune-ring, drawn white so the material color carries the class —
  *  deliberately a different visual language from the solid "movable" ring. */
@@ -1632,9 +1645,11 @@ function updateTokenTints(state: GameState) {
         bulwarkSaves: {},
         // Real possession state, not a stub: isWarded consults it (a
         // possessed token is never warded), and the thrall tint below
-        // reads it too.
+        // reads it too. Vitality likewise real — the blessed/wounded
+        // branches below key off it.
         corpse: currentPower.corpse ?? { p1: null, p2: null },
         thrall: currentPower.thrall ?? { p1: null, p2: null },
+        vitality: currentPower.vitality ?? {},
       }
     : null;
   // Which token (if any) is currently a thrall — possession outranks every
@@ -1685,6 +1700,14 @@ function updateTokenTints(state: GameState) {
       kind = "bulwark";
       mat.emissive.setHex(0x2f6bff); // warrior blue — Bulwark is his cast
       mat.emissiveIntensity = 0.5;
+    } else if (currentPower?.vitality?.[token.id] === "blessed" && token.position >= 0) {
+      kind = "blessed";
+      mat.emissive.setHex(0xe0b341); // consecrated gold — the second life burns
+      mat.emissiveIntensity = 0.45;
+    } else if (currentPower?.vitality?.[token.id] === "wounded" && token.position >= 0) {
+      kind = "wounded";
+      mat.emissive.setHex(0x8a7448); // ashed gold — the blessing broke, the scar shows
+      mat.emissiveIntensity = 0.3;
     } else {
       if (
         currentPower &&
@@ -1844,6 +1867,15 @@ let currentPower: {
   bulwarkTurns?: Record<number, number>;
   bulwarkSavesLeft?: Record<number, number>;
   shieldStreak?: Record<PlayerId, number>;
+  /** Cleric (2026-07-21): Bless/Heal target pools for the CURRENT player
+   *  (affordability baked in server-side — empty = not castable),
+   *  Benediction's would-change pool (ultimateReady-gated), and every
+   *  token's blessed/wounded state (public table-state — the gold rings
+   *  both seats see). */
+  blessTargets?: number[];
+  healTargets?: number[];
+  benedictionTargets?: number[];
+  vitality?: Record<number, "blessed" | "wounded">;
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -1864,7 +1896,9 @@ type ArmedKind =
   | "warpath"
   | "bulwark"
   | "bulwarkReinforced"
-  | "charge";
+  | "charge"
+  | "bless"
+  | "heal";
 let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
  *  sweep-capable move of the current roll (rebuilt by updateDock). The
@@ -2042,6 +2076,30 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "necromancer",
     desc: `Death honors no finish line: drag one of the opponent's ESCAPED stones back aboard at tile ${EXHUME_RETURN_POSITION + 1} — if that tile is taken it settles on the nearest free one behind — and it must sail the home stretch again. The one power that can undo an escape.`,
   },
+  bless: {
+    name: "Bless",
+    cost: `${BLESS_COST} mana · keeps your turn`,
+    klass: "cleric",
+    desc: `A quick prayer over one of your stones: it gains a second life. The first blow that would kill it only WOUNDS it — the stone survives, the attacker gets nothing for the strike, and if they landed on its tile it staggers back to the nearest open water. Your turn continues: bless, then still make your move.`,
+  },
+  heal: {
+    name: "Heal",
+    cost: `${HEAL_COST} mana`,
+    klass: "cleric",
+    desc: "Lay hands on a WOUNDED stone and restore its blessing — ready to turn the next killing blow again. Mending takes your whole turn: a broken blessing is a real setback, not a free bounce-back.",
+  },
+  benediction: {
+    name: "Benediction",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "cleric",
+    desc: "Bless your entire army on the board at once — every unblessed and wounded stone rises under the light together. The prayer takes the turn; the protection stays until broken.",
+  },
+  sanctifiedGround: {
+    name: "Sanctified Ground",
+    cost: "Passive · always on",
+    klass: "cleric",
+    desc: "The shield tiles are holy ground to you: every time one of your stones lands on one, ALL your wounded stones are mended back to blessed — on top of the extra turn and mana every shield landing already grants.",
+  },
   // Passive — no dock slot (same rule as the Archer's Snipe), so nothing
   // opens this card yet; the entry keeps the tooltip copy in the one place
   // every ability's copy lives, ready for the guide/plate surfaces.
@@ -2147,6 +2205,10 @@ const DOCK_COST: Record<string, number> = {
   ward: 0,
   wardBreaker: 0,
   soulHarvest: 0,
+  bless: BLESS_COST,
+  heal: HEAL_COST,
+  benediction: 0,
+  sanctifiedGround: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
 const DOCK_NAMES: Record<string, string> = {
@@ -2166,6 +2228,10 @@ const DOCK_NAMES: Record<string, string> = {
   ward: "Ward",
   wardBreaker: "Ward Breaker",
   soulHarvest: "Soul Harvest",
+  bless: "Bless",
+  heal: "Heal",
+  benediction: "Benediction",
+  sanctifiedGround: "Sanctified",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
  *  so the goal is visible from turn one. Archer's ult (Rain of Arrows) is
@@ -2201,6 +2267,12 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "revive" },
     { ability: "exhume", ult: true },
   ],
+  cleric: [
+    { ability: "sanctifiedGround", passive: true },
+    { ability: "bless" },
+    { ability: "heal" },
+    { ability: "benediction", ult: true },
+  ],
 };
 /** Ground-ring tint while targeting — the caster's class color (the ring
  *  texture is drawn white so this is a plain material recolor, see tick()). */
@@ -2212,6 +2284,10 @@ const DOCK_RING_TINTS: Record<PlayerClass, number> = {
   // and skull token lead; the ash-violet placeholder retired with it). Must
   // stay in lockstep with index.html's data-class="necromancer" blocks.
   necromancer: 0xd94a45,
+  // Consecrated gold — the cleric's whole visual language (blessing rings,
+  // wounded scars, dock gems). Lockstep with index.html's
+  // data-class="cleric" blocks, same rule as the necromancer's.
+  cleric: 0xe0b341,
 };
 /** What the ribbon asks the player to do, per armed ability. */
 const RIBBON_COPY: Record<ArmedKind, string> = {
@@ -2222,6 +2298,8 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   bulwarkReinforced: "tap one of your stones",
   blinkStrike: "tap an enemy to strike",
   warpath: "tap an enemy to end on",
+  bless: "tap one of your stones to bless",
+  heal: "tap a wounded stone to mend",
 };
 
 /** Class the dock is currently built for — rebuild only on change. */
@@ -2331,6 +2409,21 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
       if ((p.exhumeTargets ?? []).length === 0) return { state: "noafford", reason: "No escaped enemies to drag back" };
       return { state: "ready" };
+    case "bless": {
+      if ((p.blessTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < BLESS_COST) return { state: "noafford", reason: needCharges(BLESS_COST) };
+      return { state: "noafford", reason: "No stones to bless" };
+    }
+    case "heal": {
+      if ((p.healTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < HEAL_COST) return { state: "noafford", reason: needCharges(HEAL_COST) };
+      return { state: "noafford", reason: "No wounded stones" };
+    }
+    case "benediction":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.benedictionTargets ?? []).length === 0)
+        return { state: "noafford", reason: "Your army is already blessed" };
+      return { state: "ready" };
   }
   return { state: "noafford" };
 }
@@ -2386,6 +2479,10 @@ function updateDock(active?: boolean) {
     JSON.stringify(p.corpse ?? null),
     JSON.stringify(p.thrall ?? null),
     (p.exhumeTargets ?? []).join(),
+    (p.blessTargets ?? []).join(),
+    (p.healTargets ?? []).join(),
+    (p.benedictionTargets ?? []).join(),
+    JSON.stringify(p.vitality ?? null),
     [...chargeMoveIndexByToken.keys()].join(),
   ].join("|");
   if (key !== dockKey) {
@@ -2448,7 +2545,11 @@ function armAbility(kind: ArmedKind) {
             ? p.warpathTargets
             : kind === "charge"
               ? [...chargeMoveIndexByToken.keys()]
-              : p.bulwarkTargets, // bulwark / bulwarkReinforced
+              : kind === "bless"
+                ? (p.blessTargets ?? [])
+                : kind === "heal"
+                  ? (p.healTargets ?? [])
+                  : p.bulwarkTargets, // bulwark / bulwarkReinforced
   );
   if (ids.size === 0) return;
   armed = { kind, targetIds: ids };
@@ -2503,6 +2604,12 @@ function fireArmed(tokenId: number) {
       if (moveIndex !== undefined) sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
       break;
     }
+    case "bless":
+      sendToServer({ type: "usePower", action: { kind: "bless", targetTokenId: tokenId } });
+      break;
+    case "heal":
+      sendToServer({ type: "usePower", action: { kind: "heal", targetTokenId: tokenId } });
+      break;
   }
   flashDockButton(kind, "fired");
 }
@@ -2616,6 +2723,14 @@ dockEl.addEventListener("click", (e) => {
   if (ability === "corpseExplosion") {
     // Instant: the marked corpse is the epicenter — nothing to aim.
     sendToServer({ type: "usePower", action: { kind: "corpseExplosion" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "benediction") {
+    // Instant, Revive's precedent: the pool is "your whole unblessed
+    // on-board army" — a board tap would be a choice carrying no
+    // information. The server re-validates against the shared oracle.
+    sendToServer({ type: "usePower", action: { kind: "benediction" } });
     flashDockButton(ability, "fired");
     return;
   }
@@ -2781,6 +2896,20 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         cost: "safe ground",
         klass: "warrior",
         desc: "A stone standing here cannot be captured, and LANDING here grants an extra turn plus a mana. Chain three shield landings in a row to awaken your ultimate.",
+      };
+    case "blessed":
+      return {
+        name: "Blessed",
+        cost: "a second life · until broken",
+        klass: "cleric",
+        desc: "This stone carries the Cleric's blessing: the first blow that would kill it only WOUNDS it — the stone survives (staggering back if the attacker needs its tile), and the attacker earns just one mana for breaking the light. A blessed stone's own strikes carry the light through the Mage's Ward. Ultimates still kill it outright.",
+      };
+    case "wounded":
+      return {
+        name: "Wounded",
+        cost: "the blessing is broken",
+        klass: "cleric",
+        desc: "This stone's blessing broke absorbing a killing blow. It fights on with one life like any mortal stone — until the Cleric spends a turn to Heal it, mends it by landing on a shield tile, or blesses the army anew with Benediction.",
       };
   }
   return null;
@@ -3358,6 +3487,11 @@ function announceFromState(msg: {
   lastCorpseDenied?: { tokenId: number } | null;
   lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
+  lastBless?: { tokenId: number } | null;
+  lastHeal?: { tokenId: number } | null;
+  lastBenediction?: { tokenIds: number[] } | null;
+  lastWound?: { tokenIds: number[] } | null;
+  lastMend?: { tokenIds: number[] } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -3422,6 +3556,30 @@ function announceFromState(msg: {
     showProc("necromancer", "Corpse Explosion!", "corpseExplosion");
   }
 
+  // Cleric procs that share commits with the ongoing turn. Bless keeps the
+  // turn (Re-flip's contract), so — like Reroll — it's a proc, not a
+  // returning announcement: the real move follows on the same flip. The
+  // caster is the blessed stone's owner (Bless only ever targets own
+  // stones), NOT lastMovePlayer, which a turn-keeping commit leaves at its
+  // previous value.
+  if (msg.lastBless) {
+    const owner = msg.state.tokens.find((t) => t.id === msg.lastBless!.tokenId)?.owner;
+    if (classOf(owner) === "cleric") showProc("cleric", "Bless!", "bless");
+  }
+  // A blessing BROKE this commit — the stone survived a killing blow. The
+  // proc wears the VICTIM's (cleric's) color; the main move/push/blast
+  // announcement still follows.
+  if (msg.lastWound && msg.lastWound.tokenIds.length > 0) {
+    const owner = msg.state.tokens.find((t) => t.id === msg.lastWound!.tokenIds[0])?.owner;
+    if (classOf(owner) === "cleric") showProc("cleric", "Blessing Breaks!", "wound");
+  }
+  // Sanctified Ground fired on a shield landing — mends ride the landing's
+  // own commit and announcement.
+  if (msg.lastMend && msg.lastMend.tokenIds.length > 0) {
+    const owner = msg.state.tokens.find((t) => t.id === msg.lastMend!.tokenIds[0])?.owner;
+    if (classOf(owner) === "cleric") showProc("cleric", "Sanctified Ground", "sanctifiedGround");
+  }
+
   // Bulwark actually blocking a capture is its own signal, independent of
   // lastMovePlayer (it fires the instant a fresh flip reveals the block —
   // see master-killer.ts's tickBulwarkForNewTurn — which can be before the
@@ -3465,6 +3623,32 @@ function announceFromState(msg: {
         `${struck} stone${struck === 1 ? "" : "s"} blasted${home > 0 ? `, ${home} sent home` : ""}` +
         `${chargeFor(msg.lastMovePlayer)}`,
       "shield",
+    );
+    return;
+  }
+
+  // Heal ends the turn (a whole turn spent mending), so it announces and
+  // returns like its Bulwark sibling; Benediction is an ultimate resolving.
+  if (msg.lastHeal && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const target = isMe ? "your" : "their";
+    if (classOf(msg.lastMovePlayer) === "cleric") showProc("cleric", "Healed", "heal");
+    showAnnouncement(
+      `${subject} healed ${target} wounded stone — the blessing burns again${chargeFor(msg.lastMovePlayer)}`,
+      "shield",
+    );
+    return;
+  }
+  if (msg.lastBenediction && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const target = isMe ? "your" : "their";
+    const n = msg.lastBenediction.tokenIds.length;
+    if (classOf(msg.lastMovePlayer) === "cleric") showProc("cleric", "Benediction!", "benediction");
+    showAnnouncement(
+      `${subject} sang the Benediction — ${n} of ${target} stone${n === 1 ? "" : "s"} blessed at once!`,
+      "ultimate",
     );
     return;
   }
@@ -3982,6 +4166,12 @@ function actorOf(ev: StateEvent): PlayerId {
     if (o) return o === "p1" ? "p2" : "p1";
   }
   if (ev.lastReflip) return ev.lastReflip.player;
+  // Bless keeps the turn too (same stale-lastMovePlayer contract as
+  // Revive) — the caster IS the blessed stone's owner (own-stone target).
+  if (ev.lastBless) {
+    const o = ev.state.tokens.find((t) => t.id === ev.lastBless!.tokenId)?.owner;
+    if (o) return o;
+  }
   return ev.lastMovePlayer ?? ev.state.currentPlayer;
 }
 
@@ -3995,9 +4185,12 @@ function summarizeEvent(ev: StateEvent): string {
   if (ev.lastRevive) return `Revive — thrall rises on ${tileDisplay(ev.lastRevive.tile)}`;
   if (ev.lastCorpseExplosion) return `Corpse Explosion on ${tileDisplay(ev.lastCorpseExplosion.tile)}`;
   if (ev.lastChargeSweep) return `Charge — sweep of ${ev.lastChargeSweep.sweptTokenIds.length}`;
+  if (ev.lastBenediction) return `Benediction — ${ev.lastBenediction.tokenIds.length} blessed`;
   if (ev.lastPush) return "Push";
   if (ev.lastChargedShot) return "Charged Shot";
   if (ev.lastBulwark) return ev.lastBulwark.reinforced ? "Reinforced Bulwark cast" : "Bulwark cast";
+  if (ev.lastBless) return "Bless — turn continues";
+  if (ev.lastHeal) return "Heal";
   if (ev.lastReflip) return "Re-flip";
   if (ev.lastMove) {
     const m = ev.lastMove;
@@ -4062,6 +4255,20 @@ function describeEffects(i: number): string[] {
     );
   if (ev.lastCorpseDenied)
     fx.push(`<b>Soul reclaimed</b>: ${ownedLabel(ev.lastCorpseDenied.tokenId)} re-entered — the Revive is denied`);
+  if (ev.lastBless)
+    fx.push(`<b>Bless</b>: ${ownedLabel(ev.lastBless.tokenId)} gains a second life — turn continues`);
+  if (ev.lastHeal) fx.push(`<b>Heal</b>: ${ownedLabel(ev.lastHeal.tokenId)} mended — the blessing burns again`);
+  if (ev.lastBenediction)
+    fx.push(
+      `<b>Benediction</b>: blessed ${ev.lastBenediction.tokenIds.map((id) => ownedLabel(id)).join(", ") || "no one"}`,
+    );
+  if (ev.lastWound)
+    for (const id of ev.lastWound.tokenIds)
+      fx.push(`<b>Blessing breaks</b>: ${ownedLabel(id)} survives the killing blow — wounded, not captured`);
+  if (ev.lastMend)
+    fx.push(
+      `<b>Sanctified Ground</b>: shield landing mends ${ev.lastMend.tokenIds.map((id) => ownedLabel(id)).join(", ")}`,
+    );
   if (ev.lastPush) fx.push(`<b>Push</b>: ${ownedLabel(ev.lastPush.targetTokenId)} knocked back`);
   if (ev.lastChargedShot) fx.push(`<b>Charged Shot</b>: ${ownedLabel(ev.lastChargedShot.targetTokenId)} struck`);
   if (ev.lastChargeSweep)
@@ -4836,6 +5043,7 @@ const GUIDE_SPREADS: [string, string][] = [
        <li data-goto="5"><span>The Mage</span><i></i><b>V</b></li>
        <li data-goto="6"><span>The Warrior</span><i></i><b>VI</b></li>
        <li data-goto="7"><span>The Necromancer</span><i></i><b>VII</b></li>
+       <li data-goto="8"><span>The Cleric</span><i></i><b>VIII</b></li>
      </ol>`,
     `<h2>How to Read This Book</h2>
      <p>Tap any entry in the contents to open its chapter directly.</p>
@@ -4902,10 +5110,10 @@ const GUIDE_SPREADS: [string, string][] = [
      picks a <span class="gold">class</span> before the flip-off and plays
      the whole match armed with its powers.</p>
      <p>Every capture, every zero you roll, and every shield tile you land on
-     fills your <span class="gold">charge</span> — up to two banked at once.
-     Spend a charge to fire your class's active power, offered as a button
+     fills your <span class="gold">mana</span> — up to two banked at once.
+     Spend mana to fire your class's active power, offered as a button
      beside your coins whenever you can afford it.</p>`,
-    `<div class="runner">Master Killer &middot; the four classes</div>
+    `<div class="runner">Master Killer &middot; the five classes</div>
      <ul>
        <li><b>The Archer</b> strikes from range — free Snipes on the water,
        Pushes and the heavy Charged Shot to knock enemies home.</li>
@@ -4915,6 +5123,8 @@ const GUIDE_SPREADS: [string, string][] = [
        sweeps the lane with Charge, shelters behind Bulwark.</li>
        <li><b>The Necromancer</b> profits from every loss — banks a soul for
        each stone sent home and raises the dead back onto the board.</li>
+       <li><b>The Cleric</b> refuses the trade — blesses stones with a
+       second life, so the first killing blow only wounds them.</li>
      </ul>
      <p>Each class keeps its own chapter in this book — and each hides an
      <span class="gold">ultimate</span>, earned by landing on shield tiles
@@ -5039,6 +5249,38 @@ const GUIDE_SPREADS: [string, string][] = [
        to sail the home stretch all over again. The one power in the game
        that can undo an escape.</li>
      </ul>`,
+  ],
+  [
+    `<h2>The Cleric</h2>
+     <ul>
+       <li><b>Bless</b> (active, ${BLESS_COST} mana, keeps your turn): a
+       quick prayer grants one of your stones a SECOND LIFE. The first
+       blow that would kill it only <span class="gold">wounds</span> it —
+       the stone survives, staggering back only if the attacker needs its
+       tile, and the attacker earns just one mana for breaking the light.
+       Bless, then still make your move.</li>
+       <li>The light shelters <span class="gold">${BLESSING_CAP} at a
+       time</span> — one stone always stands outside it. Ultimates kill
+       straight through a blessing, and a blessed stone's own strikes
+       carry the light through the Mage's Ward.</li>
+       <li><b>Heal</b> (active, ${HEAL_COST} mana): lay hands on a wounded
+       stone and its blessing burns again. Mending takes your whole turn —
+       a broken blessing is a real setback, not a free bounce-back.</li>
+     </ul>`,
+    `<div class="runner">The Cleric &middot; continued</div>
+     <ul>
+       <li><b>Sanctified Ground</b> (passive, free): the shield tiles are
+       holy ground to you. Land on one and ALL your wounded stones are
+       mended back to blessed — on top of the extra turn and mana every
+       shield landing already grants.</li>
+       <li><b>Benediction</b> (active, spends your ultimate): land on a
+       shield tile three times running, then bless your ENTIRE on-board
+       army at once — every unblessed and wounded stone rises under the
+       light together, beyond the usual shelter of ${BLESSING_CAP}.</li>
+     </ul>
+     <p>The Cleric wins by refusing to lose stones: each blessing costs the
+     enemy a full extra blow, and the army that keeps its crew keeps the
+     race.</p>`,
   ],
 ];
 
@@ -5199,6 +5441,21 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // player-facing tavern voice, telling people what to LOOK FOR, not a diff.
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-07-21-the-light-arrives",
+    date: "July 21, 2026",
+    title: "The Light Arrives",
+    items: [
+      "<b>A fifth captain takes the table: the CLERIC.</b> Pick the gold seal at the class table and refuse to trade stones at all.",
+      "<b>Bless</b> (2 mana, and it KEEPS your turn): a quick prayer gives one of your stones a <b>second life</b>. The first blow that would kill it only <b>wounds</b> it — the stone survives and the attacker walks away with one mana for their trouble. Speak the prayer, then still make your move.",
+      "<b>The light shelters three at a time.</b> One stone always stands outside it — choose well. Ultimates kill straight through a blessing, so mind the shield-streak chasers.",
+      "<b>Heal</b> (2 mana): lay hands on a wounded stone and its blessing burns again. Mending takes the whole turn — a broken blessing is a real setback.",
+      "<b>Sanctified Ground</b> (passive): shield tiles are holy ground — land on one and ALL your wounded stones mend at once.",
+      "<b>Benediction</b> (ultimate): three shield landings in a row, then bless your entire on-board army in one breath.",
+      "<b>The blessed blade:</b> a blessed stone's own strikes carry the light straight through the Mage's Ward.",
+      "<b>Gold rings on the water:</b> a blessed stone wears a slow gold halo; a wounded one wears it ashen and dim. Tap either for the full story, as always.",
+    ],
+  },
   {
     id: "2026-07-20-dead-fight-back",
     date: "July 20, 2026",
@@ -5474,6 +5731,16 @@ function tick() {
       rig.ring.rotation.z = 0;
       rig.ringMat.opacity = 0.62 + 0.16 * Math.sin(now * 0.0016 + i);
       rig.ring.scale.setScalar(mark.kind === "soulClaim" ? 0.8 : 1.02);
+    } else if (mark.kind === "blessed" || mark.kind === "wounded") {
+      // The blessing is a steady halo: a slow, calm turn while whole;
+      // ashen, near-still and smaller once broken — the pair reads as one
+      // story dimming.
+      const whole = mark.kind === "blessed";
+      rig.ring.rotation.z = now * (whole ? 0.00025 : 0.0001) + i * 1.3;
+      rig.ringMat.opacity = whole
+        ? 0.5 + 0.18 * Math.sin(now * 0.0018 + i)
+        : 0.26 + 0.08 * Math.sin(now * 0.0012 + i);
+      rig.ring.scale.setScalar(whole ? 1 : 0.92);
     } else {
       // Ward spins with intent; Bulwark turns slow and heavy.
       rig.ring.rotation.z = now * (mark.kind === "bulwark" ? 0.00035 : 0.0009) + i * 1.3;
@@ -5626,7 +5893,7 @@ setInterval(() => {
 const dockDemoParam =
   location.hostname === "localhost" ? new URLSearchParams(location.search).get("dockdemo") : null;
 if (dockDemoParam !== null) {
-  const cls: PlayerClass = ["archer", "mage", "warrior", "necromancer"].includes(dockDemoParam)
+  const cls: PlayerClass = ["archer", "mage", "warrior", "necromancer", "cleric"].includes(dockDemoParam)
     ? (dockDemoParam as PlayerClass)
     : "warrior";
   menuEl.classList.remove("show");

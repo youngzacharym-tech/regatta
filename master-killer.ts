@@ -444,11 +444,77 @@ export const CORPSE_EXPLOSION_RADIUS = 1;
  *  is unchanged. Same verdict: keep 11.) */
 export const EXHUME_RETURN_POSITION = 11;
 
+/** Cleric's Bless (added 2026-07-21, Kasen's spec: "increase maximum hp to
+ *  2 and heal them"): spends this much to grant one of the cleric's own
+ *  stones the BLESSING — a second life. The first capture that would kill a
+ *  blessed stone breaks the blessing instead: the stone is WOUNDED, stays
+ *  on the board (staggering back to the nearest open tile only when the
+ *  killer physically needs its tile — see resolveTurn's wound resolution),
+ *  and the attacker gets nothing: no capture charge, no soul bounty, no
+ *  corpse (a blessed stone can NEVER become a necromancer's corpse — only
+ *  a full kill marks one). FIRST PRICED at the full bank (CHARGE_CAP, the
+ *  Charged Shot / Reinforced Bulwark full-spend pattern) — the first
+ *  balance run confirmed the predicted undershoot HARD (defense doesn't
+ *  win races here, the old necromancer attrition kit's exact fate):
+ *  72.7/27.3 archer, 79.5/20.5 mage, 59.1/40.9 warrior, 60.3/39.7 necro
+ *  at 1500/matchup, with bless/g a starved 0.6-1.2 outside the mirror
+ *  (full bank + threat-gated bot = the cast barely ever fires).
+ *  TUNING TRACE (1200/matchup each step) — this constant and the
+ *  turn-keeping contract were found TOGETHER, neither works alone:
+ *  - cost 1, turn-ending: 72.9/75.7 AGAINST (price wasn't the bottleneck,
+ *    tempo was — a whole turn per cast vs classes that spend none).
+ *  - cost 1, Bless+Heal both turn-keeping: 81-90 FOR (blessings became
+ *    free to maintain — heal/g 4+, permanent immortality).
+ *  - cost 1, Bless keeps / Heal ends: still 78-85 FOR — 1 slow-income
+ *    mana per permanent second life is simply underpriced.
+ *  - cost 2 (the full bank), Bless keeps / Heal ends: the shipped combo —
+ *    every blessing empties the bank the class fills only slowly, so
+ *    uptime is income-bound and the attacker's break sticks. */
+export const BLESS_COST = 2;
+
+/** How many of the cleric's stones may carry a live blessing AT ONCE —
+ *  Bless's AND Heal's pools both empty while the count is met (only
+ *  "blessed" entries count; wounded ones don't), and only Benediction,
+ *  the ultimate, may exceed it. Added after HEAL_COST=2 still left the
+ *  two burst-less classes outside the bar (archer 71.6, necro 74.3
+ *  cleric-favored at 1500/matchup): with no cap the whole army armors up
+ *  over time and single-target removal faces four two-hit stones — a
+ *  grind the cleric's endless zero-flip income always wins. Swept 2 vs 3
+ *  at 1500/matchup: 2 landed archer/warrior/necro inside with huge margin
+ *  (58.3/54.7/53.6 against the cleric) but left the mage — whose Ward
+ *  blanks the cleric's offense — at 71.5/28.5 even after the blessed
+ *  blade's pierce; 3 spends that spare margin exactly where it was
+ *  needed: archer 44.1/55.9, mage 63.5/36.5, warrior 45.5/54.5, necro
+ *  41.7/58.3, mirror 50.6 — every cleric matchup inside 35/65 at last.
+ *  One stone always stands outside the light. Teachable in one line:
+ *  "the light shelters three at a time." */
+export const BLESSING_CAP = 3;
+
+/** Cleric's Heal: mend a WOUNDED stone back to blessed. Unlike Bless it
+ *  ENDS the turn (laying on hands takes the whole turn; the quick prayer
+ *  doesn't) — that asymmetry is load-bearing, found by overshooting in
+ *  both directions at 1200/matchup: both casts turn-ending = 72.9-79.5
+ *  AGAINST the cleric (tempo-starved, see BLESS_COST's trace); both casts
+ *  turn-keeping = 86.1-89.6 FOR the cleric vs warrior/necro/archer — the
+ *  wound-then-mend cycle cost the cleric nothing while every enemy
+ *  landing paid nothing, so blessings were effectively permanent
+ *  (heal/g 3.9-4.3, wound/g 6.7-9.0). Making the MEND pay real tempo is
+ *  the dial that makes a broken blessing a real setback the attacker
+ *  earned. PRICE raised 1 -> 2 in the same sweep: at 1 the break-mend
+ *  war stayed cleric-favored against the two classes with no burst
+ *  removal (archer 73.2, necro 75.9 — wound/g 5.6-8.0, the cleric simply
+ *  re-armored per break out of slow but ENDLESS zero-flip income, and
+ *  long grind games compound that income edge). At 2, undoing a break
+ *  costs the full bank AND the turn — the breaker finally wins the
+ *  exchange. Flavor holds: a broken blessing is harder to rekindle than
+ *  a fresh one is to speak. */
+export const HEAL_COST = 2;
+
 // ============================================================================
 // TYPES
 // ============================================================================
 
-export type PlayerClass = "archer" | "mage" | "warrior" | "necromancer";
+export type PlayerClass = "archer" | "mage" | "warrior" | "necromancer" | "cleric";
 
 export interface PowerState {
   classes: Record<PlayerId, PlayerClass>;
@@ -518,6 +584,22 @@ export interface PowerState {
    *  legality/targeting enumeration. At most one thrall per player by
    *  construction (a single slot, and Revive requires it empty). */
   thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Cleric's per-token life state (2026-07-21): token id -> "blessed"
+   *  (carries the second life — the next capture wounds instead of kills)
+   *  or "wounded" (the blessing broke; back to one life, but mendable by
+   *  Heal / the shield-landing passive, and displayed as scarred). Absent =
+   *  mortal, the default for every token in the game. Only ever populated
+   *  for a CLERIC's own tokens (Bless/Heal/Benediction target own stones;
+   *  wound entries are only ever downgraded blessed entries), which keeps
+   *  every cross-class question trivial: a thrall can never be blessed (a
+   *  blessed stone never dies, so it never becomes a corpse — and Bless's
+   *  target pool excludes a stone possessed against the cleric), and
+   *  Ward/Bulwark never stack with it (different classes, own-stones
+   *  only). Entries are cleared on every real kill (clearVitality — the
+   *  same reserve-trip hygiene bulwarked entries get) and ride through an
+   *  escape untouched (an Exhumed returner keeps its blessing: it never
+   *  died, it came home in glory and got dragged back). */
+  vitality: Record<number, "blessed" | "wounded">;
 }
 
 /** Superset of rulebook.Move — same fields, plus power-derived ones. */
@@ -570,7 +652,17 @@ export type PowerAction =
    *  is the epicenter and getCorpseExplosionTargets is the shared oracle
    *  (empty pool = not castable). */
   | { kind: "corpseExplosion" }
-  | { kind: "exhume"; targetTokenId: number };
+  | { kind: "exhume"; targetTokenId: number }
+  /** Cleric's Bless: flag one own stone blessed (see BLESS_COST /
+   *  PowerState.vitality). Targets an OWN token, Bulwark's shape. */
+  | { kind: "bless"; targetTokenId: number }
+  /** Cleric's Heal: mend one own WOUNDED stone back to blessed. */
+  | { kind: "heal"; targetTokenId: number }
+  /** Cleric's Benediction ultimate: no target — blesses the cleric's whole
+   *  on-board army. getBenedictionTargets is the shared oracle (empty pool
+   *  = nothing would change = not castable; a blessing that blesses no one
+   *  is a misclick, not a choice). */
+  | { kind: "benediction" };
 
 // ============================================================================
 // STATE
@@ -587,6 +679,7 @@ export function initialPowerState(): PowerState {
     bulwarkSaves: {},
     corpse: { p1: null, p2: null },
     thrall: { p1: null, p2: null },
+    vitality: {},
   };
 }
 
@@ -804,6 +897,60 @@ function clearThrallIfCaptured(power: PowerState, capturedIds: number[]): PowerS
   return { ...power, thrall };
 }
 
+/** Is this token carrying an unbroken blessing (a second life)? Blessing is
+ *  NOT protection — it never gates targeting or move legality anywhere (a
+ *  blessed stone is a legal capture/Push/Snipe/sweep victim everywhere a
+ *  mortal one is); it changes what the hit RESOLVES to (a wound instead of
+ *  a kill — see resolveTurn). That split is the whole design: Ward answers
+ *  "can I be hit," blessing answers "do I survive it." */
+export function isBlessed(power: PowerState, tokenId: number): boolean {
+  return power.vitality[tokenId] === "blessed";
+}
+
+/** Is this token wounded (its blessing broke and hasn't been mended)? Purely
+ *  Heal's bookkeeping plus display state — a wounded stone plays exactly
+ *  like a mortal one. */
+export function isWounded(power: PowerState, tokenId: number): boolean {
+  return power.vitality[tokenId] === "wounded";
+}
+
+/** Every REAL kill clears the dead token's vitality entry — the same
+ *  reserve-trip hygiene clearCapturedBulwarks applies, and the same
+ *  call-site discipline: any path that sends tokens home for good must run
+ *  this (resolveTurn kills, Push/Charged Shot send-homes, Blink Strike,
+ *  Warpath, Corpse Explosion). In practice only a "wounded" entry can ever
+ *  be cleared here (a blessed stone doesn't die to non-ultimate hits, and
+ *  the ultimate paths that pierce the blessing clear it via this exact
+ *  helper), but the helper doesn't care. No-op (same reference back) when
+ *  nothing captured carried an entry. */
+function clearVitality(power: PowerState, capturedIds: number[]): PowerState {
+  if (!capturedIds.some((id) => power.vitality[id] !== undefined)) return power;
+  const vitality = { ...power.vitality };
+  for (const id of capturedIds) delete vitality[id];
+  return { ...power, vitality };
+}
+
+/** The stagger-back walk for a wounded stone whose tile the killer now
+ *  occupies (landing captures only — Snipe/sweep/knockback wounds leave the
+ *  victim standing, see resolveTurn's wound resolution): the nearest free
+ *  tile BEHIND the victim along its own path, walking past occupied
+ *  squares — applyExhume's collision semantics exactly (same-owner tokens
+ *  collide anywhere, cross-owner only on contested tiles). Guaranteed to
+ *  land at >= 0 by counting: the walk reaches the victim's own private
+ *  entry lane (tiles 0-3, where only its 3 siblings can block 4 squares),
+ *  so a free tile always exists; -1 is a defensive degenerate fallback
+ *  only. */
+function staggerBackTile(tokens: TokenState[], victim: TokenState): number {
+  for (let tile = victim.position - 1; tile >= 0; tile--) {
+    const contested = BOARD_LAYOUT[tile].isContested;
+    const occupied = tokens.some(
+      (t) => t.id !== victim.id && t.position === tile && (t.owner === victim.owner || contested),
+    );
+    if (!occupied) return tile;
+  }
+  return -1;
+}
+
 // ============================================================================
 // MOVE GENERATION
 //
@@ -925,7 +1072,18 @@ export function getLegalPowerMoves(
         // 70.0/30.0 at 5000 games with Soul Claim + 3-turn thralls
         // already applied). Shield tiles and Bulwark still block it —
         // only the living's magic is beneath its notice.
-        if (cls !== "warrior" && !isThrall) continue; // blocked for everyone else
+        //
+        // THE BLESSED BLADE (cleric, third member of the pierce club): a
+        // BLESSED stone's strike carries the light through the Ward too.
+        // Same structural story as the thrall's: with BLESSING_CAP=2
+        // landing the other three matchups inside the bar, the mage —
+        // whose Ward blanks the cleric's only offense — overshot to
+        // 75.1/24.9 at 1500/matchup; this is the scoped answer (isWarded
+        // is only ever true for a mage's stones, and only a cleric's own
+        // stones can be blessed, so no other matchup can move). A WOUNDED
+        // stone's light is broken — no pierce — and shield tiles and
+        // Bulwark still block everyone.
+        if (cls !== "warrior" && !isThrall && !isBlessed(power, token.id)) continue; // blocked for everyone else
         breaksWard = true; // pierce: legal, captures (client announces the break)
         captures = [enemy.id];
       } else {
@@ -1077,7 +1235,21 @@ function resolveShieldStreak(
 /** Shared plumbing: send a set of token ids to reserve, advance the mover,
  *  grant a charge for a capturing/shield-landing move, hand the turn to
  *  the opponent (or keep it on a shield landing), and reset per-turn flags
- *  for the next flip. */
+ *  for the next flip.
+ *
+ *  THE WOUND SPLIT (Cleric, 2026-07-21): every capture in `allCaptures`
+ *  resolves as either a KILL (reserve, exactly as before) or — when the
+ *  victim carries an unbroken blessing — a WOUND: the blessing breaks
+ *  (vitality -> "wounded"), the stone STAYS ON THE BOARD, and the attacker
+ *  earns nothing for it (no capture charge, no soul bounty, no corpse —
+ *  only a full kill marks one). A wounded stone holds its tile except in
+ *  the one case physics forbids it: the mover's landing tile, where it
+ *  staggers back to the nearest free tile behind it (staggerBackTile —
+ *  Snipe and Charge-sweep victims are never on the landing tile, so they
+ *  always hold). Rain of Arrows is an ULTIMATE and pierces the blessing —
+ *  its pick always kills. Returns the wound list (id + where the stone
+ *  ended up) and the passive-mend list so the server can announce both
+ *  without re-deriving. */
 function resolveTurn(
   state: GameState,
   power: PowerState,
@@ -1088,18 +1260,49 @@ function resolveTurn(
   landsOnShield: boolean,
   causesWin: boolean,
   rand: () => number = Math.random,
-): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
+): {
+  state: GameState;
+  power: PowerState;
+  rainOfArrows: { targetTokenId: number | null } | null;
+  wounded: { tokenId: number; to: number }[];
+  mendedTokenIds: number[];
+} {
   const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
   power = streakResult.power;
   const rainOfArrows = streakResult.rainOfArrows;
-  const finalCaptures =
-    rainOfArrows?.targetTokenId != null ? [...allCaptures, rainOfArrows.targetTokenId] : allCaptures;
 
-  const tokens = state.tokens.map((t) => {
+  // The wound split. Membership is the ONLY fork: everything a blessed
+  // victim would have suffered as a kill it instead survives as a wound.
+  const woundIds = allCaptures.filter((id) => power.vitality[id] === "blessed");
+  const kills = allCaptures.filter((id) => !woundIds.includes(id));
+  // Rain of Arrows pierces the blessing — the pick joins the kill list
+  // unconditionally (its pool already excluded allCaptures).
+  if (rainOfArrows?.targetTokenId != null) kills.push(rainOfArrows.targetTokenId);
+
+  let tokens = state.tokens.map((t) => {
     if (t.id === tokenId) return { ...t, position: to };
-    if (finalCaptures.includes(t.id)) return { ...t, position: -1 };
+    if (kills.includes(t.id)) return { ...t, position: -1 };
     return t;
   });
+
+  // Wounded stones: the landing-tile victim staggers back (the mover now
+  // stands there); everyone else holds their ground. Resolved sequentially
+  // against the working board so a staggered stone blocks the next one's
+  // walk — corpse explosion's exact working-state discipline. Position
+  // comparison is safe as a plain numeric match: captures only ever happen
+  // on contested tiles, where both numberings name the same square.
+  const wounded: { tokenId: number; to: number }[] = [];
+  for (const id of woundIds) {
+    const pre = state.tokens.find((t) => t.id === id)!;
+    if (pre.position === to) {
+      const current = tokens.find((t) => t.id === id)!;
+      const retreat = staggerBackTile(tokens, current);
+      tokens = tokens.map((t) => (t.id === id ? { ...t, position: retreat } : t));
+      wounded.push({ tokenId: id, to: retreat });
+    } else {
+      wounded.push({ tokenId: id, to: pre.position });
+    }
+  }
 
   // A captured token's Bulwark must clear too — Rain of Arrows deliberately
   // ignores isBulwarked (see getRainOfArrowsTargets), so a Bulwarked token
@@ -1107,13 +1310,14 @@ function resolveTurn(
   // survives the trip to reserve and grants free, un-recast protection the
   // instant that token re-enters the board later. (applyBlinkStrike and
   // applyWarpath — the other Bulwark-piercing capture paths — carry the
-  // same cleanup themselves.)
+  // same cleanup themselves.) Kills only: a wounded stone never left the
+  // board (and can't be Bulwarked anyway — different classes' own stones).
   let bulwarked = power.bulwarked;
   let bulwarkSaves = power.bulwarkSaves;
-  if (finalCaptures.some((id) => bulwarked[id] !== undefined)) {
+  if (kills.some((id) => bulwarked[id] !== undefined)) {
     bulwarked = { ...bulwarked };
     bulwarkSaves = { ...bulwarkSaves };
-    for (const id of finalCaptures) {
+    for (const id of kills) {
       delete bulwarked[id];
       delete bulwarkSaves[id]; // reinforced or not, a reserve trip clears it all
     }
@@ -1121,8 +1325,17 @@ function resolveTurn(
 
   let nextPower: PowerState = { ...power, bulwarked, bulwarkSaves };
   // A captured thrall's possession entry falls with it — before income, so
-  // the accounting below reads a settled board.
-  nextPower = clearThrallIfCaptured(nextPower, finalCaptures);
+  // the accounting below reads a settled board. (Kills only by
+  // construction: a thrall can never be blessed — see PowerState.vitality.)
+  nextPower = clearThrallIfCaptured(nextPower, kills);
+  // Vitality bookkeeping: the dead lose their entries, the wounded gain
+  // theirs.
+  nextPower = clearVitality(nextPower, kills);
+  if (woundIds.length > 0) {
+    const vitality = { ...nextPower.vitality };
+    for (const id of woundIds) vitality[id] = "wounded";
+    nextPower = { ...nextPower, vitality };
+  }
 
   // Income + corpse. QUALIFYING kills (real owner = the foe — reclaiming
   // your own possessed body in a necromancer mirror is not a soul) pay a
@@ -1132,10 +1345,21 @@ function resolveTurn(
   // landing capture is its only kill shape and the freshest kill simply
   // overwrites). Everyone else — and a necromancer's non-qualifying
   // reclaim — keeps the classic one-charge-per-qualifying-move economy.
+  // A WOUND pays the attacker the STANDARD capture charge — the blow
+  // landed and broke something real — but never the necromancer's bounty
+  // and never a corpse (those are for kills; a surviving stone has no
+  // grave). This is a tuned line, not a principle drifted into: the first
+  // shipped rule ("wounds pay nothing to anyone") made breaking a
+  // blessing strictly worthless, so opponents rationally stopped
+  // attacking blessed stones — which made every blessed runner a
+  // guaranteed escape and the cleric won 66-81% of everything except the
+  // mage matchup even at BLESS_COST=2 (see that constant's trace). Paying
+  // the breaker restores the attacker's engine while the cleric still
+  // keeps the stone.
   const foe = otherPlayerId(mover);
   const soulKills =
     power.classes[mover] === "necromancer"
-      ? finalCaptures.filter((id) => state.tokens.find((t) => t.id === id)?.owner === foe)
+      ? kills.filter((id) => state.tokens.find((t) => t.id === id)?.owner === foe)
       : [];
   if (soulKills.length > 0) {
     nextPower = grantKillBounty(nextPower, mover, soulKills.length);
@@ -1147,8 +1371,29 @@ function resolveTurn(
     // CHARGE_CAP clamp makes it a no-op whenever the bounty already filled
     // the soul gem — the common case).
     if (landsOnShield) nextPower = addCharge(nextPower, mover);
-  } else if (finalCaptures.length > 0 || landsOnShield) {
+  } else if (kills.length > 0 || woundIds.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
+  }
+
+  // Cleric's Sanctified Ground (passive): the mover's shield-tile landing
+  // mends EVERY wounded stone of theirs back to blessed. Own stones only
+  // (a cleric mirror has two vitality ledgers on the board); the wounds
+  // inflicted THIS resolution always belong to the opponent, so a landing
+  // can never mend what it just broke. Nerf lever if sims blow out: mend
+  // only the landing stone.
+  const mendedTokenIds: number[] = [];
+  if (power.classes[mover] === "cleric" && landsOnShield) {
+    for (const [idStr, v] of Object.entries(nextPower.vitality)) {
+      const id = Number(idStr);
+      if (v === "wounded" && state.tokens.find((t) => t.id === id)?.owner === mover) {
+        mendedTokenIds.push(id);
+      }
+    }
+    if (mendedTokenIds.length > 0) {
+      const vitality = { ...nextPower.vitality };
+      for (const id of mendedTokenIds) vitality[id] = "blessed";
+      nextPower = { ...nextPower, vitality };
+    }
   }
 
   const extraTurn = landsOnShield;
@@ -1159,7 +1404,7 @@ function resolveTurn(
     winner: causesWin ? mover : null,
     extraTurn,
   };
-  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows };
+  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows, wounded, mendedTokenIds };
 }
 
 export function applyPowerMove(
@@ -1168,7 +1413,13 @@ export function applyPowerMove(
   move: PowerMove,
   mover: PlayerId,
   rand: () => number = Math.random,
-): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
+): {
+  state: GameState;
+  power: PowerState;
+  rainOfArrows: { targetTokenId: number | null } | null;
+  wounded: { tokenId: number; to: number }[];
+  mendedTokenIds: number[];
+} {
   const allCaptures = [...move.captures, ...move.bonusCaptures];
   return resolveTurn(
     state,
@@ -1190,7 +1441,13 @@ export function applyCharge(
   move: PowerMove,
   mover: PlayerId,
   rand: () => number = Math.random,
-): { state: GameState; power: PowerState; rainOfArrows: { targetTokenId: number | null } | null } {
+): {
+  state: GameState;
+  power: PowerState;
+  rainOfArrows: { targetTokenId: number | null } | null;
+  wounded: { tokenId: number; to: number }[];
+  mendedTokenIds: number[];
+} {
   const allCaptures = [...move.captures, ...move.bonusCaptures, ...move.chargeSweepCaptures];
   const spent: PowerState = {
     ...power,
@@ -1324,22 +1581,45 @@ export function applyPush(
   power: PowerState,
   targetTokenId: number,
   mover: PlayerId,
-): { state: GameState; power: PowerState } {
+): { state: GameState; power: PowerState; woundedTokenId: number | null } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const cost = pushCost(state, power, target);
   const landing = computePushLanding(state, power, target);
-  const sendsHome = landing === -1; // functionally a capture — refund below
+  // A send-home is functionally a capture — which is exactly what a
+  // BLESSING absorbs (the wound split, see resolveTurn's doc): the blessed
+  // target is wounded and HOLDS ITS GROUND instead of going home — the
+  // whole knockback is eaten, the stone doesn't move at all (there is no
+  // legal tile for it: the landing collided, and "home" is the outcome the
+  // blessing exists to deny). Breaking the blessing still REFUNDS the
+  // charge, same as the send-home would have (resolveTurn's tuned
+  // wounds-pay-the-breaker line: a worthless break made blessed stones
+  // untouchable and the cleric ran the table). A SOFT shove (landing on a
+  // real tile) displaces a blessed target normally, blessing intact: the
+  // second life guards against death, not against being moved.
+  const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
+  const sendsHome = landing === -1 && !woundsInstead; // functionally a capture — refund below
 
-  const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
+  const tokens = woundsInstead
+    ? state.tokens
+    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost },
   };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover,
+    );
+  }
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
     // A pushed-home THRALL dies for real (incl. the below-row crumble in
-    // computeKnockbackLanding) — its possession entry falls with it.
+    // computeKnockbackLanding) — its possession entry falls with it. A
+    // WOUNDED stone's vitality entry dies with it too (reserve-trip
+    // hygiene, same as Bulwark's).
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
@@ -1358,7 +1638,11 @@ export function applyPush(
     winner: null,
     extraTurn: false,
   };
-  return { state: nextState, power: resetTurnFlags(spentPower) };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null,
+  };
 }
 
 /** Archer's Charged Shot: same target pool shape as Push (contested-zone
@@ -1417,20 +1701,33 @@ export function applyChargedShot(
   power: PowerState,
   targetTokenId: number,
   mover: PlayerId,
-): { state: GameState; power: PowerState } {
+): { state: GameState; power: PowerState; woundedTokenId: number | null } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const landing = computeChargedShotLanding(state, power, target);
-  const sendsHome = landing === -1; // functionally a capture — refund below
+  // Same blessing-absorbs-the-send-home rule as applyPush (see its doc),
+  // including the breaker's refund — the shot broke something real.
+  const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
+  const sendsHome = landing === -1 && !woundsInstead; // functionally a capture — refund below
 
-  const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
+  const tokens = woundsInstead
+    ? state.tokens
+    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
   };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover,
+    );
+  }
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
-    // Same thrall-death rule as Push's — see clearThrallIfCaptured.
+    // Same thrall-death rule as Push's — see clearThrallIfCaptured. And
+    // the same vitality reserve-trip hygiene.
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
   const nextState: GameState = {
@@ -1440,7 +1737,11 @@ export function applyChargedShot(
     winner: null,
     extraTurn: false,
   };
-  return { state: nextState, power: resetTurnFlags(spentPower) };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null,
+  };
 }
 
 /** Mage's Re-flip: spends a charge, does NOT end the turn — the caller
@@ -1531,6 +1832,10 @@ export function applyBlinkStrike(
     [targetTokenId],
   );
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
+  // Ultimates PIERCE the blessing — a blessed target dies for real here
+  // (the wound split is resolveTurn's, for mortal weapons), and the dead
+  // token's vitality entry clears with it.
+  nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
     tokens,
@@ -1601,6 +1906,9 @@ export function applyWarpath(
     allCaptures,
   );
   nextPower = clearThrallIfCaptured(nextPower, allCaptures);
+  // Warpath pierces the blessing on everything it touches, primary and
+  // swept alike — full kills, entries cleared (same rule as Blink Strike).
+  nextPower = clearVitality(nextPower, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
     tokens,
@@ -1951,7 +2259,14 @@ export function applyCorpseExplosion(
   state: GameState,
   power: PowerState,
   mover: PlayerId,
-): { state: GameState; power: PowerState; struckTokenIds: number[]; sentHomeIds: number[]; tile: number } {
+): {
+  state: GameState;
+  power: PowerState;
+  struckTokenIds: number[];
+  sentHomeIds: number[];
+  woundedTokenIds: number[];
+  tile: number;
+} {
   const corpse = power.corpse[mover]!;
   const victims = getCorpseExplosionTargets(state, power, mover)
     .map((id) => state.tokens.find((t) => t.id === id)!)
@@ -1959,10 +2274,18 @@ export function applyCorpseExplosion(
 
   let tokens = state.tokens;
   const sentHomeIds: number[] = [];
+  const woundedTokenIds: number[] = [];
   let working: GameState = state;
   for (const victim of victims) {
     const current = working.tokens.find((t) => t.id === victim.id)!;
     const landing = computeKnockbackLanding(working, power, current, 1);
+    if (landing === -1 && isBlessed(power, victim.id)) {
+      // The blessing absorbs the send-home — applyPush's exact rule: the
+      // stone is wounded and holds its ground (it never moves; the soft
+      // 1-tile shove was only ever a side effect of surviving).
+      woundedTokenIds.push(victim.id);
+      continue;
+    }
     if (landing === -1) sentHomeIds.push(victim.id);
     tokens = working.tokens.map((t) => (t.id === victim.id ? { ...t, position: landing } : t));
     working = { ...working, tokens };
@@ -1973,8 +2296,14 @@ export function applyCorpseExplosion(
     charges: { ...power.charges, [mover]: power.charges[mover] - CORPSE_EXPLOSION_COST },
     corpse: { ...power.corpse, [mover]: null },
   };
+  if (woundedTokenIds.length > 0) {
+    const vitality = { ...nextPower.vitality };
+    for (const id of woundedTokenIds) vitality[id] = "wounded";
+    nextPower = { ...nextPower, vitality };
+  }
   nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds); // unreachable while Bulwark blocks the blast, but a reserve trip must never carry protection — same guard as every send-home path
+  nextPower = clearVitality(nextPower, sentHomeIds); // a WOUNDED (unblessed) victim sent home loses its entry — reserve-trip hygiene
   nextPower = breakShieldStreak(nextPower, mover); // never lands the mover on a shield
 
   const nextState: GameState = {
@@ -1989,6 +2318,7 @@ export function applyCorpseExplosion(
     power: resetTurnFlags(nextPower),
     struckTokenIds: victims.map((v) => v.id),
     sentHomeIds,
+    woundedTokenIds,
     tile: corpse.tile,
   };
 }
@@ -2041,6 +2371,168 @@ export function getExhumeTargets(state: GameState, power: PowerState, mover: Pla
   return state.tokens
     .filter((t) => t.owner === foe && t.position >= PATH_LENGTH_PER_PLAYER)
     .map((t) => t.id);
+}
+
+// ============================================================================
+// CLERIC (added 2026-07-21 — Kasen's spec: "increase maximum hp to 2 and
+// heal them"). The class that refuses to trade. Passive: SANCTIFIED GROUND —
+// the cleric's own shield-tile landings mend every wounded stone of theirs
+// back to blessed (resolveTurn). Actives: BLESS (BLESS_COST = the full
+// bank) grants one stone the blessing — a second life; the first capture
+// that would kill it wounds it instead, denies the attacker every scrap of
+// the kill's economy, and at worst staggers the stone back a tile (see
+// resolveTurn's wound split, the one rule threaded through every capture
+// path). HEAL (HEAL_COST) mends a wounded stone back to blessed at a
+// discount. Ultimate: BENEDICTION — bless the whole on-board army at once.
+// Ultimates PIERCE the blessing (Rain of Arrows/Blink Strike/Warpath kill
+// through it); everything mortal wounds. The class's persistent footprint
+// is PowerState.vitality.
+// ============================================================================
+
+/** How many of `mover`'s own stones currently carry a LIVE blessing —
+ *  the BLESSING_CAP gate shared by Bless's and Heal's pools. Wounded
+ *  entries don't count (the light there is broken); ownership is real
+ *  ownership (vitality only ever marks the cleric's own stones, but the
+ *  filter keeps a mirror's two ledgers separate). */
+function liveBlessings(state: GameState, power: PowerState, mover: PlayerId): number {
+  return Object.entries(power.vitality).filter(
+    ([id, v]) => v === "blessed" && state.tokens.find((t) => t.id === Number(id))?.owner === mover,
+  ).length;
+}
+
+/** Cleric's Bless: valid targets are the cleric's own on-board stones with
+ *  no vitality entry at all — not already blessed (nothing to add) and not
+ *  wounded (that's Heal's job; keeping the two pools disjoint keeps the
+ *  dock's two gems unambiguous). Affordability AND the BLESSING_CAP are
+ *  baked in (Charged Shot's precedent — uniform checks, identical for
+ *  every target), so an empty pool is the whole legality answer
+ *  everywhere: server validation, bot, dock gate. Effective ownership: a
+ *  stone possessed against the cleric is not theirs to bless (and
+ *  blessing the enemy's weapon would be absurd — getBulwarkTargets's
+ *  rule). Private-lane stones are eligible, same as Bulwark's pool:
+ *  blessing a stone that can't be attacked is legal-but-wasteful, the
+ *  bot's problem, not the rulebook's. */
+export function getBlessTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < BLESS_COST) return [];
+  if (liveBlessings(state, power, mover) >= BLESSING_CAP) return [];
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => power.vitality[t.id] === undefined)
+    .map((t) => t.id);
+}
+
+/** Cleric's Bless: spends BLESS_COST to flag one own stone blessed. Does
+ *  NOT end the turn — Revive's exact contract: the caller keeps the SAME
+ *  flip and recomputes legal moves (the board itself is untouched — only
+ *  a flag changed — but the recompute keeps the contract uniform), so the
+ *  cleric blesses AND still marches. That turn-keeping is load-bearing
+ *  balance, not a nicety: as a turn-ending cast the class lost 72.9/27.1
+ *  to archer and 75.7/24.3 to mage at 1200/matchup even with BLESS_COST=1
+ *  — a whole turn per cast against classes that spend none was the
+ *  structural hole (the mana price is real; the tempo price was fatal).
+ *  Like Revive: no resetTurnFlags, no streak interaction (a blessing is a
+ *  prayer, not a landing — the streak lives or dies by the move that
+ *  follows), no charge grant, and no affordability self-guard (the caller
+ *  already consulted getBlessTargets). At most CHARGE_CAP casts can fund
+ *  themselves in one turn, so the act-then-redecide loop is bounded by
+ *  the bank exactly like Re-flip's is. */
+export function applyBless(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState } {
+  const spent: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BLESS_COST },
+    vitality: { ...power.vitality, [targetTokenId]: "blessed" },
+  };
+  return { state, power: spent };
+}
+
+/** Cleric's Heal: valid targets are the cleric's own WOUNDED stones —
+ *  vitality bookkeeping guarantees they're on-board (entries clear on
+ *  every kill), but the position filter stays as defensive hygiene.
+ *  Affordability and the BLESSING_CAP baked in, same as Bless (a mend
+ *  re-lights a blessing, so it counts against the same finite light). */
+export function getHealTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < HEAL_COST) return [];
+  if (liveBlessings(state, power, mover) >= BLESSING_CAP) return [];
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => power.vitality[t.id] === "wounded")
+    .map((t) => t.id);
+}
+
+/** Cleric's Heal: mend one wounded stone back to blessed at HEAL_COST.
+ *  ENDS the turn — Bulwark's exact shape (no board movement, never lands
+ *  on a shield, so it breaks any live streak) — deliberately NOT Bless's
+ *  turn-keeping contract: see HEAL_COST's doc for the both-directions
+ *  overshoot trace that pinned the tempo price on the mend, not the
+ *  prayer. */
+export function applyHeal(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState } {
+  const spent: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - HEAL_COST },
+    vitality: { ...power.vitality, [targetTokenId]: "blessed" },
+  };
+  const broken = breakShieldStreak(spent, mover);
+  const nextState: GameState = {
+    tokens: state.tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(broken) };
+}
+
+/** Cleric's Benediction ultimate: the ids the cast would actually CHANGE —
+ *  every own on-board stone that isn't already blessed (mortal and
+ *  wounded alike). Empty pool = not castable (a benediction that blesses
+ *  no one is a misclick, not a choice — Corpse Explosion's precedent).
+ *  ultimateReady gating stays at the dispatch layer, same as Blink
+ *  Strike/Warpath/Exhume. */
+export function getBenedictionTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => power.vitality[t.id] !== "blessed")
+    .map((t) => t.id);
+}
+
+/** Cleric's Benediction: spends the banked ultimateReady flag to bless the
+ *  whole on-board army at once (getBenedictionTargets' pool). Ends the
+ *  turn with no extra-turn interaction and — unlike the charge-spend
+ *  actives — leaves the shield streak alone, exactly matching its Blink
+ *  Strike/Warpath/Exhume siblings. Grants nothing (no capture). Returns
+ *  the blessed ids so the server can announce the cast without
+ *  re-deriving the pool. */
+export function applyBenediction(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; blessedTokenIds: number[] } {
+  const blessedTokenIds = getBenedictionTargets(state, power, mover);
+  const vitality = { ...power.vitality };
+  for (const id of blessedTokenIds) vitality[id] = "blessed";
+  const nextPower: PowerState = {
+    ...power,
+    vitality,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
+  const nextState: GameState = {
+    tokens: state.tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), blessedTokenIds };
 }
 
 /** Necromancer's Exhume: drags the escaped target back to
