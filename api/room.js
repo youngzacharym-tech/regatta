@@ -352,10 +352,11 @@ var EXHUME_RETURN_POSITION = 11;
 var BLESS_COST = 2;
 var BLESSING_CAP = 3;
 var HEAL_COST = 2;
-var ROGUE_STEAL_ON_CAPTURE = 1;
+var ROGUE_STEAL_ON_CAPTURE = 2;
 var PICKPOCKET_COST = 1;
-var PICKPOCKET_STEAL = 1;
-var BACKSTAB_COST = CHARGE_CAP;
+var PICKPOCKET_STEAL = 2;
+var VANISH_COST = 1;
+var VANISH_TURNS = BULWARK_TURNS;
 function initialPowerState() {
   return {
     classes: { p1: "archer", p2: "archer" },
@@ -1216,51 +1217,24 @@ function applyPickpocket(power, mover) {
     }
   };
 }
-function getBackstabTargets(state, power, mover) {
-  if (power.charges[mover] < BACKSTAB_COST) return [];
-  return getRainOfArrowsTargets(state, power, mover).filter((id) => {
-    const t = state.tokens.find((tok) => tok.id === id);
-    return !onShieldTile(t) && !isBulwarked(power, t);
-  });
+function getVanishTargets(state, power, mover) {
+  return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => !isBulwarked(power, t)).map((t) => t.id);
 }
-function applyBackstab(state, power, targetTokenId, mover) {
-  const foe = otherPlayerId(mover);
-  const woundsInstead = isBlessed(power, targetTokenId);
-  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: -1 } : t);
-  let spentPower = {
+function applyVanish(state, power, targetTokenId, mover) {
+  const spent = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST }
+    charges: { ...power.charges, [mover]: power.charges[mover] - VANISH_COST },
+    bulwarked: { ...power.bulwarked, [targetTokenId]: VANISH_TURNS }
   };
-  if (woundsInstead) {
-    spentPower = addCharge(
-      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
-      mover
-    );
-  } else {
-    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
-    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
-    spentPower = clearVitality(spentPower, [targetTokenId]);
-    spentPower = {
-      ...spentPower,
-      charges: {
-        ...spentPower.charges,
-        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE)
-      }
-    };
-  }
-  spentPower = breakShieldStreak(spentPower, mover);
+  const broken = breakShieldStreak(spent, mover);
   const nextState = {
-    tokens,
+    tokens: state.tokens,
     currentPlayer: otherPlayerId(mover),
     lastFlip: null,
     winner: null,
     extraTurn: false
   };
-  return {
-    state: nextState,
-    power: resetTurnFlags(spentPower),
-    woundedTokenId: woundsInstead ? targetTokenId : null
-  };
+  return { state: nextState, power: resetTurnFlags(broken) };
 }
 function getGrandHeistTargets(state, power, mover) {
   if (!findMostAdvancedToken(state, power, mover)) return [];
@@ -1453,13 +1427,6 @@ function scorePickpocket(power, foe, rand) {
   score += rand() * 20;
   return score;
 }
-function scoreBackstab(state, power, targetId, rand) {
-  const target = state.tokens.find((t) => t.id === targetId);
-  const wounds = isBlessed(power, targetId);
-  let score = (wounds ? 260 : 460) + target.position * 10;
-  score += rand() * 20;
-  return score;
-}
 function scoreGrandHeist(state, power, targetId, foe, rand) {
   return scoreUltimateStrike(state, targetId, rand) + power.charges[foe] * 30;
 }
@@ -1618,11 +1585,13 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
         best = { kind: "pickpocket", targetTokenId: targetId };
       }
     }
-    for (const targetId of getBackstabTargets(state, power, mover)) {
-      const score = scoreBackstab(state, power, targetId, rand);
-      if (score > bestScore) {
-        bestScore = score;
-        best = { kind: "backstab", targetTokenId: targetId };
+    if (charges >= VANISH_COST) {
+      for (const targetId of getVanishTargets(state, power, mover)) {
+        const score = scoreBulwark(state, targetId, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "vanish", tokenId: targetId };
+        }
       }
     }
     if (power.ultimateReady[mover]) {
@@ -1691,7 +1660,9 @@ function enumerateCandidates(state, power, moves) {
   }
   if (cls === "rogue") {
     for (const id of getPickpocketTargets(state, power, mover)) out.push({ kind: "pickpocket", targetTokenId: id });
-    for (const id of getBackstabTargets(state, power, mover)) out.push({ kind: "backstab", targetTokenId: id });
+    if (charges >= VANISH_COST) {
+      for (const id of getVanishTargets(state, power, mover)) out.push({ kind: "vanish", tokenId: id });
+    }
     if (power.ultimateReady[mover]) {
       for (const id of getGrandHeistTargets(state, power, mover)) out.push({ kind: "grandHeist", targetTokenId: id });
     }
@@ -1908,8 +1879,8 @@ function mkSimulate(state, power, c, mover) {
       return applyHeal(state, power, c.targetTokenId, mover);
     case "benediction":
       return applyBenediction(state, power, mover);
-    case "backstab":
-      return applyBackstab(state, power, c.targetTokenId, mover);
+    case "vanish":
+      return applyVanish(state, power, c.tokenId, mover);
     case "grandHeist":
       return applyGrandHeist(state, power, c.targetTokenId, mover);
     case "pickpocket":
@@ -2059,7 +2030,7 @@ function publicPower(doc) {
     benedictionTargets: doc.mk.classes[mover] === "cleric" && doc.mk.ultimateReady[mover] ? getBenedictionTargets(doc.state, p, mover) : [],
     vitality: { ...doc.mk.vitality ?? {} },
     pickpocketTargets: doc.mk.classes[mover] === "rogue" ? getPickpocketTargets(doc.state, p, mover) : [],
-    backstabTargets: doc.mk.classes[mover] === "rogue" ? getBackstabTargets(doc.state, p, mover) : [],
+    vanishTargets: doc.mk.classes[mover] === "rogue" && doc.mk.charges[mover] >= VANISH_COST ? getVanishTargets(doc.state, p, mover) : [],
     grandHeistTargets: doc.mk.classes[mover] === "rogue" && doc.mk.ultimateReady[mover] ? getGrandHeistTargets(doc.state, p, mover) : [],
     reflipsUsedThisTurn: p.reflipsUsedThisTurn
   };
@@ -2116,7 +2087,7 @@ function stateEventOf(doc) {
     lastWound: doc.lastWound ?? null,
     lastMend: doc.lastMend ?? null,
     lastPickpocket: doc.lastPickpocket ?? null,
-    lastBackstab: doc.lastBackstab ?? null,
+    lastVanish: doc.lastVanish ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason
@@ -2161,7 +2132,7 @@ function freshMatchFields(variant) {
     lastWound: null,
     lastMend: null,
     lastPickpocket: null,
-    lastBackstab: null,
+    lastVanish: null,
     rescueAttempted: false
   };
 }
@@ -2257,7 +2228,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
-      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced === true) };
+      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, rand, a.reinforced === true) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
@@ -2265,7 +2236,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
       if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
-      if (a.kind === "backstab") return { doc: applyMkSimple(doc, seat, "backstab", a.targetTokenId, now) };
+      if (a.kind === "vanish") return { doc: applyMkSimple(doc, seat, "vanish", a.tokenId, now, rand) };
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
       const move = doc.currentPowerMoves[a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
@@ -2360,10 +2331,10 @@ function validateUsePower(doc, seat, a) {
       if (doc.currentFlip === null) return "No flip yet";
       if (!getPickpocketTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Pickpocket target";
       return null;
-    case "backstab":
-      if (cls !== "rogue") return "Only a Rogue can Backstab";
-      if (doc.mk.charges[seat] < BACKSTAB_COST) return "No charge available";
-      if (!getBackstabTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Backstab target";
+    case "vanish":
+      if (cls !== "rogue") return "Only a Rogue can Vanish";
+      if (doc.mk.charges[seat] < VANISH_COST) return "No charge available";
+      if (!getVanishTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Vanish target";
       return null;
     case "grandHeist":
       if (cls !== "rogue") return "Only a Rogue can Grand Heist";
@@ -2394,7 +2365,7 @@ var CLEAR_SLOTS = {
   lastWound: null,
   lastMend: null,
   lastPickpocket: null,
-  lastBackstab: null,
+  lastVanish: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null
@@ -2450,7 +2421,7 @@ function applyMkCharge(doc, seat, move, now, rand) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
-function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
+function applyMkSimple(doc, seat, kind, tokenId, now, rand = Math.random, reinforced = false) {
   const chargesBefore = doc.mk.charges[seat];
   const power = fromWirePower(doc.mk);
   let r;
@@ -2504,16 +2475,10 @@ function applyMkSimple(doc, seat, kind, tokenId, now, reinforced = false) {
       r = applyHeal(doc.state, power, tokenId, seat);
       slots = { lastHeal: { tokenId } };
       break;
-    case "backstab": {
-      const rr = applyBackstab(doc.state, power, tokenId, seat);
-      r = rr;
-      capsGained = rr.woundedTokenId === null ? 1 : 0;
-      slots = {
-        lastBackstab: { targetTokenId: tokenId },
-        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null
-      };
+    case "vanish":
+      r = applyVanish(doc.state, power, tokenId, seat);
+      slots = { lastVanish: { tokenId } };
       break;
-    }
     case "grandHeist": {
       const heistFoe = seat === "p1" ? "p2" : "p1";
       const foeChargesBefore = power.charges[heistFoe];
@@ -2712,7 +2677,7 @@ function autoSkipDelay(doc) {
     if (doc.mk.classes[mover] === "cleric" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getBlessTargets(doc.state, p, mover).length > 0 || getHealTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
-    if (doc.mk.classes[mover] === "rogue" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getPickpocketTargets(doc.state, p, mover).length > 0 || getBackstabTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0)) {
+    if (doc.mk.classes[mover] === "rogue" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getPickpocketTargets(doc.state, p, mover).length > 0 || doc.mk.charges[mover] >= VANISH_COST && getVanishTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
   }
@@ -2844,7 +2809,7 @@ function applyBotAction(doc, seat, action, now, rand) {
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
-      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
+      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, rand, action.reinforced ?? false);
     case "revive":
       return applyMkRevive(doc, seat, now);
     case "corpseExplosion":
@@ -2859,8 +2824,8 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkBenediction(doc, seat, now);
     case "pickpocket":
       return applyMkPickpocket(doc, seat, action.targetTokenId, now);
-    case "backstab":
-      return applyMkSimple(doc, seat, "backstab", action.targetTokenId, now);
+    case "vanish":
+      return applyMkSimple(doc, seat, "vanish", action.tokenId, now);
     case "grandHeist":
       return applyMkSimple(doc, seat, "grandHeist", action.targetTokenId, now);
   }
