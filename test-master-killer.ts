@@ -10,7 +10,6 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, type TokenState } from "./rulebook.ts";
 import {
-  BACKSTAB_COST,
   BLESS_COST,
   BLESSING_CAP,
   BULWARK_REINFORCED_SAVES,
@@ -35,7 +34,8 @@ import {
   SOUL_BOUNTY_CHARGES,
   THRALL_TURNS,
   ULTIMATE_STREAK,
-  applyBackstab,
+  VANISH_COST,
+  VANISH_TURNS,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -50,13 +50,13 @@ import {
   applyPush,
   applyReflip,
   applyRevive,
+  applyVanish,
   applyWarpath,
   breakShieldStreak,
   canReflipAgain,
   consumeBulwarkBlocks,
   effectiveOwner,
   applyHeal,
-  getBackstabTargets,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
@@ -72,6 +72,7 @@ import {
   getPushTargets,
   getRainOfArrowsTargets,
   getReviveSpawnTile,
+  getVanishTargets,
   getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
@@ -2609,94 +2610,71 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Rogue: Backstab — a guaranteed hit that pierces Ward (by omission, same
-// idiom as Charged Shot) but respects Bulwark and the wound split — only
-// ultimates truly pierce Bulwark/Blessing, and Backstab deliberately isn't one
+// Rogue: Vanish — added 2026-07-22, replacing Backstab's slot entirely (the
+// shield-breaker rework lasted about as long as it took to sim it: a 23-42%
+// win rate everywhere, since the class lost its offensive equalizer and
+// gained too little back). Vanish is Bulwark's EXACT mechanic under a Rogue
+// cast (see VANISH_COST's doc) — it writes into the same power.bulwarked
+// map Warrior's Bulwark uses, so the underlying protection (blocks a plain
+// capture, blocks a Charge sweep, pierced only by ultimates, ticked down by
+// the same tickBulwarkExpiry) is already exhaustively covered by section
+// 14's Bulwark tests above and does NOT need re-proving here — this section
+// only checks Vanish's own target pool, its apply-path economy, and one
+// integration proof that the shared protection really does activate when
+// cast via the Rogue.
 // ---------------------------------------------------------------------------
 {
-  const s = state("p1", { 0: 4, 4: 6 });
-  const pw = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
-  const targets = getBackstabTargets(s, pw, "p1");
-  check("Backstab: reaches a Warded enemy (pierces Ward by omission)", targets.includes(4), JSON.stringify(targets));
-
-  const pwBelow = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP - 1 });
-  check("Backstab: no targets below the full charge cap", getBackstabTargets(s, pwBelow, "p1").length === 0);
-
-  const sShield = state("p1", { 0: 4, 4: 7 });
-  check("Backstab: a target on a shield tile is not a legal target", !getBackstabTargets(sShield, pw, "p1").includes(4));
-
-  const pwBulwarked: PowerState = {
-    ...power({ p1: "rogue", p2: "warrior" }, { p1: CHARGE_CAP }),
-    bulwarked: { 4: 3 },
-  };
-  check(
-    "Backstab: a Bulwarked enemy is NOT a legal target (only ultimates pierce Bulwark)",
-    !getBackstabTargets(s, pwBulwarked, "p1").includes(4),
-  );
-
-  const sPrivate = state("p1", { 0: 4, 4: 1 });
-  check("Backstab: a target outside the contested zone is never legal", getBackstabTargets(sPrivate, pw, "p1").length === 0);
-
-  // --- Apply: a real kill (unwarded, unblessed target) ---
+  // --- Legal targeting (mirrors getBulwarkTargets' own tests) -----------
   {
-    const sKill = state("p1", { 0: 4, 4: 6 });
-    const pwKill = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 1 });
-    const r = applyBackstab(sKill, pwKill, 4, "p1");
-    check("Backstab: kills the target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    const s = state("p1", { 0: 4, 2: PATH_LENGTH_PER_PLAYER, 4: 6 });
+    const pw = power({ p1: "rogue" }, { p1: VANISH_COST });
+    const targets = getVanishTargets(s, pw, "p1");
+    check("Vanish: an on-board own token is a legal target", targets.includes(0), JSON.stringify(targets));
+    check("Vanish: a reserve own token is not a legal target", !targets.includes(1), JSON.stringify(targets));
+    check("Vanish: an escaped own token is not a legal target", !targets.includes(2), JSON.stringify(targets));
+    check("Vanish: an enemy token is never a legal target", !targets.includes(4), JSON.stringify(targets));
+
+    const pwVanished: PowerState = { ...pw, bulwarked: { 0: 2 } };
     check(
-      "Backstab: does NOT refund on a real kill (unlike Push/Charged Shot's conditional send-home)",
-      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST,
+      "Vanish: an already-protected token is excluded from re-targeting",
+      !getVanishTargets(s, pwVanished, "p1").includes(0),
+    );
+  }
+
+  // --- Apply: economy + flagging (mirrors applyBulwark's own tests) -----
+  {
+    const s = state("p1", { 0: 4 });
+    const pw = power({ p1: "rogue" }, { p1: CHARGE_CAP });
+    const r = applyVanish(s, pw, 0, "p1");
+    check(
+      `Vanish: spends exactly VANISH_COST (${VANISH_COST})`,
+      r.power.charges.p1 === CHARGE_CAP - VANISH_COST,
       `got ${r.power.charges.p1}`,
     );
     check(
-      `Backstab: Larceny drains ROGUE_STEAL_ON_CAPTURE (${ROGUE_STEAL_ON_CAPTURE}) from the victim on a real kill`,
-      r.power.charges.p2 === 1 - ROGUE_STEAL_ON_CAPTURE,
-      `got ${r.power.charges.p2}`,
+      "Vanish: flags the target with VANISH_TURNS remaining",
+      r.power.bulwarked[0] === VANISH_TURNS,
+      `got ${JSON.stringify(r.power.bulwarked)}`,
     );
-    check("Backstab: reports no wound", r.woundedTokenId === null);
-    check("Backstab: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+    check("Vanish: no board movement at all", r.state.tokens.find((t) => t.id === 0)!.position === 4);
+    check("Vanish: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+    check("Vanish: breaks a live shield streak (never lands the mover on one)", (() => {
+      const base = power({ p1: "rogue" }, { p1: CHARGE_CAP });
+      const pwStreak: PowerState = { ...base, shieldStreak: { ...base.shieldStreak, p1: 2 } };
+      return applyVanish(s, pwStreak, 0, "p1").power.shieldStreak.p1 === 0;
+    })());
   }
 
-  // --- Apply: pierces Ward for the real kill ---
+  // --- Integration proof: a Vanished stone actually blocks a capture,
+  //     same as isBulwarked already guarantees for the Warrior's own cast —
+  //     this is the one place worth re-proving the reuse actually wired up
+  //     correctly rather than just trusting the shared field name. ---
   {
-    const sWard = state("p1", { 0: 4, 4: 6 });
-    const pwWard = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
-    check(
-      "Backstab: sanity — the target really is warded",
-      isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!),
-    );
-    const r = applyBackstab(sWard, pwWard, 4, "p1");
-    check("Backstab: kills a Warded target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
-  }
-
-  // --- Apply: a wound (blessed target) — survives, still refunds, but NO
-  //     Larceny drain (wounds pay the standard charge and nothing else) ---
-  {
-    const sWound = state("p1", { 0: 4, 4: 6 });
-    const pwWound: PowerState = {
-      ...power({ p1: "rogue", p2: "cleric" }, { p1: CHARGE_CAP, p2: 1 }),
-      vitality: { 4: "blessed" },
-    };
-    const r = applyBackstab(sWound, pwWound, 4, "p1");
-    check("Backstab: a Blessed target survives as a WOUND, not a kill", r.state.tokens.find((t) => t.id === 4)!.position === 6);
-    check("Backstab: the blessing breaks (vitality -> wounded)", r.power.vitality[4] === "wounded");
-    check(
-      "Backstab: still refunds 1 charge on a wound",
-      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST + 1,
-      `got ${r.power.charges.p1}`,
-    );
-    check("Backstab: Larceny does NOT fire on a wound", r.power.charges.p2 === 1, `got ${r.power.charges.p2}`);
-    check("Backstab: reports the wounded token id", r.woundedTokenId === 4);
-  }
-
-  // --- Breaks any live shield streak (no token of the mover's ever moves,
-  //     so it never lands on a shield itself) ---
-  {
-    const sStreak = state("p1", { 0: 4, 4: 6 });
-    const base = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 0 });
-    const pwStreak: PowerState = { ...base, shieldStreak: { ...base.shieldStreak, p1: 2 } };
-    const r = applyBackstab(sStreak, pwStreak, 4, "p1");
-    check("Backstab: breaks a live shield streak", r.power.shieldStreak.p1 === 0);
+    const s = state("p1", { 0: 4, 4: 6 });
+    const pw: PowerState = { ...power({ p1: "archer", p2: "rogue" }), bulwarked: { 4: 3 } };
+    const moves = getLegalPowerMoves(s, pw, 2); // token0: 4 -> 6
+    const blocked = moves.find((mv) => mv.tokenId === 0 && mv.to === 6);
+    check("Vanish: a Vanished stone blocks a normal capturing move onto it", blocked === undefined, JSON.stringify(moves));
   }
 }
 

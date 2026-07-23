@@ -23,7 +23,6 @@
 
 import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId } from "./rulebook.ts";
 import {
-  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -39,13 +38,13 @@ import {
   applyPush,
   applyReflip,
   applyRevive,
+  applyVanish,
   applyWarpath,
   canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   effectiveOwner,
-  getBackstabTargets,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
@@ -59,6 +58,7 @@ import {
   getPickpocketTargets,
   getPushTargets,
   getReviveSpawnTile,
+  getVanishTargets,
   getWarpathTargets,
   isBlessed,
   isBulwarked,
@@ -68,6 +68,7 @@ import {
   PUSH_DISTANCE,
   PUSH_WARD_DISTANCE,
   THRALL_TURNS,
+  VANISH_COST,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -519,8 +520,8 @@ function scoreBenediction(poolSize: number, rand: () => number): number {
 /** Score Rogue's Pickpocket — a TURN-KEEPING drain (Bless's contract) with
  *  zero board effect, so its value lives entirely in what the foe's bank
  *  was about to buy them. Every class's strongest tool needs the FULL
- *  bank (Charged Shot, Reinforced Bulwark, Backstab, Bless/Heal both cost
- *  it, Revive/Corpse Explosion at their own cap) — draining a foe sitting
+ *  bank (Charged Shot, Reinforced Bulwark, Bless/Heal both cost it,
+ *  Revive/Corpse Explosion at their own cap) — draining a foe sitting
  *  AT their cap denies that outright, so it clears a real, always-positive
  *  bar. A Mage at the cap is the standout case: the drain also drops Ward
  *  THIS INSTANT, scored near scorePush's own Ward-removal tier. Below the
@@ -537,21 +538,6 @@ function scorePickpocket(power: PowerState, foe: PlayerId, rand: () => number): 
   return score;
 }
 
-/** Score Rogue's Backstab: a guaranteed hit, scored like Blink Strike/
- *  Warpath's guaranteed capture — EXCEPT when the target is Cleric-blessed,
- *  where it only wounds (real value: a charge refund and the shelter
- *  denied, but the stone survives) rather than truly killing, so it's
- *  priced closer to a soft push than a real capture. Spends the full bank
- *  (BACKSTAB_COST), same "has to clear a real bar" discipline as Charged
- *  Shot/Reinforced Bulwark's own full-bank scoring. STARTING VALUES, not
- *  yet sim-tuned. */
-function scoreBackstab(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
-  const target = state.tokens.find((t) => t.id === targetId)!;
-  const wounds = isBlessed(power, targetId);
-  let score = (wounds ? 260 : 460) + target.position * 10;
-  score += rand() * 20;
-  return score;
-}
 
 /** Score Rogue's Grand Heist: scoreUltimateStrike's guaranteed-capture
  *  baseline, plus a bonus scaled by the bank it would ALSO drain on the
@@ -795,11 +781,21 @@ function pickStandardPowerAction(
         best = { kind: "pickpocket", targetTokenId: targetId };
       }
     }
-    for (const targetId of getBackstabTargets(state, power, mover)) {
-      const score = scoreBackstab(state, power, targetId, rand);
-      if (score > bestScore) {
-        bestScore = score;
-        best = { kind: "backstab", targetTokenId: targetId };
+    // Vanish IS Bulwark's mechanic under a Rogue cast (see VANISH_COST's
+    // doc in master-killer.ts) — reuses scoreBulwark's exact formula too,
+    // deliberately, rather than inventing a fresh one: that function's own
+    // history note records a real balance bug from an under-penalized
+    // "always evaluable" defensive cast (archer-vs-warrior swung to ~80/20
+    // before the negative floor fixed it), and Vanish has the identical
+    // shape (always available whenever the Rogue has a charge and an
+    // unprotected own stone), so the same discipline applies unchanged.
+    if (charges >= VANISH_COST) {
+      for (const targetId of getVanishTargets(state, power, mover)) {
+        const score = scoreBulwark(state, targetId, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "vanish", tokenId: targetId };
+        }
       }
     }
     if (power.ultimateReady[mover]) {
@@ -886,7 +882,9 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   }
   if (cls === "rogue") {
     for (const id of getPickpocketTargets(state, power, mover)) out.push({ kind: "pickpocket", targetTokenId: id });
-    for (const id of getBackstabTargets(state, power, mover)) out.push({ kind: "backstab", targetTokenId: id });
+    if (charges >= VANISH_COST) {
+      for (const id of getVanishTargets(state, power, mover)) out.push({ kind: "vanish", tokenId: id });
+    }
     if (power.ultimateReady[mover]) {
       for (const id of getGrandHeistTargets(state, power, mover)) out.push({ kind: "grandHeist", targetTokenId: id });
     }
@@ -1318,8 +1316,8 @@ function mkSimulate(
       return applyHeal(state, power, c.targetTokenId, mover);
     case "benediction":
       return applyBenediction(state, power, mover);
-    case "backstab":
-      return applyBackstab(state, power, c.targetTokenId, mover);
+    case "vanish":
+      return applyVanish(state, power, c.tokenId, mover);
     case "grandHeist":
       return applyGrandHeist(state, power, c.targetTokenId, mover);
     case "pickpocket":

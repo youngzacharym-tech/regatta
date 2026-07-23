@@ -31,7 +31,6 @@ import {
   type PlayerId,
 } from "./rulebook.ts";
 import {
-  applyBackstab,
   applyBlinkStrike,
   applyBless,
   applyBenediction,
@@ -47,6 +46,7 @@ import {
   applyPush,
   applyReflip,
   applyRevive,
+  applyVanish,
   applyWarpath,
   breakShieldStreak,
   CHARGE_CAP,
@@ -216,10 +216,8 @@ function takeTurnMK(
       const r = applyBenediction(state, power, mover);
       return { state: r.state, power: r.power };
     }
-    case "backstab": {
-      const r = applyBackstab(state, power, action.targetTokenId, mover);
-      return { state: r.state, power: r.power };
-    }
+    case "vanish":
+      return applyVanish(state, power, action.tokenId, mover);
     case "grandHeist": {
       const r = applyGrandHeist(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };

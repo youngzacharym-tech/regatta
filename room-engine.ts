@@ -45,7 +45,6 @@ import {
 import { pickBotMove } from "./bot";
 import type { ChatMsg } from "./protocol";
 import {
-  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -61,13 +60,12 @@ import {
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
   applyRevive,
+  applyVanish,
   applyWarpath,
-  BACKSTAB_COST,
   BLESS_COST,
   breakShieldStreak,
   canReflipAgain,
   CHARGE_CAP,
-  getBackstabTargets,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
@@ -81,6 +79,7 @@ import {
   getPickpocketTargets,
   getPushTargets,
   getReviveSpawnTile,
+  getVanishTargets,
   getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
@@ -89,6 +88,7 @@ import {
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
   tickThrallForNewTurn,
+  VANISH_COST,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -241,11 +241,13 @@ export interface PublicPower {
   /** Every token's blessed/wounded state — public table-state (the rings
    *  are visible board truth, same idea as bulwarkedTokenIds). ADDITIVE. */
   vitality?: Record<number, "blessed" | "wounded">;
-  /** Rogue (2026-07-21): Pickpocket / Backstab target pools for the CURRENT
-   *  player (affordability baked in), and Grand Heist's ultimate pool
-   *  (gated on ultimateReady here like every ultimate's list). ADDITIVE. */
+  /** Rogue (2026-07-21, Vanish added 2026-07-22): Pickpocket / Vanish
+   *  target pools for the CURRENT player (affordability baked in — Vanish's
+   *  own list is gated on charges at the call site, same convention as
+   *  Bulwark's), and Grand Heist's ultimate pool (gated on ultimateReady
+   *  here like every ultimate's list). ADDITIVE. */
   pickpocketTargets?: number[];
-  backstabTargets?: number[];
+  vanishTargets?: number[];
   grandHeistTargets?: number[];
   /** How many Re-flips the CURRENT player has already fired this turn —
    *  drives the client's Re-flip button gate (charges alone can't: a Mage
@@ -354,10 +356,10 @@ export type RoomEvent =
        *  dropped by `stolen` (server-computed, never re-derived
        *  client-side — same discipline as every other announcement here). */
       lastPickpocket?: { targetTokenId: number; stolen: number } | null;
-      /** Rogue's Backstab just resolved on this commit — a guaranteed hit,
-       *  either a kill (see `captures`/lastWound's absence) or a wound
-       *  (lastWound carries it, same as Push/Charged Shot). */
-      lastBackstab?: { targetTokenId: number } | null;
+      /** Rogue's Vanish just resolved on this commit — same shape/lifecycle
+       *  as lastBulwark, since it IS Bulwark's mechanic under a Rogue
+       *  cast (see VANISH_COST's doc in master-killer.ts). */
+      lastVanish?: { tokenId: number } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -457,7 +459,7 @@ export interface RoomDoc {
   /** See RoomEvent's docs — the rogue's announcement slots (2026-07-21).
    *  Docs persisted before these fields existed read as undefined ≙ null. */
   lastPickpocket?: { targetTokenId: number; stolen: number } | null;
-  lastBackstab?: { targetTokenId: number } | null;
+  lastVanish?: { tokenId: number } | null;
 }
 
 // ============================================================================
@@ -500,7 +502,10 @@ export type RoomActionInput =
          *  effect is bank-level (getPickpocketTargets is the shared
          *  oracle). */
         | { kind: "pickpocket"; targetTokenId: number }
-        | { kind: "backstab"; targetTokenId: number }
+        /** Rogue's Vanish: targets one of the caster's OWN stones, same
+         *  shape as Bulwark's tokenId (getVanishTargets is the shared
+         *  oracle — it IS Bulwark's mechanic under a Rogue cast). */
+        | { kind: "vanish"; tokenId: number }
         | { kind: "grandHeist"; targetTokenId: number };
     }
   | { op: "newMatch" }
@@ -631,8 +636,10 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
     vitality: { ...(doc.mk.vitality ?? {}) },
     pickpocketTargets:
       doc.mk.classes[mover] === "rogue" ? getPickpocketTargets(doc.state, p, mover) : [],
-    backstabTargets:
-      doc.mk.classes[mover] === "rogue" ? getBackstabTargets(doc.state, p, mover) : [],
+    vanishTargets:
+      doc.mk.classes[mover] === "rogue" && doc.mk.charges[mover] >= VANISH_COST
+        ? getVanishTargets(doc.state, p, mover)
+        : [],
     grandHeistTargets:
       doc.mk.classes[mover] === "rogue" && doc.mk.ultimateReady[mover]
         ? getGrandHeistTargets(doc.state, p, mover)
@@ -702,7 +709,7 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastWound: doc.lastWound ?? null,
     lastMend: doc.lastMend ?? null,
     lastPickpocket: doc.lastPickpocket ?? null,
-    lastBackstab: doc.lastBackstab ?? null,
+    lastVanish: doc.lastVanish ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -729,7 +736,7 @@ export function freshMatchFields(
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
   | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
   | "lastBless" | "lastHeal" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
-  | "lastPickpocket" | "lastBackstab"
+  | "lastPickpocket" | "lastVanish"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -766,7 +773,7 @@ export function freshMatchFields(
     lastWound: null,
     lastMend: null,
     lastPickpocket: null,
-    lastBackstab: null,
+    lastVanish: null,
     rescueAttempted: false,
   };
 }
@@ -899,7 +906,7 @@ export function applyAction(
       // the body arrives as unvalidated JSON — a truthy garbage value must
       // neither ride into the doc verbatim nor diverge from what
       // validateUsePower gated on (which coerces identically).
-      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, a.reinforced === true) };
+      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, rand, a.reinforced === true) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
@@ -907,7 +914,7 @@ export function applyAction(
       if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
       if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
-      if (a.kind === "backstab") return { doc: applyMkSimple(doc, seat, "backstab", a.targetTokenId, now) };
+      if (a.kind === "vanish") return { doc: applyMkSimple(doc, seat, "vanish", a.tokenId, now, rand) };
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
@@ -1027,10 +1034,10 @@ function validateUsePower(
       if (doc.currentFlip === null) return "No flip yet";
       if (!getPickpocketTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Pickpocket target";
       return null;
-    case "backstab":
-      if (cls !== "rogue") return "Only a Rogue can Backstab";
-      if (doc.mk.charges[seat] < BACKSTAB_COST) return "No charge available";
-      if (!getBackstabTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Backstab target";
+    case "vanish":
+      if (cls !== "rogue") return "Only a Rogue can Vanish";
+      if (doc.mk.charges[seat] < VANISH_COST) return "No charge available";
+      if (!getVanishTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Vanish target";
       return null;
     case "grandHeist":
       if (cls !== "rogue") return "Only a Rogue can Grand Heist";
@@ -1065,7 +1072,7 @@ const CLEAR_SLOTS = {
   lastWound: null,
   lastMend: null,
   lastPickpocket: null,
-  lastBackstab: null,
+  lastVanish: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -1141,9 +1148,10 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
-  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume" | "heal" | "backstab" | "grandHeist",
+  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume" | "heal" | "vanish" | "grandHeist",
   tokenId: number,
   now: number,
+  rand: () => number = Math.random,
   reinforced = false,
 ): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
@@ -1202,18 +1210,12 @@ function applyMkSimple(
       r = applyHeal(doc.state, power, tokenId, seat);
       slots = { lastHeal: { tokenId } };
       break;
-    case "backstab": {
-      const rr = applyBackstab(doc.state, power, tokenId, seat);
-      r = rr;
-      // Same wounds-aren't-captures scoreboard rule as applyMkMove's — a
-      // Backstab either kills (1) or wounds (0), never both.
-      capsGained = rr.woundedTokenId === null ? 1 : 0;
-      slots = {
-        lastBackstab: { targetTokenId: tokenId },
-        lastWound: rr.woundedTokenId !== null ? { tokenIds: [rr.woundedTokenId] } : null,
-      };
+    case "vanish":
+      // Turn-ending, no capture, no board movement — exactly Bulwark's
+      // shape, since Vanish IS Bulwark's mechanic under a Rogue cast.
+      r = applyVanish(doc.state, power, tokenId, seat);
+      slots = { lastVanish: { tokenId } };
       break;
-    }
     case "grandHeist": {
       const heistFoe: PlayerId = seat === "p1" ? "p2" : "p1";
       const foeChargesBefore = power.charges[heistFoe];
@@ -1501,16 +1503,16 @@ function autoSkipDelay(doc: RoomDoc): number {
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
-    // A human Rogue with a dead flip but a castable Pickpocket/Backstab
-    // (the former turn-keeping, the latter turn-ending like Heal/Corpse
-    // Explosion — same "don't silently auto-skip a meaningful action"
-    // reasoning either way) gets the same window.
+    // A human Rogue with a dead flip but a castable Pickpocket/Vanish (the
+    // former turn-keeping, the latter turn-ending like Heal/Bulwark — same
+    // "don't silently auto-skip a meaningful action" reasoning either way)
+    // gets the same window.
     if (
       doc.mk.classes[mover] === "rogue" &&
       doc.currentFlip !== null &&
       doc.currentFlip !== 0 &&
       (getPickpocketTargets(doc.state, p, mover).length > 0 ||
-        getBackstabTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.charges[mover] >= VANISH_COST && getVanishTargets(doc.state, p, mover).length > 0) ||
         (doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0))
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
@@ -1669,7 +1671,7 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
-      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, action.reinforced ?? false);
+      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, rand, action.reinforced ?? false);
     case "revive":
       return applyMkRevive(doc, seat, now);
     case "corpseExplosion":
@@ -1684,8 +1686,8 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkBenediction(doc, seat, now);
     case "pickpocket":
       return applyMkPickpocket(doc, seat, action.targetTokenId, now);
-    case "backstab":
-      return applyMkSimple(doc, seat, "backstab", action.targetTokenId, now);
+    case "vanish":
+      return applyMkSimple(doc, seat, "vanish", action.tokenId, now);
     case "grandHeist":
       return applyMkSimple(doc, seat, "grandHeist", action.targetTokenId, now);
   }

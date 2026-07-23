@@ -237,11 +237,13 @@ export type ServerMessage =
          *  same visibility rule as bulwarkedTokenIds (the rings are
          *  visible board truth for both seats). */
         vitality?: Record<number, "blessed" | "wounded">;
-        /** Rogue (2026-07-21): Pickpocket / Backstab pools for the CURRENT
-         *  player (affordability baked in) and Grand Heist's ultimate pool
-         *  (gated on ultimateReady like every ultimate list). */
+        /** Rogue (2026-07-21, Vanish added 2026-07-22): Pickpocket pool for
+         *  the CURRENT player (affordability baked in), Vanish's own
+         *  OWN-stone pool (affordability NOT baked in, Bulwark's own
+         *  convention), and Grand Heist's ultimate pool (gated on
+         *  ultimateReady like every ultimate list). */
         pickpocketTargets?: number[];
-        backstabTargets?: number[];
+        vanishTargets?: number[];
         grandHeistTargets?: number[];
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
@@ -345,10 +347,10 @@ export type ServerMessage =
        *  broadcast — bank-level, not board-level: no token moved, but the
        *  target owner's charges dropped by `stolen`. */
       lastPickpocket?: { targetTokenId: number; stolen: number } | null;
-      /** Master Killer mode only: Rogue's Backstab just resolved on this
-       *  broadcast — a guaranteed hit, either a kill or a wound (lastWound
-       *  carries that half, same as Push/Charged Shot). */
-      lastBackstab?: { targetTokenId: number } | null;
+      /** Master Killer mode only: Rogue's Vanish just resolved on this
+       *  broadcast — same shape/lifecycle as lastBulwark, since it IS
+       *  Bulwark's mechanic under a Rogue cast. */
+      lastVanish?: { tokenId: number } | null;
     }
   | {
       type: "gameOver";
@@ -437,7 +439,11 @@ export type ClientMessage =
          *  power.pickpocketTargets; the server re-validates against the
          *  same shared oracle. */
         | { kind: "pickpocket"; targetTokenId: number }
-        | { kind: "backstab"; targetTokenId: number }
+        /** Rogue's Vanish: targets one of the caster's OWN stones, same
+         *  shape as Bulwark's tokenId — the client gates on
+         *  power.vanishTargets; the server re-validates against the same
+         *  shared oracle. */
+        | { kind: "vanish"; tokenId: number }
         | { kind: "grandHeist"; targetTokenId: number };
     }
   | {

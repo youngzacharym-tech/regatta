@@ -17,7 +17,6 @@
 
 import { initialState, flipCoins, applyNoMove, type GameState, type PlayerId } from "./rulebook.ts";
 import {
-  applyBackstab,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -33,6 +32,7 @@ import {
   applyPush,
   applyReflip,
   applyRevive,
+  applyVanish,
   applyWarpath,
   breakShieldStreak,
   CHARGE_CAP,
@@ -85,7 +85,7 @@ interface GameResult {
     wound: number; // blessings broken (captures/knockbacks absorbed as wounds)
     mend: number; // stones mended by Sanctified Ground shield landings
     pickpocket: number; // Rogue Pickpocket casts (turn-keeping bank drain)
-    backstab: number; // Rogue Backstab casts (guaranteed hit, kill or wound)
+    vanish: number; // Rogue Vanish casts (Bulwark's mechanic, Rogue-cast)
     grandHeist: number; // Grand Heist ultimates fired
   };
 }
@@ -345,15 +345,9 @@ function takeTurn(
       const r = applyBenediction(state, power, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, benediction: 1 } };
     }
-    case "backstab": {
-      const r = applyBackstab(state, power, action.targetTokenId, mover);
-      return {
-        state: r.state,
-        power: r.power,
-        flips,
-        sweepSize: r.woundedTokenId === null ? 1 : 0,
-        usage: { ...turnUsage, backstab: 1, ...(r.woundedTokenId !== null ? { wound: 1 } : {}) },
-      };
+    case "vanish": {
+      const r = applyVanish(state, power, action.tokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, vanish: 1 } };
     }
     case "grandHeist": {
       const r = applyGrandHeist(state, power, action.targetTokenId, mover);
@@ -394,7 +388,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     wound: 0,
     mend: 0,
     pickpocket: 0,
-    backstab: 0,
+    vanish: 0,
     grandHeist: 0,
   };
   const rand = Math.random;
@@ -437,7 +431,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     // Pickpocket arrives as a count too (the turn-keeping loop can fire it
     // more than once per turn, same shape as revive/bless).
     usage.pickpocket += r.usage.pickpocket ?? 0;
-    if (r.usage.backstab) usage.backstab++;
+    if (r.usage.vanish) usage.vanish++;
     if (r.usage.grandHeist) usage.grandHeist++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
@@ -513,7 +507,7 @@ for (const [a, b] of matchups) {
   const avgWound = mean(results.map((r) => r.usage.wound));
   const avgMend = mean(results.map((r) => r.usage.mend));
   const avgPickpocket = mean(results.map((r) => r.usage.pickpocket));
-  const avgBackstab = mean(results.map((r) => r.usage.backstab));
+  const avgVanish = mean(results.map((r) => r.usage.vanish));
   const avgGrandHeist = mean(results.map((r) => r.usage.grandHeist));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
@@ -528,7 +522,7 @@ for (const [a, b] of matchups) {
       `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
       `  bless/g=${avgBless.toFixed(2)}  heal/g=${avgHeal.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
       `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}` +
-      `  pickpocket/g=${avgPickpocket.toFixed(2)}  backstab/g=${avgBackstab.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}`,
+      `  pickpocket/g=${avgPickpocket.toFixed(2)}  vanish/g=${avgVanish.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

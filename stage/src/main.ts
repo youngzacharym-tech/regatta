@@ -27,7 +27,6 @@ import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
 // branch that reads them is gated accordingly).
 import {
   CHARGE_CAP,
-  BACKSTAB_COST,
   BLESS_COST,
   BLESSING_CAP,
   CHARGED_SHOT_DISTANCE,
@@ -42,6 +41,7 @@ import {
   REFLIPS_PER_TURN,
   REVIVE_COST,
   THRALL_TURNS,
+  VANISH_COST,
   type PlayerClass,
   type PowerMove,
   type PowerState,
@@ -1413,10 +1413,14 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
 // the tiled wood textures, not these).
 // ---------------------------------------------------------------------------
-type StatusKind = "ward" | "bulwark" | "shieldTile" | "thrall" | "soulClaim" | "blessed" | "wounded";
+type StatusKind = "ward" | "bulwark" | "vanish" | "shieldTile" | "thrall" | "soulClaim" | "blessed" | "wounded";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
+  // Vanish is Bulwark's exact protection under a Rogue cast (see
+  // VANISH_COST's doc in master-killer.ts) — same rig/dome treatment, just
+  // the class's own moonlit steel instead of warrior blue.
+  vanish: 0x9fb4c9,
   shieldTile: 0xcfdcec,
   // Possession wears the necromancer's blood red — the enemy stone serving
   // the graveyard is marked in its master's color, not its owner's.
@@ -1700,8 +1704,11 @@ function updateTokenTints(state: GameState) {
       mat.emissive.setHex(0x8040ff); // violet — Mage ward
       mat.emissiveIntensity = 0.55;
     } else if (bulwarked && bulwarked.has(token.id)) {
-      kind = "bulwark";
-      mat.emissive.setHex(0x2f6bff); // warrior blue — Bulwark is his cast
+      // Same underlying protection map (see VANISH_COST's doc); which
+      // class cast it decides the color/label only.
+      const vanished = currentPower?.classes[token.owner] === "rogue";
+      kind = vanished ? "vanish" : "bulwark";
+      mat.emissive.setHex(vanished ? 0x9fb4c9 : 0x2f6bff);
       mat.emissiveIntensity = 0.5;
     } else if (currentPower?.vitality?.[token.id] === "blessed" && token.position >= 0) {
       kind = "blessed";
@@ -1879,11 +1886,13 @@ let currentPower: {
   healTargets?: number[];
   benedictionTargets?: number[];
   vitality?: Record<number, "blessed" | "wounded">;
-  /** Rogue (2026-07-21): Pickpocket/Backstab target pools for the CURRENT
-   *  player (affordability baked in server-side) and Grand Heist's
-   *  ultimate pool (ultimateReady-gated). */
+  /** Rogue (2026-07-21, Vanish added 2026-07-22): Pickpocket target pool
+   *  for the CURRENT player (affordability baked in server-side), Vanish's
+   *  own OWN-stone pool (affordability NOT baked in — Bulwark's own
+   *  convention, gate on charges client-side same as bulwarkTargets), and
+   *  Grand Heist's ultimate pool (ultimateReady-gated). */
   pickpocketTargets?: number[];
-  backstabTargets?: number[];
+  vanishTargets?: number[];
   grandHeistTargets?: number[];
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
@@ -1909,7 +1918,7 @@ type ArmedKind =
   | "bless"
   | "heal"
   | "pickpocket"
-  | "backstab"
+  | "vanish"
   | "grandHeist";
 let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
@@ -2133,11 +2142,11 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "rogue",
     desc: `Reach into an enemy stone's pocket in shared water and lift ${PICKPOCKET_STEAL} mana — no fight, no protection stops you, since nothing is actually striking the stone. Your turn continues: pick the pocket, then still make your move.`,
   },
-  backstab: {
-    name: "Backstab",
-    cost: `${BACKSTAB_COST} mana`,
+  vanish: {
+    name: "Vanish",
+    cost: `${VANISH_COST} mana`,
     klass: "rogue",
-    desc: "A guaranteed strike at an enemy in shared water: Wards mean nothing to it. A Bulwark still turns it away, and a Blessed stone survives as a wound instead of a kill — but anything else goes down for good, and the mana you took from them on the kill is on top of the spend.",
+    desc: "Slip one of your own stones into the shadows: it can't be captured, swept, or targeted by any ability — though an ultimate still finds it. Fades after a few turns, or the moment it saves the stone.",
   },
   grandHeist: {
     name: "Grand Heist",
@@ -2247,7 +2256,7 @@ const DOCK_COST: Record<string, number> = {
   sanctifiedGround: 0,
   larceny: 0,
   pickpocket: PICKPOCKET_COST,
-  backstab: BACKSTAB_COST,
+  vanish: VANISH_COST,
   grandHeist: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
@@ -2274,7 +2283,7 @@ const DOCK_NAMES: Record<string, string> = {
   sanctifiedGround: "Sanctified",
   larceny: "Larceny",
   pickpocket: "Pickpocket",
-  backstab: "Backstab",
+  vanish: "Vanish",
   grandHeist: "Grand Heist",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
@@ -2320,7 +2329,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
   rogue: [
     { ability: "larceny", passive: true },
     { ability: "pickpocket" },
-    { ability: "backstab" },
+    { ability: "vanish" },
     { ability: "grandHeist", ult: true },
   ],
 };
@@ -2355,7 +2364,7 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   bless: "tap one of your stones to bless",
   heal: "tap a wounded stone to mend",
   pickpocket: "tap a glowing enemy stone",
-  backstab: "tap a glowing enemy stone",
+  vanish: "tap one of your stones to hide it",
   grandHeist: "tap an enemy to strike",
 };
 
@@ -2486,11 +2495,10 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (charges < PICKPOCKET_COST) return { state: "noafford", reason: needCharges(PICKPOCKET_COST) };
       return { state: "noafford", reason: "No mana worth taking nearby" };
     }
-    case "backstab": {
-      if ((p.backstabTargets ?? []).length > 0) return { state: "ready" };
-      if (charges < BACKSTAB_COST) return { state: "noafford", reason: needCharges(BACKSTAB_COST) };
-      return { state: "noafford", reason: "No enemies in shared water" };
-    }
+    case "vanish":
+      if (charges < VANISH_COST) return { state: "noafford", reason: needCharges(VANISH_COST) };
+      if ((p.vanishTargets ?? []).length === 0) return { state: "noafford", reason: "No stones to hide" };
+      return { state: "ready" };
     case "grandHeist":
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
       if ((p.grandHeistTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
@@ -2622,8 +2630,8 @@ function armAbility(kind: ArmedKind) {
                   ? (p.healTargets ?? [])
                   : kind === "pickpocket"
                     ? (p.pickpocketTargets ?? [])
-                    : kind === "backstab"
-                      ? (p.backstabTargets ?? [])
+                    : kind === "vanish"
+                      ? (p.vanishTargets ?? [])
                       : kind === "grandHeist"
                         ? (p.grandHeistTargets ?? [])
                         : p.bulwarkTargets, // bulwark / bulwarkReinforced
@@ -2690,8 +2698,8 @@ function fireArmed(tokenId: number) {
     case "pickpocket":
       sendToServer({ type: "usePower", action: { kind: "pickpocket", targetTokenId: tokenId } });
       break;
-    case "backstab":
-      sendToServer({ type: "usePower", action: { kind: "backstab", targetTokenId: tokenId } });
+    case "vanish":
+      sendToServer({ type: "usePower", action: { kind: "vanish", tokenId } });
       break;
     case "grandHeist":
       sendToServer({ type: "usePower", action: { kind: "grandHeist", targetTokenId: tokenId } });
@@ -2960,6 +2968,15 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left${saves !== undefined ? ` · ${saves} save${saves === 1 ? "" : "s"}` : ""}`,
         klass: "warrior",
         desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
+      };
+    }
+    case "vanish": {
+      const turns = currentPower.bulwarkTurns?.[tokenId];
+      return {
+        name: "Vanished",
+        cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left`,
+        klass: "rogue",
+        desc: "The Rogue has slipped this stone into the shadows: it cannot be captured, swept, or targeted by any ability. Ultimates still punch through. It fades when its turns run out or the moment it blocks a capture.",
       };
     }
     case "soulClaim": {
@@ -3584,7 +3601,7 @@ function announceFromState(msg: {
   lastWound?: { tokenIds: number[] } | null;
   lastMend?: { tokenIds: number[] } | null;
   lastPickpocket?: { targetTokenId: number; stolen: number } | null;
-  lastBackstab?: { targetTokenId: number } | null;
+  lastVanish?: { tokenId: number } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -3810,20 +3827,16 @@ function announceFromState(msg: {
     return;
   }
 
-  if (msg.lastBackstab && msg.lastMovePlayer) {
+  if (msg.lastVanish && msg.lastMovePlayer) {
     const who = playerLabel(msg.lastMovePlayer);
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
-    const target = isMe ? "opponent's" : "your";
-    const targetToken = msg.state.tokens.find((t) => t.id === msg.lastBackstab!.targetTokenId);
-    const wounded = targetToken && targetToken.position !== -1; // still on board = the blessing absorbed it
+    const target = isMe ? "your" : "their";
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, "Backstab!", "backstab");
+    if (k) showProc(k, "Vanish!", "vanish");
     showAnnouncement(
-      wounded
-        ? `${subject} backstabbed ${target} token — the blessing broke instead${chargeFor(msg.lastMovePlayer)}`
-        : `${subject} backstabbed ${target} token for good${chargeFor(msg.lastMovePlayer)}`,
-      "capture",
+      `${subject} slipped ${target} token into the shadows${chargeFor(msg.lastMovePlayer)}`,
+      "shield",
     );
     return;
   }
@@ -5429,11 +5442,11 @@ const GUIDE_SPREADS: [string, string][] = [
        ${PICKPOCKET_STEAL} mana — no fight, and no protection stops you,
        since nothing is actually striking the stone. Pick the pocket, then
        still make your move.</li>
-       <li><b>Backstab</b> (active, ${BACKSTAB_COST} mana): a guaranteed
-       strike at an enemy in shared water. Wards mean nothing to it — a
-       Bulwark still turns it away, and a Blessed stone survives as a
-       wound instead of a kill, same as any other blow — but anything
-       else goes down for good.</li>
+       <li><b>Vanish</b> (active, ${VANISH_COST} mana): slip one of your
+       own stones into the shadows — it can't be captured, swept, or
+       targeted by any ability (an ultimate still finds it). Fades after
+       a few turns, or the moment it saves the stone. The Rogue's own
+       answer to the Mage's Ward and the Warrior's Bulwark.</li>
      </ul>`,
     `<div class="runner">The Rogue &middot; continued</div>
      <ul>
@@ -5607,6 +5620,16 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // player-facing tavern voice, telling people what to LOOK FOR, not a diff.
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-07-22-the-vanishing",
+    date: "July 22, 2026",
+    title: "The Vanishing",
+    items: [
+      "<b>Backstab is retired — Vanish takes its place.</b> Every other class had a defensive trick (the Mage's Ward, the Warrior's Bulwark, the Cleric's Blessing); the Rogue had none. Now it does.",
+      "<b>Vanish</b> (1 mana): slip one of your own stones into the shadows — it can't be captured, swept, or targeted by any ability. Fades after a couple of turns, or the moment it actually saves the stone. Ultimates still find it.",
+      "<b>Larceny hits harder</b> — the mana every real kill drains from the enemy's pocket is doubled, so the class's own steal-and-run identity carries more of the weight now that Backstab isn't around to do it alone.",
+    ],
+  },
   {
     id: "2026-07-21-the-take",
     date: "July 21, 2026",
@@ -5921,15 +5944,17 @@ function tick() {
         : 0.26 + 0.08 * Math.sin(now * 0.0012 + i);
       rig.ring.scale.setScalar(whole ? 1 : 0.92);
     } else {
-      // Ward spins with intent; Bulwark turns slow and heavy.
-      rig.ring.rotation.z = now * (mark.kind === "bulwark" ? 0.00035 : 0.0009) + i * 1.3;
+      // Ward spins with intent; Bulwark/Vanish turn slow and heavy — same
+      // underlying protection, so the same weight.
+      const shielded = mark.kind === "bulwark" || mark.kind === "vanish";
+      rig.ring.rotation.z = now * (shielded ? 0.00035 : 0.0009) + i * 1.3;
       rig.ringMat.opacity = 0.5 + 0.22 * Math.sin(now * 0.0026 + i * 2.1);
       rig.ring.scale.setScalar(1);
     }
-    const domed = mark.kind === "bulwark";
+    const domed = mark.kind === "bulwark" || mark.kind === "vanish";
     rig.dome.visible = domed;
     if (domed) {
-      rig.domeMat.color.setHex(STATUS_TINTS.bulwark);
+      rig.domeMat.color.setHex(STATUS_TINTS[mark.kind as "bulwark" | "vanish"]);
       rig.dome.position.set(
         marker.mesh.position.x,
         marker.mesh.position.y - 0.08, // token base — hemisphere wraps the coin
@@ -6107,7 +6132,7 @@ if (dockDemoParam !== null) {
       reviveSpawnTile: cls === "necromancer" && d.charges >= REVIVE_COST ? 8 : null,
       exhumeTargets: cls === "necromancer" && d.ult ? [4] : [],
       pickpocketTargets: cls === "rogue" && d.charges >= PICKPOCKET_COST ? [4] : [],
-      backstabTargets: cls === "rogue" && d.charges >= BACKSTAB_COST ? [4] : [],
+      vanishTargets: cls === "rogue" && d.charges >= VANISH_COST ? [0, 1, 2] : [],
       grandHeistTargets: cls === "rogue" && d.ult ? [4] : [],
     };
     currentPowerMoves =

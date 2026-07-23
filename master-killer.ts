@@ -514,17 +514,34 @@ export const HEAL_COST = 2;
  *  Rogue lands drains this much mana from the victim's owner, on top of the
  *  Rogue's own normal capture income — the one ability in the game that
  *  touches the OPPONENT's bank directly rather than the mover's own. Wired
- *  into resolveTurn (the shared landing-capture/Charge-sweep-equivalent
- *  path) and applyBackstab (Rogue's own standalone execute); Grand Heist
- *  does NOT also apply this — its own "drain the entire bank" is the
- *  bigger, ultimate-tier version of the same idea, not a stack on top of
- *  it. Like Cleric's wound split, a WOUND (a blessed victim surviving the
- *  hit) is not a real kill and does not trigger this — same "wounds pay
- *  the standard capture charge but none of the bespoke per-class income"
- *  rule Necromancer's soul bounty already follows.
- *  STARTING VALUE, not yet sim-tuned (Rogue is new this session) — revisit
- *  once batch-random-master-killer-games.ts has real numbers for it. */
-export const ROGUE_STEAL_ON_CAPTURE = 1;
+ *  directly into resolveTurn, the shared landing-capture path every class's
+ *  moves funnel through; Grand Heist does NOT also apply this — its own
+ *  "drain the entire bank" is the bigger, ultimate-tier version of the same
+ *  idea, not a stack on top of it. Like Cleric's wound split, a WOUND (a
+ *  blessed victim surviving the hit) is not a real kill and does not
+ *  trigger this — same "wounds pay the standard capture charge but none of
+ *  the bespoke per-class income" rule Necromancer's soul bounty already
+ *  follows. RAISED 1 -> 2 2026-07-21 as the class's compensation for
+ *  Backstab's short-lived shield-breaker rework (narrow, situational,
+ *  crashed the class's win rate to 23-42% against everything) — that
+ *  rework was itself then REPLACED the same day by Vanish (see
+ *  VANISH_COST's doc) once the sim showed doubling this alone wasn't
+ *  enough. Kept at 2 through the Vanish + doubled-Pickpocket pass too
+ *  (2000/matchup): archer-vs-rogue 72.7/27.4, mage-vs-rogue 73.8/26.3,
+ *  warrior-vs-rogue 61.2/38.9, necromancer-vs-rogue 54.9/45.1,
+ *  cleric-vs-rogue 64.4/35.6 — still lost everywhere except a near-healthy
+ *  necromancer matchup. Best-supported read, same shape as the ORIGINAL
+ *  Backstab investigation reached: Mage is independently the roster's
+ *  strongest class overall (it beats warrior 60.7/39.4, necromancer
+ *  66.9/33.1, and cleric 62.4/37.6 too, not just rogue), and Archer's
+ *  edge here looks like its own preexisting quirk against Rogue's board
+ *  profile specifically (it doesn't dominate warrior/necromancer/cleric
+ *  the same way) — neither is a Rogue-income problem, so raising THIS
+ *  constant further is very unlikely to move either number. A real fix
+ *  needs a dedicated Mage/Archer-side pass, deliberately not guessed at
+ *  further here (see PICKPOCKET_STEAL's doc for the matching finding on
+ *  that lever). */
+export const ROGUE_STEAL_ON_CAPTURE = 2;
 
 /** Rogue's Pickpocket: 1 mana, steals PICKPOCKET_STEAL mana from a
  *  targeted enemy in shared water WITHOUT capturing it — no capture means
@@ -534,58 +551,66 @@ export const ROGUE_STEAL_ON_CAPTURE = 1;
  *  Keeps the turn, same convention as Re-flip/Revive. Deliberately NOT a
  *  net-zero transfer (spend 1, foe loses 1, mover does not get the stolen
  *  mana back) — a real cost paid for a real cost inflicted, not a free
- *  relocation of resources. STARTING VALUE, not yet sim-tuned. */
+ *  relocation of resources. */
 export const PICKPOCKET_COST = 1;
-/** How much of the target's bank Pickpocket drains. See PICKPOCKET_COST. */
-export const PICKPOCKET_STEAL = 1;
+/** How much of the target's bank Pickpocket drains — RAISED 1 -> 2
+ *  alongside Vanish (2026-07-22): the "keep steal and invisibility as two
+ *  separate, independently-tunable levers" half of the same request that
+ *  added Vanish (see VANISH_COST's doc). The post-Vanish sim still showed
+ *  archer-vs-rogue and mage-vs-rogue badly lost (70.4/29.6, 75.8/24.1 at
+ *  2000/matchup) — Push and Charged Shot's knockback isn't something
+ *  Vanish (a plain-Bulwark clone) fully answers by design (a plain Bulwark
+ *  only stops a Push from sending the stone all the way home, same
+ *  carve-out this ability has always respected — see getPushTargets), so
+ *  the theory was the compensation had to come from the class's income,
+ *  not its defense — doubling Pickpocket's own drain on top of Larceny's
+ *  own 1->2 raise. RE-MEASURED (2000/matchup) and it barely moved either
+ *  number: archer-vs-rogue 70.4/29.6 -> 72.7/27.4, mage-vs-rogue
+ *  75.8/24.1 -> 73.8/26.3 — both within noise. Same dead-end shape as the
+ *  original Backstab investigation's own Larceny experiment (see
+ *  ROGUE_STEAL_ON_CAPTURE's doc): a flat income buff doesn't touch
+ *  whatever's actually driving these two matchups (read there is that
+ *  Mage is just the roster's strongest class outright, and Archer has its
+ *  own preexisting edge against Rogue specifically). Kept at 2 anyway — it
+ *  did no harm and pickpocket/g stayed healthy — but don't expect raising
+ *  it again to move archer/mage-vs-rogue; that needs its own dedicated
+ *  pass on the OTHER side of those matchups. */
+export const PICKPOCKET_STEAL = 2;
 
-/** Rogue's Backstab: spends the full bank (CHARGE_CAP) for a guaranteed
- *  execute at a target in shared water — pierces Ward by construction
- *  (nothing in its target pool or apply path ever checks isWarded, the
- *  same "pierce by omission" idiom Charged Shot already uses), but
- *  deliberately does NOT pierce Bulwark (excluded from the target pool
- *  outright) or Blessing (a blessed victim is WOUNDED, not killed, same
- *  as every other non-ultimate ability) — "only ultimates truly pierce
- *  Bulwark/Blessing" stays a clean, unbroken rule across the whole
- *  roster; Backstab earning an early exception here risked exactly the
- *  kind of catastrophic blowout this codebase's history is full of
- *  (Push's extra-turn attempts, the self-advance rider, etc.) for a
- *  precedent that was never validated by simulation.
+/** Rogue's Vanish (added 2026-07-22, replacing Backstab's slot entirely —
+ *  see PowerState.bulwarked's own history for the discarded shield-breaker
+ *  rework this supersedes). The user's diagnosis after that rework crashed
+ *  the class to a 23-42% win rate everywhere: every OTHER class has some
+ *  defensive lever (Mage's Ward, Warrior's Bulwark, Cleric's Blessing) —
+ *  Rogue had none, so once Backstab stopped being an offensive equalizer
+ *  the class had no way to protect its own advancing stones at all. Vanish
+ *  is that missing lever: spend VANISH_COST to make one of the mover's own
+ *  on-board stones fully untargetable for VANISH_TURNS of the mover's own
+ *  turns — excluded from every enemy targeted ability's pool AND immune to
+ *  plain-move capture, same as a Bulwarked stone.
  *
- *  DOES NOT REFUND on a real kill — a deliberate break from Push/Charged
- *  Shot's send-home refund, which exists because THEIR send-home is
- *  conditional (distance/collision has to cooperate). Backstab's hit is
- *  unconditional by design (it never fails to connect), so an early
- *  version that ALSO refunded made it a net -1-mana cost for an
- *  always-available guaranteed kill: it outcompeted every other action in
- *  the game (backstab/g hit 10-16 in the first balance pass — more than
- *  twice Charged Shot's own rate — blowing out 4 of 5 non-mirror matchups
- *  62-76% rogue-favored). Still refunds 1 on a WOUND (breaking a blessing
- *  always pays the breaker, per HEAL_COST's own trace) since that outcome
- *  isn't guaranteed the same way.
- *
- *  Removing the refund alone (5000/matchup after the fix): archer-vs-rogue
- *  30.3/69.7 -> 46.1/53.9, mage-vs-rogue 35.8/64.2 -> 52.5/47.5,
- *  cleric-vs-rogue 37.6/62.4 -> 48.0/52.0 — all landed near healthy.
- *  warrior-vs-rogue only reached 38.3/61.7 and necromancer-vs-rogue stayed
- *  at 37.6/62.4, both still rogue-favored. Tried removing Larceny's own
- *  drain from just Backstab's kill branch (a "guaranteed hit already earns
- *  its value, don't also stack the passive" theory, same shape as Grand
- *  Heist not stacking it) — barely moved either (warrior 61.7->61.4, necro
- *  62.4->59.3), so Larceny isn't the driver; reverted. Best-supported
- *  explanation: Mage's Ward doesn't even block Backstab (pierced by
- *  design) yet mage-vs-rogue normalized anyway — because Mage is
- *  independently the roster's strongest class, not because it specifically
- *  answers Backstab. Cleric's Blessing genuinely converts some kills to
- *  wounds, a real structural answer. Warrior and Necromancer have neither
- *  kind of help, AND were already this project's two weakest-tuned classes
- *  before Rogue existed (Necromancer was losing every matchup pre-Rogue;
- *  Warrior has needed the most cross-session tuning attention of any class
- *  historically) — this reads as Rogue's raw power widening an existing
- *  gap more than a Rogue-specific flaw. NOT yet fixed — a real lever
- *  (Backstab's own frequency/cost, or a Warrior/Necromancer-side answer)
- *  needs its own dedicated pass, deliberately not guessed at further here. */
-export const BACKSTAB_COST = CHARGE_CAP;
+ *  Deliberately implemented as a second caster of Warrior's EXACT Bulwark
+ *  mechanic (writes into the same power.bulwarked/bulwarkSaves maps,
+ *  ticked/diffed/consumed by the same tickBulwarkExpiry/
+ *  getBulwarkBlockedIds/consumeBulwarkBlocks — all fully class-agnostic
+ *  already) rather than a parallel protection system: the two classes
+ *  never share a match-up with themselves needing independent tracking (a
+ *  player is Warrior XOR Rogue, never both, in any one seat), so there is
+ *  no cross-talk risk, and reinventing an equally elaborate duration/save/
+ *  block-diffing system for one more flavor of "temporarily uncapturable"
+ *  would have been pure duplication. "Vanished" and "Bulwarked" are the
+ *  same underlying status; only the player-facing name/art differ. */
+export const VANISH_COST = 1;
+
+/** How many of the mover's own turns a Vanish lasts before expiring
+ *  (ticked by the same tickBulwarkExpiry a plain Bulwark uses) — started
+ *  equal to BULWARK_TURNS (2), Bulwark's own already-validated plain-cast
+ *  lifetime, rather than guessing a fresh number; no "reinforced"/saves
+ *  tier for Vanish (unlike Bulwark) since the user didn't ask for that
+ *  extra complexity and Warrior's own reinforced tier was itself an
+ *  optimization added after simulation, not a day-one requirement.
+ *  STARTING VALUE, not yet sim-tuned for the reworked kit. */
+export const VANISH_TURNS = BULWARK_TURNS;
 
 // ============================================================================
 // TYPES
@@ -744,8 +769,9 @@ export type PowerAction =
    *  getPickpocketTargets) but the effect is bank-level, not stone-level —
    *  the target only anchors the UI's "tap a stone" flow. */
   | { kind: "pickpocket"; targetTokenId: number }
-  /** Rogue's Backstab: a guaranteed execute at a target in shared water. */
-  | { kind: "backstab"; targetTokenId: number }
+  /** Rogue's Vanish: targets one of the mover's own on-board stones, same
+   *  shape as Bulwark's tokenId (see getVanishTargets/applyVanish). */
+  | { kind: "vanish"; tokenId: number }
   /** Rogue's Grand Heist ultimate: teleport-capture like Blink Strike/
    *  Warpath, plus draining the target owner's entire bank. */
   | { kind: "grandHeist"; targetTokenId: number };
@@ -2696,20 +2722,22 @@ export function applyExhume(
 }
 
 // ============================================================================
-// ROGUE (added 2026-07-21) — the thief. Passive: LARCENY — every real kill
-// the Rogue lands drains ROGUE_STEAL_ON_CAPTURE mana from the victim's
-// owner too (wired into resolveTurn and applyBackstab; see
+// ROGUE (added 2026-07-21, reworked 2026-07-22) — the thief. Passive:
+// LARCENY — every real kill the Rogue lands drains ROGUE_STEAL_ON_CAPTURE
+// mana from the victim's owner too (wired into resolveTurn; see
 // ROGUE_STEAL_ON_CAPTURE's doc for why Grand Heist doesn't also stack it).
 // Actives: PICKPOCKET (PICKPOCKET_COST) drains a target's bank directly
 // without capturing — no protection applies, since nothing is attacking the
-// stone itself. BACKSTAB (BACKSTAB_COST, the full bank) is a guaranteed
-// execute that pierces Ward but respects Bulwark and the wound split, same
-// as every other non-ultimate ability. Ultimate: GRAND HEIST teleport-
-// captures like Blink Strike, pierces everything (Bulwark and Blessing
-// included — every ultimate does), and drains the victim's ENTIRE
-// remaining bank on the kill. The class has no new PowerState field of its
-// own — every effect reads and writes the existing `charges` map, on
-// either side of the board.
+// stone itself. VANISH (VANISH_COST) grants one of the mover's own stones
+// Bulwark-identical protection — untargetable and uncapturable for
+// VANISH_TURNS — the class's missing defensive lever (see VANISH_COST's
+// doc for why this reuses Bulwark's mechanic outright rather than a
+// parallel system, and for the discarded Backstab shield-breaker rework it
+// replaces). Ultimate: GRAND HEIST teleport-captures like Blink Strike,
+// pierces everything (Bulwark and Blessing included — every ultimate does),
+// and drains the victim's ENTIRE remaining bank on the kill. The class has
+// no PowerState field fully its own — Larceny/Pickpocket read and write the
+// existing `charges` map, and Vanish shares Bulwark's `bulwarked` map.
 // ============================================================================
 
 /** Rogue's Pickpocket: valid targets are enemy stones in shared water that
@@ -2749,99 +2777,47 @@ export function applyPickpocket(power: PowerState, mover: PlayerId): PowerState 
   };
 }
 
-/** Rogue's Backstab: valid targets are enemy stones in shared water, minus
- *  shield-tile occupants and Bulwarked ones (both fully block it, same as
- *  every other non-ultimate ability) — Ward is deliberately never checked
- *  here at all, "pierced" by simple omission, the same idiom
- *  getChargedShotTargets already uses. Affordability (the full bank,
- *  BACKSTAB_COST) baked in. */
-export function getBackstabTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (power.charges[mover] < BACKSTAB_COST) return [];
-  return getRainOfArrowsTargets(state, power, mover).filter((id) => {
-    const t = state.tokens.find((tok) => tok.id === id)!;
-    return !onShieldTile(t) && !isBulwarked(power, t);
-  });
+/** Rogue's Vanish: valid targets are the mover's own on-board tokens that
+ *  aren't already protected — identical target shape to getBulwarkTargets
+ *  (see VANISH_COST's doc for why this reuses Bulwark's mechanic wholesale
+ *  rather than reimplementing it). No afford check here either, matching
+ *  Bulwark's own established convention — the caller gates on charges
+ *  (see every getBulwarkTargets call site). */
+export function getVanishTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => !isBulwarked(power, t))
+    .map((t) => t.id);
 }
 
-/** Rogue's Backstab: spends BACKSTAB_COST for a guaranteed hit — no
- *  distance/collision math at all (unlike Push/Charged Shot's knockback,
- *  this is a direct strike, not a shove that might merely fall short of
- *  home), so it always resolves as either a WOUND (target is blessed —
- *  Cleric's split, exactly as Push/Charged Shot already honor it) or a
- *  real kill. A wound still refunds 1 charge (breaking a blessing always
- *  pays the breaker, HEAL_COST's own trace) but does NOT trigger Larceny —
- *  wounds pay the standard capture charge and nothing else, same rule
- *  Necromancer's soul bounty already follows. A real kill does NOT refund
- *  (see BACKSTAB_COST's doc for why an early refunded version blew out
- *  the balance sim) but DOES clear the target's thrall/Bulwark/vitality
- *  bookkeeping (same hygiene every other capture path carries) and
- *  triggers Larceny's own drain on top. Never lands the mover on a
- *  shield (breaks any live streak, no token of the mover's moves at all). */
-export function applyBackstab(
+/** Rogue's Vanish: spends VANISH_COST to flag one of the mover's own
+ *  on-board tokens with the SAME protection Warrior's Bulwark grants (see
+ *  VANISH_COST's doc) for VANISH_TURNS of the mover's own turns, or until
+ *  it's consumed by actually blocking a capture (getBulwarkBlockedIds/
+ *  consumeBulwarkBlocks — both already class-agnostic), whichever comes
+ *  first. No board movement at all, so — exactly like Bulwark — it always
+ *  breaks any live shield streak and always ends the turn; doesn't grant a
+ *  charge back, since it doesn't capture anything itself. */
+export function applyVanish(
   state: GameState,
   power: PowerState,
   targetTokenId: number,
   mover: PlayerId,
-): { state: GameState; power: PowerState; woundedTokenId: number | null } {
-  const foe = otherPlayerId(mover);
-  const woundsInstead = isBlessed(power, targetTokenId);
-  const tokens = woundsInstead
-    ? state.tokens
-    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
-
-  let spentPower: PowerState = {
+): { state: GameState; power: PowerState } {
+  const spent: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST },
+    charges: { ...power.charges, [mover]: power.charges[mover] - VANISH_COST },
+    bulwarked: { ...power.bulwarked, [targetTokenId]: VANISH_TURNS },
   };
-  if (woundsInstead) {
-    spentPower = addCharge(
-      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
-      mover,
-    );
-  } else {
-    // NO refund here, deliberately, unlike Push/Charged Shot's send-home
-    // refund — those are CONDITIONAL (distance/collision has to cooperate),
-    // so refunding treats an incidental send-home as "really a capture."
-    // Backstab is unconditional BY DESIGN (it never fails to connect), so
-    // refunding on top of that guarantee made it a net -1-mana cost for an
-    // always-available kill — it outcompeted every other action in the
-    // game (backstab/g hit 10-16 in the first balance pass, more than
-    // twice Charged Shot's own rate, and blew out 4 of 5 matchups 62-76%
-    // rogue-favored). A real, unrefunded BACKSTAB_COST spend for a
-    // guaranteed hit is the correct price for "always works."
-    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
-    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
-    spentPower = clearVitality(spentPower, [targetTokenId]);
-    // TRIED AND REVERTED: removing Larceny's stack from just this branch
-    // (testing whether "guaranteed kill + flat foe-drain on top" was the
-    // double-dip still overpowering Warrior/Necromancer after the refund
-    // fix) barely moved either matchup (warrior 61.7->61.4, necro
-    // 62.4->59.3 at 5000 games) — Larceny's 1-mana drain isn't the
-    // driver. The remaining skew is Backstab's raw guaranteed-capture
-    // power against the two classes with no per-token defense (Ward/
-    // Blessing), not this passive. Reverted; see BACKSTAB_COST's own doc
-    // for the open thread this leaves.
-    spentPower = {
-      ...spentPower,
-      charges: {
-        ...spentPower.charges,
-        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE),
-      },
-    };
-  }
-  spentPower = breakShieldStreak(spentPower, mover);
+  const broken = breakShieldStreak(spent, mover);
   const nextState: GameState = {
-    tokens,
+    tokens: state.tokens,
     currentPlayer: otherPlayerId(mover),
     lastFlip: null,
     winner: null,
     extraTurn: false,
   };
-  return {
-    state: nextState,
-    power: resetTurnFlags(spentPower),
-    woundedTokenId: woundsInstead ? targetTokenId : null,
-  };
+  return { state: nextState, power: resetTurnFlags(broken) };
 }
 
 /** Rogue's Grand Heist ultimate: same target eligibility as Blink Strike/

@@ -49,7 +49,7 @@ export type ProcIconId =
   | "wound"
   | "larceny"
   | "pickpocket"
-  | "backstab"
+  | "vanish"
   | "grandHeist";
 
 // Fixed frame gold — matches the plate/frame trim, constant across classes.
@@ -86,7 +86,7 @@ const STONE = `<path d="${STONE_PATH}" ${MAIN} ${BODY}/>`;
 const GROUND = `<path d="M6 40 L42 40" ${GOLD_DETAIL}/>` + `<path d="M42 ${40 - 1.8} L${42 + 1.8} 40 L42 ${40 + 1.8} L${42 - 1.8} 40 Z" fill="${GOLD}"/>`;
 
 // Rogue family: one dagger held low, reused so Larceny / Pickpocket /
-// Backstab / Grand Heist stay siblings (the warrior shield rule) — a coin
+// Vanish / Grand Heist stay siblings (the warrior shield rule) — a coin
 // motif carries the theft half of the identity across the same four icons.
 const DAGGER =
   `<path d="M24 6 L28.5 23 L24 28 L19.5 23 Z" ${MAIN} ${BODY}/>` +
@@ -424,14 +424,14 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M29 26 L33 30 L37 26" ${GOLD_DETAIL}/>`,
   ),
 
-  // Rogue active (2 mana): the dagger's tip alone, struck true — no
-  // flourish, just the one guaranteed hit.
-  backstab: wrap(
+  // Rogue active (1 mana): the dagger dissolving into shadow — a soft
+  // trail of shrinking, dimming motes drifting away, instead of the old
+  // Backstab's aggressive strike-burst this icon slot used to carry.
+  vanish: wrap(
     DAGGER +
-      `<path d="M24 2 L24 5.5" ${GOLD_DETAIL}/>` +
-      `<path d="M18 4 L20.5 7.5" ${GOLD_DETAIL}/>` +
-      `<path d="M30 4 L27.5 7.5" ${GOLD_DETAIL}/>` +
-      diamond(24, 1.5, 1.6, GOLD),
+      `<circle cx="10" cy="14" r="1.6" fill="${GOLD}" fill-opacity="0.85"/>` +
+      `<circle cx="7" cy="20" r="1.2" fill="${GOLD}" fill-opacity="0.55"/>` +
+      `<circle cx="6" cy="27" r="0.8" fill="${GOLD}" fill-opacity="0.3"/>`,
   ),
 
   // Rogue ultimate: the dagger at the center of the whole haul — every
