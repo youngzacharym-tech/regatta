@@ -331,33 +331,48 @@ function scoreUltimateStrike(state: GameState, targetId: number, rand: () => num
   return score;
 }
 
-/** Score Warrior's Bulwark: defensive insurance on the mover's most-advanced
+/** Score Warrior's Bulwark (and, via the shared call site below, Rogue's
+ *  Vanish — the same mechanic under a Rogue cast, see VANISH_COST in
+ *  master-killer.ts): defensive insurance on the mover's most-advanced
  *  un-Bulwarked on-board token, scaled by how far along it already is
  *  (mirrors scorePush's own target.position scaling) so the bot naturally
  *  favors protecting whichever token has the most invested.
  *
- *  Deliberately biased NEGATIVE at the low end (score starts at -35, not 0)
- *  rather than just "modest but positive" — this is the fix for a real bug
- *  found while tuning this exact function, worth recording since it's a new
- *  instance of the file's established "flat bonus quietly out-competes a
+ *  GATED on a live capture threat (bulwarkFacesThreat) — 2026-07-25. The
+ *  negative floor alone (see below) was NOT enough: position scaling plus the
+ *  random jitter let any mid-to-well-advanced token clear zero on a quiet turn,
+ *  so the bot cast Bulwark/Vanish on un-threatened stones the large majority of
+ *  the time (measured: only ~13-30% of casts actually blocked a capture across
+ *  every matchup — bulwarkBlock/g vs bulwark/g or vanish/g in
+ *  batch-random-master-killer-games.ts). For a Rogue that is especially
+ *  costly: Vanish is its ONLY defensive tool, so wasting ~85% of casts made the
+ *  class look far weaker than it plays with the ability used defensively. The
+ *  gate is the same one scoreReinforcedBulwark/scoreBless/scoreHeal already use
+ *  (bulwarkFacesThreat's own doc records that adding it FLIPPED every
+ *  second-charge Bulwark design from tanking the Warrior to improving it), and
+ *  matches how a human uses a react-to-danger shield: cast it when a stone is
+ *  actually reachable, not on spec.
+ *
+ *  The negative floor (score starts at -40) is kept underneath the gate as a
+ *  second line of defense, and is itself the fix for an earlier real bug — a
+ *  new instance of the file's established "flat bonus quietly out-competes a
  *  strictly-better plain move" failure mode (see the chargeSweepCaptures.length
- *  check above for the original case). Bulwark is essentially ALWAYS
- *  evaluable for a Warrior with a spare charge (unlike Push, which needs a
- *  specific enemy on a contested tile, or Reflip, which needs a bad flip) —
- *  so ANY comfortably-positive flat score, even a small one, made the bot
- *  cast it almost every eligible turn instead of advancing or Charging.
- *  Balance-sim fallout was severe: archer-vs-warrior swung from the ~43.6/
- *  56.4 warrior-favored baseline all the way to ~80/20 ARCHER-favored,
- *  because a Warrior burning its charge income on defense instead of
- *  Charge's actual capture-and-advance loop stops converting board control
- *  into wins. The negative floor means Bulwark only wins against an
- *  already-bad alternative (a quiet move into contested territory near an
- *  enemy takes scoreMove's -80 "threatened" penalty, for example) or a
- *  well-advanced token (position 12+ pulls the score back toward/above
- *  zero) — occasional insurance on a valuable token when nothing better is
- *  on offer, not a default action. */
+ *  check above for the original case). Bulwark is essentially ALWAYS evaluable
+ *  for a Warrior with a spare charge (unlike Push, which needs a specific enemy
+ *  on a contested tile, or Reflip, which needs a bad flip) — so ANY
+ *  comfortably-positive flat score, even a small one, made the bot cast it
+ *  almost every eligible turn instead of advancing or Charging. Balance-sim
+ *  fallout was severe: archer-vs-warrior swung from the ~43.6/56.4
+ *  warrior-favored baseline all the way to ~80/20 ARCHER-favored, because a
+ *  Warrior burning its charge income on defense instead of Charge's actual
+ *  capture-and-advance loop stops converting board control into wins. With the
+ *  threat gate now in front, the floor mostly matters as a tiebreak among
+ *  genuinely-threatened tokens (well-advanced ones, position 12+, pull back
+ *  toward/above zero) — occasional insurance on a valuable token when nothing
+ *  better is on offer, not a default action. */
 function scoreBulwark(state: GameState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
+  if (!bulwarkFacesThreat(state, target)) return -Infinity;
   let score = -40 + target.position * 3;
   score += rand() * 20;
   return score;
@@ -406,6 +421,28 @@ function scoreReinforcedBulwark(state: GameState, targetId: number, rand: () => 
   let score = -40 + target.position * 5;
   score += rand() * 20;
   return score;
+}
+
+/** Score Rogue's Vanish. Vanish IS Bulwark's mechanic under a Rogue cast (see
+ *  VANISH_COST), and it is scored with the SAME threat-gated, negative-floor
+ *  discipline scoreBulwark uses — a Rogue vanishes a stone that's actually in
+ *  capture danger, not on spec (that gate's own history note explains why an
+ *  ungated defensive cast tanks the class that spams it).
+ *
+ *  It does NOT get a special premium for Push threats, even though a Vanished
+ *  stone is Push-immune (see isVanished/getPushTargets). That was tried and
+ *  REJECTED by simulation: proactively vanishing against an Archer's Push made
+ *  archer-vs-rogue WORSE at every tested strength (72.4 baseline -> 74.9 modest
+ *  -> 76.9 aggressive, rogue win% falling). Vanish ends the turn, so every
+ *  proactive cast forfeits a full turn of race progress — more than a
+ *  PUSH_DISTANCE=1 shove costs — and the Archer's real pressure is Snipe (a
+ *  free passive capture, ~5/game) that hiding one stone can't offset. So the
+ *  bot only vanishes reactively to a live capture threat; the Push-immunity is
+ *  a correctness/identity property that helps a human Rogue, not a tempo the
+ *  AI should spend turns chasing. Kept as its own function (not folded back
+ *  into scoreBulwark) purely to hold this finding at the call site. */
+function scoreVanish(state: GameState, targetId: number, rand: () => number): number {
+  return scoreBulwark(state, targetId, rand);
 }
 
 /** Score Re-flip: only worth it when the CURRENT flip is bad — zero, or a
@@ -782,16 +819,16 @@ function pickStandardPowerAction(
       }
     }
     // Vanish IS Bulwark's mechanic under a Rogue cast (see VANISH_COST's
-    // doc in master-killer.ts) — reuses scoreBulwark's exact formula too,
-    // deliberately, rather than inventing a fresh one: that function's own
-    // history note records a real balance bug from an under-penalized
-    // "always evaluable" defensive cast (archer-vs-warrior swung to ~80/20
-    // before the negative floor fixed it), and Vanish has the identical
-    // shape (always available whenever the Rogue has a charge and an
-    // unprotected own stone), so the same discipline applies unchanged.
+    // doc in master-killer.ts), so scoreVanish keeps scoreBulwark's exact
+    // threat-gated, negative-floor discipline (that function's history note
+    // records a real balance bug from an under-penalized "always evaluable"
+    // defensive cast — archer-vs-warrior swung to ~80/20 before the floor
+    // fixed it; Vanish has the identical always-available shape). It does not
+    // get a Push-threat premium despite being Push-immune — see scoreVanish's
+    // own doc for the simulation that rejected that idea.
     if (charges >= VANISH_COST) {
       for (const targetId of getVanishTargets(state, power, mover)) {
-        const score = scoreBulwark(state, targetId, rand);
+        const score = scoreVanish(state, targetId, rand);
         if (score > bestScore) {
           bestScore = score;
           best = { kind: "vanish", tokenId: targetId };

@@ -2676,6 +2676,41 @@ function check(name: string, cond: boolean, detail?: string) {
     const blocked = moves.find((mv) => mv.tokenId === 0 && mv.to === 6);
     check("Vanish: a Vanished stone blocks a normal capturing move onto it", blocked === undefined, JSON.stringify(moves));
   }
+
+  // --- Vanish blocks Push (2026-07-25). Unlike a plain Warrior Bulwark — but
+  //     LIKE a Reinforced one — a Vanished Rogue stone has FULL Push-immunity,
+  //     not just the send-home case (see isVanished/getPushTargets). Push is
+  //     the Archer's primary answer to Rogue, so a soft-shoveable Vanish left
+  //     archer-vs-rogue with no defensive answer at all. Scoped to Rogue by
+  //     construction (power.classes[owner] === "rogue"), so a Warrior's own
+  //     plain Bulwark keeps its unchanged soft-push rule. ---
+  {
+    const s = state("p1", { 0: 4, 4: 6 }); // p1 archer at 4, p2's stone at contested 6
+    const base = power({ p1: "archer", p2: "rogue" }, { p1: CHARGE_CAP });
+    const pwVanished: PowerState = { ...base, bulwarked: { 4: VANISH_TURNS } };
+    check(
+      "Vanish blocks Push: a Vanished Rogue stone is NOT a legal Push target (full immunity)",
+      !getPushTargets(s, pwVanished, "p1").includes(4),
+      JSON.stringify(getPushTargets(s, pwVanished, "p1")),
+    );
+    check(
+      "Vanish blocks Push: sanity — the identical stone IS a Push target without Vanish",
+      getPushTargets(s, base, "p1").includes(4),
+      JSON.stringify(getPushTargets(s, base, "p1")),
+    );
+    // The SAME bulwarked flag on a Warrior's own stone is a plain Bulwark, not
+    // a Vanish — it must still allow the soft (non-home) shove, proving
+    // isVanished's Rogue scoping didn't leak into Warrior's tuned rule.
+    const pwWarrior: PowerState = {
+      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
+      bulwarked: { 4: 2 },
+    };
+    check(
+      "Vanish blocks Push: a Warrior's plain Bulwark on the same tile still allows a soft push",
+      getPushTargets(s, pwWarrior, "p1").includes(4),
+      JSON.stringify(getPushTargets(s, pwWarrior, "p1")),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

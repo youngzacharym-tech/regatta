@@ -934,6 +934,28 @@ export function isBulwarkReinforced(power: PowerState, token: TokenState): boole
   return power.bulwarkSaves[token.id] !== undefined;
 }
 
+/** Is this token hidden by a Rogue's Vanish specifically? Vanish reuses
+ *  Bulwark's bulwarked-map mechanic wholesale (see VANISH_COST's doc), so a
+ *  bulwarked flag on a ROGUE-owned token can ONLY have come from Vanish — a
+ *  Rogue never casts Warrior Bulwark, and a seat is never both classes, so
+ *  power.classes[owner] disambiguates the shared field with zero conflict.
+ *
+ *  Unlike a plain Warrior Bulwark — but LIKE a Reinforced one — a Vanished
+ *  stone is fully immune to Push (see getPushTargets), not just its send-home
+ *  case. This is scoped by construction to the archer-vs-rogue matchup (only
+ *  an Archer has Push) and exists because that matchup was otherwise
+ *  structurally unwinnable for the Rogue: Push is the Archer's primary answer
+ *  to Rogue (push/g ~6 in the sim) and Vanish is the Rogue's ONLY defensive
+ *  lever, yet a plain Vanish left the hidden stone freely shoveable — so a
+ *  smarter defensive AI couldn't move the matchup at all (see
+ *  batch-random-master-killer-games.ts history). Charged Shot still moves a
+ *  Vanished stone (soft only, never send-home), exactly as it still moves a
+ *  Reinforced Bulwark — the same "the bigger, rarer tool still reaches it"
+ *  carve-out. */
+export function isVanished(power: PowerState, token: TokenState): boolean {
+  return power.classes[token.owner] === "rogue" && isBulwarked(power, token);
+}
+
 /** Universal "is this token capturable/pushable/sweepable AT ALL right
  *  now" check, used everywhere EXCEPT the main landing-capture path (which
  *  needs to distinguish ward-protection specifically, since that's the one
@@ -1681,7 +1703,10 @@ function computeChargedShotLanding(state: GameState, power: PowerState, target: 
  *  even the soft shove — so those targets are excluded outright (no
  *  charge-burning no-op trap; the target ring simply never appears).
  *  Charged Shot is the Archer tool that still moves one (2026-07-17,
- *  Kasen's fix list).
+ *  Kasen's fix list). A Rogue's VANISH (see isVanished) gets the same full
+ *  Push-immunity as a Reinforced Bulwark — Push is the Archer's main answer
+ *  to Rogue and Vanish is the Rogue's only shield, so a soft-shoveable Vanish
+ *  left archer-vs-rogue structurally unwinnable (2026-07-25).
  *
  *  Refunds its charge (see applyPush) specifically when it sends the target
  *  all the way home to reserve — that outcome is functionally a capture
@@ -1697,6 +1722,7 @@ export function getPushTargets(state: GameState, power: PowerState, mover: Playe
     .filter((t) => !onShieldTile(t))
     .filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST)
     .filter((t) => !isBulwarkReinforced(power, t))
+    .filter((t) => !isVanished(power, t))
     .filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1)
     .map((t) => t.id);
 }

@@ -426,6 +426,9 @@ function isBulwarked(power, token) {
 function isBulwarkReinforced(power, token) {
   return power.bulwarkSaves[token.id] !== void 0;
 }
+function isVanished(power, token) {
+  return power.classes[token.owner] === "rogue" && isBulwarked(power, token);
+}
 function isProtected(state, power, token) {
   return onShieldTile(token) || isWarded(state, power, token) || isBulwarked(power, token);
 }
@@ -740,7 +743,7 @@ function computeChargedShotLanding(state, power, target) {
 }
 function getPushTargets(state, power, mover) {
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).filter((t) => !isBulwarkReinforced(power, t)).filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1).map((t) => t.id);
+  return state.tokens.filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t)).filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST).filter((t) => !isBulwarkReinforced(power, t)).filter((t) => !isVanished(power, t)).filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1).map((t) => t.id);
 }
 function applyPush(state, power, targetTokenId, mover) {
   const target = state.tokens.find((t) => t.id === targetTokenId);
@@ -1353,6 +1356,7 @@ function scoreUltimateStrike(state, targetId, rand) {
 }
 function scoreBulwark(state, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
+  if (!bulwarkFacesThreat(state, target)) return -Infinity;
   let score = -40 + target.position * 3;
   score += rand() * 20;
   return score;
@@ -1371,6 +1375,9 @@ function scoreReinforcedBulwark(state, targetId, rand) {
   let score = -40 + target.position * 5;
   score += rand() * 20;
   return score;
+}
+function scoreVanish(state, targetId, rand) {
+  return scoreBulwark(state, targetId, rand);
 }
 function scoreReflip(currentMoveCount, flip, rand) {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
@@ -1587,7 +1594,7 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
     }
     if (charges >= VANISH_COST) {
       for (const targetId of getVanishTargets(state, power, mover)) {
-        const score = scoreBulwark(state, targetId, rand);
+        const score = scoreVanish(state, targetId, rand);
         if (score > bestScore) {
           bestScore = score;
           best = { kind: "vanish", tokenId: targetId };
