@@ -37,8 +37,22 @@ import {
   breakShieldStreak,
   CHARGE_CAP,
   getLegalPowerMoves,
+  applyCurse,
+  applyFelStorm,
+  applyBloodbath,
+  applyCrescendo,
+  applyInspire,
+  applySongOfHaste,
+  tickInspireForNewTurn,
+  applyPiercingShot,
+  applyRecklessSwing,
+  applyWhirlwind,
+  applySacrifice,
+  applySnare,
+  applyWildHunt,
   grantZeroFlipCharge,
   initialPowerState,
+  tickHamstringForNewTurn,
   possessorOf,
   REFLIPS_PER_TURN,
   tickBulwarkForNewTurn,
@@ -52,7 +66,10 @@ import { pickBotPowerAction } from "./master-killer-bot.ts";
 const GAMES_PER_MATCHUP = Number(process.argv[2] ?? 2000);
 const MAX_TURNS_PER_GAME = 1000;
 
-const CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
+const CLASSES: PlayerClass[] = [
+  "archer", "mage", "warrior", "necromancer", "cleric", "rogue",
+  "warlock", "hunter", "barbarian", "bard",
+];
 
 interface GameResult {
   winner: PlayerId | null;
@@ -87,6 +104,40 @@ interface GameResult {
     pickpocket: number; // Rogue Pickpocket casts (turn-keeping bank drain)
     vanish: number; // Rogue Vanish casts (Bulwark's mechanic, Rogue-cast)
     grandHeist: number; // Grand Heist ultimates fired
+    curse: number; // Warlock Curse of Chains casts (turn-keeping hex)
+    sacrifice: number; // Warlock Sacrifice casts (own stone traded for a pierce-kill)
+    felStorm: number; // Fel Storm ultimates fired
+    felStormDragged: number; // stones the storm dragged back, summed over casts
+    snare: number; // Hunter Snare placements (turn-keeping trap arming)
+    trapSprung: number; // traps an enemy actually stepped into
+    trapHome: number; // of those, ones that threw the victim all the way home
+    wolfBite: number; // Wolf Companion knockbacks (the free passive)
+    wolfHome: number; // of those, ones that sent the victim home
+    piercingShot: number; // Hunter Piercing Shot casts (full-bank kill at range)
+    wildHunt: number; // Wild Hunt ultimates fired
+    recklessSwing: number; // Barbarian Reckless Swing casts
+    recklessSelfHome: number; // of those, ones whose recoil sent the swinger home
+    whirlwind: number; // Barbarian Whirlwind casts (full-bank radial spin)
+    whirlwindCaught: number; // stones the spin captured or shoved, summed
+    bloodbath: number; // Bloodbath ultimates fired
+    bloodbathKills: number; // stones the charge ran down, summed
+    inspire: number; // Bard Inspire casts (turn-keeping stacking buff)
+    songOfHaste: number; // Song of Haste casts
+    hasteMarched: number; // stones the song advanced, summed over casts
+    crescendo: number; // Crescendo ultimates fired
+  };
+}
+
+/** The enemy Hunter's reactive layer fires inside resolveTurn, so its stats
+ *  ride the MOVER's result rather than any action the hunter chose — both
+ *  the landing-move and the Charge paths report them identically. */
+function trapWolfUsage(r: {
+  trapSprung: { sentHome: boolean } | null;
+  wolfBite: { sentHome: boolean } | null;
+}): Partial<GameResult["usage"]> {
+  return {
+    ...(r.trapSprung ? { trapSprung: 1, ...(r.trapSprung.sentHome ? { trapHome: 1 } : {}) } : {}),
+    ...(r.wolfBite ? { wolfBite: 1, ...(r.wolfBite.sentHome ? { wolfHome: 1 } : {}) } : {}),
   };
 }
 
@@ -115,6 +166,13 @@ function takeTurn(
   state = thrallTick.state;
   power = thrallTick.power;
   const thrallExpiredThisTurn = thrallTick.expiredTokenId !== null;
+  // Hunter freeze expiry, same slot as room-engine's commitTurnFlip: BEFORE
+  // move gen, so a thawing stone moves on the turn its freeze runs out.
+  // (Curse expiry has no analogue here — the curse only bends a stride, and
+  // the sim's own turn loop never needed the announcement.)
+  power = tickHamstringForNewTurn(state, power).power;
+  // Inspiration expiry, same slot: a faded stone moves at its true speed.
+  power = tickInspireForNewTurn(state, power).power;
   let moves = getLegalPowerMoves(state, power, flip);
   // Warrior Bulwark: tick the mover's own countdown, and consume any
   // Bulwark this exact flip's moves reveal as blocked for the opponent —
@@ -148,9 +206,18 @@ function takeTurn(
   let revives = 0;
   let blessCasts = 0;
   let pickpocketCasts = 0;
+  let curseCasts = 0;
+  let snareCasts = 0;
+  let inspireCasts = 0;
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless" || action?.kind === "pickpocket") &&
+    (action?.kind === "reflip" ||
+      action?.kind === "revive" ||
+      action?.kind === "bless" ||
+      action?.kind === "pickpocket" ||
+      action?.kind === "curse" ||
+      action?.kind === "snare" ||
+      action?.kind === "inspire") &&
     i <= REFLIPS_PER_TURN + CHARGE_CAP * 2 + 1;
     i++
   ) {
@@ -169,9 +236,26 @@ function takeTurn(
       state = r.state;
       power = r.power;
       blessCasts++;
-    } else {
+    } else if (action.kind === "pickpocket") {
       power = applyPickpocket(power, mover);
       pickpocketCasts++;
+    } else if (action.kind === "curse") {
+      // Warlock's Curse of Chains — applyCurse's contract: same flip, no
+      // board change (the hex only bends the VICTIM's stride), so the
+      // recompute below is a formality that keeps every turn-keeper's
+      // shape identical.
+      power = applyCurse(power, action.targetTokenId, mover);
+      curseCasts++;
+    } else if (action.kind === "snare") {
+      // Hunter's Snare — applySnare's contract, Curse's shape exactly.
+      power = applySnare(power, action.tile, mover);
+      snareCasts++;
+    } else {
+      // Bard's Inspire — same contract again, and the one turn-keeper that
+      // genuinely changes the mover's OWN move list (a lit stone strides
+      // further), which the recompute below picks up.
+      power = applyInspire(power, action.targetTokenId, mover);
+      inspireCasts++;
     }
     moves = getLegalPowerMoves(state, power, flip);
     const sameTurnBulwark = tickBulwarkForReflip(state, power, flip);
@@ -188,6 +272,9 @@ function takeTurn(
     ...(revives > 0 ? { revive: revives } : {}),
     ...(blessCasts > 0 ? { bless: blessCasts } : {}),
     ...(pickpocketCasts > 0 ? { pickpocket: pickpocketCasts } : {}),
+    ...(curseCasts > 0 ? { curse: curseCasts } : {}),
+    ...(snareCasts > 0 ? { snare: snareCasts } : {}),
+    ...(inspireCasts > 0 ? { inspire: inspireCasts } : {}),
     ...(thrallExpiredThisTurn ? { thrallExpired: 1 } : {}),
   };
 
@@ -201,7 +288,10 @@ function takeTurn(
     action.kind === "reflip" ||
     action.kind === "revive" ||
     action.kind === "bless" ||
-    action.kind === "pickpocket"
+    action.kind === "pickpocket" ||
+    action.kind === "curse" ||
+    action.kind === "snare" ||
+    action.kind === "inspire"
   ) {
     // No zero-flip grant here — it already happened on the flip commit
     // above (or inside the re-flip loop), matching the server's ordering.
@@ -239,6 +329,7 @@ function takeTurn(
           ...(corpseDeny ? { corpseDeny: 1 } : {}),
           ...(r.wounded.length > 0 ? { wound: r.wounded.length } : {}),
           ...(r.mendedTokenIds.length > 0 ? { mend: r.mendedTokenIds.length } : {}),
+          ...trapWolfUsage(r),
         },
       };
     }
@@ -258,6 +349,7 @@ function takeTurn(
           ...(rainHit ? { charge: 1, rainOfArrows: 1 } : { charge: 1 }),
           ...(r.wounded.length > 0 ? { wound: r.wounded.length } : {}),
           ...(r.mendedTokenIds.length > 0 ? { mend: r.mendedTokenIds.length } : {}),
+          ...trapWolfUsage(r),
         },
       };
     }
@@ -353,6 +445,120 @@ function takeTurn(
       const r = applyGrandHeist(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 1, usage: { ...turnUsage, grandHeist: 1 } };
     }
+    case "sacrifice": {
+      // One enemy killed; the mover's own stone is the price, not a
+      // capture — sweepSize counts the kill only, matching applyMkSacrifice's
+      // scoreboard rule.
+      const r = applySacrifice(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 1, usage: { ...turnUsage, sacrifice: 1 } };
+    }
+    case "felStorm": {
+      // Displacement, not capture (its rare crumble deaths are the
+      // possession rule collecting, not a kill the warlock scored) —
+      // sweepSize stays 0, Exhume's own precedent.
+      const r = applyFelStorm(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 0,
+        usage: { ...turnUsage, felStorm: 1, felStormDragged: r.struckTokenIds.length },
+      };
+    }
+    case "piercingShot": {
+      const r = applyPiercingShot(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.killedTokenId !== null ? 1 : 0,
+        usage: {
+          ...turnUsage,
+          piercingShot: 1,
+          ...(r.woundedTokenId !== null ? { wound: 1 } : {}),
+        },
+      };
+    }
+    case "wildHunt": {
+      const r = applyWildHunt(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.killedTokenId !== null ? 1 : 0,
+        usage: { ...turnUsage, wildHunt: 1 },
+      };
+    }
+    case "recklessSwing": {
+      const r = applyRecklessSwing(state, power, action.targetTokenId, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.killedTokenId !== null ? 1 : 0,
+        usage: {
+          ...turnUsage,
+          recklessSwing: 1,
+          ...(r.swingerSentHome ? { recklessSelfHome: 1 } : {}),
+          ...(r.woundedTokenId !== null ? { wound: 1 } : {}),
+        },
+      };
+    }
+    case "whirlwind": {
+      const r = applyWhirlwind(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.capturedTokenIds.length,
+        usage: {
+          ...turnUsage,
+          whirlwind: 1,
+          whirlwindCaught: r.capturedTokenIds.length + r.knockedTokenIds.length,
+          ...(r.woundedTokenIds.length > 0 ? { wound: r.woundedTokenIds.length } : {}),
+        },
+      };
+    }
+    case "bloodbath": {
+      const r = applyBloodbath(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.killedTokenIds.length,
+        usage: { ...turnUsage, bloodbath: 1, bloodbathKills: r.killedTokenIds.length },
+      };
+    }
+    case "songOfHaste": {
+      const r = applySongOfHaste(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.capturedIds.length,
+        usage: {
+          ...turnUsage,
+          songOfHaste: 1,
+          hasteMarched: r.movedIds.length,
+          ...(r.woundedIds.length > 0 ? { wound: r.woundedIds.length } : {}),
+        },
+      };
+    }
+    case "crescendo": {
+      const r = applyCrescendo(state, power, mover);
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: r.capturedIds.length,
+        usage: {
+          ...turnUsage,
+          crescendo: 1,
+          hasteMarched: r.movedIds.length,
+          ...(r.woundedIds.length > 0 ? { wound: r.woundedIds.length } : {}),
+        },
+      };
+    }
   }
 }
 
@@ -390,6 +596,27 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     pickpocket: 0,
     vanish: 0,
     grandHeist: 0,
+    curse: 0,
+    sacrifice: 0,
+    felStorm: 0,
+    felStormDragged: 0,
+    snare: 0,
+    trapSprung: 0,
+    trapHome: 0,
+    wolfBite: 0,
+    wolfHome: 0,
+    piercingShot: 0,
+    wildHunt: 0,
+    recklessSwing: 0,
+    recklessSelfHome: 0,
+    whirlwind: 0,
+    whirlwindCaught: 0,
+    bloodbath: 0,
+    bloodbathKills: 0,
+    inspire: 0,
+    songOfHaste: 0,
+    hasteMarched: 0,
+    crescendo: 0,
   };
   const rand = Math.random;
 
@@ -433,6 +660,28 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     usage.pickpocket += r.usage.pickpocket ?? 0;
     if (r.usage.vanish) usage.vanish++;
     if (r.usage.grandHeist) usage.grandHeist++;
+    // Curses arrive as counts (the turn-keeping loop's shape, like revives).
+    usage.curse += r.usage.curse ?? 0;
+    if (r.usage.sacrifice) usage.sacrifice++;
+    if (r.usage.felStorm) usage.felStorm++;
+    usage.felStormDragged += r.usage.felStormDragged ?? 0;
+    usage.snare += r.usage.snare ?? 0;
+    if (r.usage.trapSprung) usage.trapSprung++;
+    if (r.usage.trapHome) usage.trapHome++;
+    if (r.usage.wolfBite) usage.wolfBite++;
+    if (r.usage.wolfHome) usage.wolfHome++;
+    if (r.usage.piercingShot) usage.piercingShot++;
+    if (r.usage.wildHunt) usage.wildHunt++;
+    if (r.usage.recklessSwing) usage.recklessSwing++;
+    if (r.usage.recklessSelfHome) usage.recklessSelfHome++;
+    if (r.usage.whirlwind) usage.whirlwind++;
+    usage.whirlwindCaught += r.usage.whirlwindCaught ?? 0;
+    if (r.usage.bloodbath) usage.bloodbath++;
+    usage.bloodbathKills += r.usage.bloodbathKills ?? 0;
+    usage.inspire += r.usage.inspire ?? 0;
+    if (r.usage.songOfHaste) usage.songOfHaste++;
+    usage.hasteMarched += r.usage.hasteMarched ?? 0;
+    if (r.usage.crescendo) usage.crescendo++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -509,6 +758,27 @@ for (const [a, b] of matchups) {
   const avgPickpocket = mean(results.map((r) => r.usage.pickpocket));
   const avgVanish = mean(results.map((r) => r.usage.vanish));
   const avgGrandHeist = mean(results.map((r) => r.usage.grandHeist));
+  const avgCurse = mean(results.map((r) => r.usage.curse));
+  const avgSacrifice = mean(results.map((r) => r.usage.sacrifice));
+  const avgFelStorm = mean(results.map((r) => r.usage.felStorm));
+  const avgFelStormDragged = mean(results.map((r) => r.usage.felStormDragged));
+  const avgSnare = mean(results.map((r) => r.usage.snare));
+  const avgTrapSprung = mean(results.map((r) => r.usage.trapSprung));
+  const avgTrapHome = mean(results.map((r) => r.usage.trapHome));
+  const avgWolfBite = mean(results.map((r) => r.usage.wolfBite));
+  const avgWolfHome = mean(results.map((r) => r.usage.wolfHome));
+  const avgPiercingShot = mean(results.map((r) => r.usage.piercingShot));
+  const avgWildHunt = mean(results.map((r) => r.usage.wildHunt));
+  const avgReckless = mean(results.map((r) => r.usage.recklessSwing));
+  const avgRecklessHome = mean(results.map((r) => r.usage.recklessSelfHome));
+  const avgWhirlwind = mean(results.map((r) => r.usage.whirlwind));
+  const avgWhirlwindCaught = mean(results.map((r) => r.usage.whirlwindCaught));
+  const avgBloodbath = mean(results.map((r) => r.usage.bloodbath));
+  const avgBloodbathKills = mean(results.map((r) => r.usage.bloodbathKills));
+  const avgInspire = mean(results.map((r) => r.usage.inspire));
+  const avgHaste = mean(results.map((r) => r.usage.songOfHaste));
+  const avgHasteMarched = mean(results.map((r) => r.usage.hasteMarched));
+  const avgCrescendo = mean(results.map((r) => r.usage.crescendo));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
@@ -522,7 +792,17 @@ for (const [a, b] of matchups) {
       `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
       `  bless/g=${avgBless.toFixed(2)}  heal/g=${avgHeal.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
       `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}` +
-      `  pickpocket/g=${avgPickpocket.toFixed(2)}  vanish/g=${avgVanish.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}`,
+      `  pickpocket/g=${avgPickpocket.toFixed(2)}  vanish/g=${avgVanish.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}` +
+      `  curse/g=${avgCurse.toFixed(2)}  sacrifice/g=${avgSacrifice.toFixed(3)}` +
+      `  felStorm/g=${avgFelStorm.toFixed(4)}  felStormDrag/g=${avgFelStormDragged.toFixed(3)}` +
+      `  snare/g=${avgSnare.toFixed(2)}  trapSprung/g=${avgTrapSprung.toFixed(3)}  trapHome/g=${avgTrapHome.toFixed(3)}` +
+      `  wolfBite/g=${avgWolfBite.toFixed(3)}  wolfHome/g=${avgWolfHome.toFixed(3)}` +
+      `  piercingShot/g=${avgPiercingShot.toFixed(3)}  wildHunt/g=${avgWildHunt.toFixed(4)}` +
+      `  reckless/g=${avgReckless.toFixed(3)}  recklessHome/g=${avgRecklessHome.toFixed(3)}` +
+      `  whirlwind/g=${avgWhirlwind.toFixed(3)}  wwCaught/g=${avgWhirlwindCaught.toFixed(3)}` +
+      `  bloodbath/g=${avgBloodbath.toFixed(4)}  bbKills/g=${avgBloodbathKills.toFixed(3)}` +
+      `  inspire/g=${avgInspire.toFixed(2)}  haste/g=${avgHaste.toFixed(3)}` +
+      `  hasteMarch/g=${avgHasteMarched.toFixed(3)}  crescendo/g=${avgCrescendo.toFixed(4)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

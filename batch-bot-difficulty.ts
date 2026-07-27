@@ -40,12 +40,26 @@ import {
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
+  applyCurse,
   applyExhume,
+  applyFelStorm,
+  applyBloodbath,
+  applyCrescendo,
+  applyInspire,
+  applySongOfHaste,
+  tickInspireForNewTurn,
+  applyPiercingShot,
+  applyRecklessSwing,
+  applyWhirlwind,
+  applySnare,
+  applyWildHunt,
+  tickHamstringForNewTurn,
   applyPickpocket,
   applyPowerMove,
   applyPush,
   applyReflip,
   applyRevive,
+  applySacrifice,
   applyVanish,
   applyWarpath,
   breakShieldStreak,
@@ -85,7 +99,10 @@ const HARD_VS_STANDARD_MIN = 55;
  *  hard-vs-standard, from the other side. */
 const STANDARD_VS_EASY_MIN = 55;
 
-const MK_MIRRORS: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
+const MK_MIRRORS: PlayerClass[] = [
+  "archer", "mage", "warrior", "necromancer", "cleric", "rogue",
+  "warlock", "hunter", "barbarian", "bard",
+];
 const PAIRINGS: [BotDifficulty, BotDifficulty, number][] = [
   // [stronger, weaker, min stronger win%]
   ["standard", "easy", STANDARD_VS_EASY_MIN],
@@ -134,17 +151,27 @@ function takeTurnMK(
   const thrallTick = tickThrallForNewTurn(state, power);
   state = thrallTick.state;
   power = thrallTick.power;
+  // Hunter freeze expiry, room-engine's commitTurnFlip ordering: before
+  // move gen, so a thawing stone moves on the turn its freeze runs out.
+  power = tickHamstringForNewTurn(state, power).power;
+  power = tickInspireForNewTurn(state, power).power;
   let moves = getLegalPowerMoves(state, power, flip);
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
 
-  // Cleric Bless and Rogue Pickpocket joined the turn-keeping club
-  // (applyBless/applyPickpocket's shared contract; Heal did NOT — it ends
-  // the turn, see HEAL_COST's doc) — same four-kind loop as
-  // batch-random-master-killer-games.ts's takeTurn.
+  // Cleric Bless, Rogue Pickpocket and Warlock Curse joined the
+  // turn-keeping club (applyBless/applyPickpocket/applyCurse's shared
+  // contract; Heal did NOT — it ends the turn, see HEAL_COST's doc) —
+  // same five-kind loop as batch-random-master-killer-games.ts's takeTurn.
   for (
     let i = 0;
-    (action?.kind === "reflip" || action?.kind === "revive" || action?.kind === "bless" || action?.kind === "pickpocket") &&
+    (action?.kind === "reflip" ||
+      action?.kind === "revive" ||
+      action?.kind === "bless" ||
+      action?.kind === "pickpocket" ||
+      action?.kind === "curse" ||
+      action?.kind === "snare" ||
+      action?.kind === "inspire") &&
     i <= REFLIPS_PER_TURN + CHARGE_CAP * 2 + 1;
     i++
   ) {
@@ -160,8 +187,14 @@ function takeTurnMK(
       const r = applyBless(state, power, action.targetTokenId, mover);
       state = r.state;
       power = r.power;
-    } else {
+    } else if (action.kind === "pickpocket") {
       power = applyPickpocket(power, mover);
+    } else if (action.kind === "curse") {
+      power = applyCurse(power, action.targetTokenId, mover);
+    } else if (action.kind === "snare") {
+      power = applySnare(power, action.tile, mover);
+    } else {
+      power = applyInspire(power, action.targetTokenId, mover);
     }
     moves = getLegalPowerMoves(state, power, flip);
     power = tickBulwarkForReflip(state, power, flip).power;
@@ -173,7 +206,10 @@ function takeTurnMK(
     action.kind === "reflip" ||
     action.kind === "revive" ||
     action.kind === "bless" ||
-    action.kind === "pickpocket"
+    action.kind === "pickpocket" ||
+    action.kind === "curse" ||
+    action.kind === "snare" ||
+    action.kind === "inspire"
   ) {
     // Skip breaks a live shield streak, matching room-engine's auto-skip
     // (see batch-random-master-killer-games.ts's dead-end branch).
@@ -220,6 +256,42 @@ function takeTurnMK(
       return applyVanish(state, power, action.tokenId, mover);
     case "grandHeist": {
       const r = applyGrandHeist(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "sacrifice": {
+      const r = applySacrifice(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "felStorm": {
+      const r = applyFelStorm(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "piercingShot": {
+      const r = applyPiercingShot(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "recklessSwing": {
+      const r = applyRecklessSwing(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "whirlwind": {
+      const r = applyWhirlwind(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "bloodbath": {
+      const r = applyBloodbath(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "songOfHaste": {
+      const r = applySongOfHaste(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "crescendo": {
+      const r = applyCrescendo(state, power, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "wildHunt": {
+      const r = applyWildHunt(state, power, mover);
       return { state: r.state, power: r.power };
     }
   }
