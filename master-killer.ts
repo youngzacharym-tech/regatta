@@ -612,11 +612,431 @@ export const VANISH_COST = 1;
  *  STARTING VALUE, not yet sim-tuned for the reworked kit. */
 export const VANISH_TURNS = BULWARK_TURNS;
 
+/** Warlock's Blood Pact (passive, free, added 2026-07-26): how many charges
+ *  the warlock banks every time one of their OWN stones is KILLED — sent
+ *  home by any capture path (enemy landing/Snipe/sweep/Push/Charged Shot/
+ *  ultimate/Corpse Explosion... AND the warlock's own Sacrifice, whose
+ *  economy is priced around this refund). Runs through addCharge, so it
+ *  caps at CHARGE_CAP like all generic income. This deliberately revives
+ *  the death-side economy the necromancer's 2026-07-19 rework vacated
+ *  (charge-per-own-loss — "boring, all defense" as a whole KIT, but fine
+ *  as one passive inside an aggressive kit that can spend the refund on
+ *  Sacrifice/Curse). NOT paid on non-kill returns: a thrall crumbling home
+ *  at expiry and an Exhumed escapee are travel, not death. Ordering vs
+ *  Rogue's Larceny (the one other ability that touches the victim's bank
+ *  on a kill): Larceny's drain resolves FIRST, then the pact pays — the
+ *  soul's price can't be picked from a pocket, so a rogue killing a
+ *  warlock stone at bank 0 leaves the warlock at 1, not 0. Grand Heist is
+ *  the exception by construction: its drain-to-zero lands after the pact's
+ *  grant and takes it along with everything else — ultimate-tier robbery
+ *  spares nothing. */
+export const BLOOD_PACT_CHARGES = 1;
+
+/** Warlock's Curse of Chains: mana cost of marking one enemy stone in
+ *  shared water. Keeps the turn (Re-flip/Bless/Pickpocket's contract) —
+ *  hex first, then still make your move. */
+export const CURSE_COST = 1;
+
+/** How many of the VICTIM's turn-starts the curse survives — ticked on
+ *  every fresh flip dealt to the victim (tickCurseForNewTurn, the
+ *  tickThrallForNewTurn convention exactly: decrement at turn start,
+ *  gone when it hits 0, so N=3 means the chains bind for the victim's
+ *  next TWO turns). Extra turns from shield landings burn a curse turn
+ *  too, same self-balancing trade the thrall's doc describes. STARTING
+ *  VALUE, not yet sim-tuned. */
+export const CURSE_TURNS = 3;
+
+/** How many tiles the curse shaves off every move the cursed stone makes —
+ *  at 1, a flip of 1 leaves the stone unable to move at all, and an exact
+ *  escape needs one more pip than usual. Nothing else in the game modifies
+ *  move DISTANCE (knockbacks move a resting stone; this bends the flip
+ *  itself), which is the design space the class claims. Applied per-token
+ *  inside getLegalPowerMoves — the victim's OTHER stones move normally. */
+export const CURSE_SLOW = 1;
+
+/** Warlock's Sacrifice: the full-bank cast (Charged Shot / Reinforced
+ *  Bulwark / Bless's spend pattern) that sends the warlock's own
+ *  MOST-ADVANCED on-board stone home (auto-selected — Blink Strike/
+ *  Warpath's convention, keeping the one-tap targeting UI; WHICH stone was
+ *  a load-bearing balance choice, see applySacrifice's doc) to kill one
+ *  enemy stone in shared water THROUGH Ward and Blessing — a full kill,
+ *  never a Cleric wound. Bulwark, Vanish, and shield tiles still block it:
+ *  this is the MAGICAL half of the defense roster pierced below ultimate
+ *  tier; Barbarian's kit (pass 4) gets the physical half, and neither tool
+ *  answers everything — that split is load-bearing for the whole
+ *  four-class expansion, do not widen either side.
+ *
+ *  ECONOMY (corrected 2026-07-26 after the first balance run): the kill
+ *  banks NOTHING — no capture charge (Corpse Explosion's desecrate
+ *  precedent, the ritual pays in blood not mana) — AND Blood Pact does not
+ *  pay for the sacrificed stone either. The design as first planned had
+ *  the pact refunding that death, on the reasoning that the net price
+ *  would be "SACRIFICE_COST minus BLOOD_PACT_CHARGES plus a stone's whole
+ *  run." That arithmetic was wrong in practice and the sim caught it: a
+ *  class's own income passive refunding its own spend makes the spend
+ *  nearly free, and the run being thrown away was near-zero too while the
+ *  cast auto-selected the rearmost stone. Both halves are now closed (see
+ *  applySacrifice) and the real price is the full bank plus the lead
+ *  runner. Ends the turn, breaks the shield streak (Push's precedent — an
+ *  attack, not a placement). */
+export const SACRIFICE_COST = 2;
+
+/** Warlock's Fel Storm ultimate: the contested-row position every enemy
+ *  stone in shared water is dragged back to — the whole row collapses onto
+ *  this tile and stacks BACKWARD from it (4, then 3, 2, ... down the
+ *  victim's own path), most-advanced victim placed first so the pack keeps
+ *  its relative order. Through ALL protection (Ward, Bulwark, Vanish,
+ *  Blessing, shield tiles — the ultimate convention; a dragged stone keeps
+ *  its Bulwark/Blessing, it never died). Board-wide displacement is the
+ *  mechanical space no other ultimate occupies — the existing five are
+ *  teleport-captures, a random strike, a mass self-buff, and a
+ *  win-condition reach. Never kills by construction (the walk always finds
+ *  a tile — at most 4 victims + 1 blocker across 5+ slots) EXCEPT a
+ *  thrall walked below tile 4, which crumble-dies by the existing
+ *  chained-to-the-row rule (computeKnockbackLanding's precedent). 4 = the
+ *  first contested tile: the gentlest phrasing of "start the gauntlet
+ *  over," and sim-adjustable downward never being possible (private lanes
+ *  are the victims' own), only the pile order is tunable. */
+export const FEL_STORM_RETURN_POSITION = 4;
+
+/** Hunter's Wolf Companion (passive, free, added 2026-07-26): the hunter's
+ *  LEAST-advanced on-board stone is the wolf, and it guards the contested
+ *  tile directly ahead of itself — an enemy that LANDS there is knocked
+ *  back this many tiles along its own path. Snipe's shape aimed the other
+ *  way: Snipe is a free capture the archer takes on its OWN turn, this is a
+ *  free shove the hunter's board position takes on the ENEMY's. Deliberately
+ *  a knockback rather than a capture — a passive that costs nothing and
+ *  fires on someone else's turn should not be the roster's cheapest kill.
+ *  Standard collision math (computeKnockbackLanding), so a blocked landing
+ *  is a send-home, which IS the passive's rare big moment. Respects every
+ *  protection (isProtected): a warded/bulwarked/shield-tile enemy walks past
+ *  the wolf untouched. */
+export const WOLF_BITE_DISTANCE = 1;
+
+/** Does the wolf CAPTURE what it catches, or merely shove it?
+ *
+ *  Capture, and this was the pass's decisive fix. The passive first shipped
+ *  as a WOLF_BITE_DISTANCE knockback on the reasoning that "a free passive
+ *  firing on someone else's turn shouldn't be the roster's cheapest kill" —
+ *  but Archer's Snipe is precisely a free passive capture, and the wolf is
+ *  strictly more avoidable than Snipe is: it guards ONE announced tile
+ *  (wolfGuardTile is public board truth) and only bites a stone whose owner
+ *  CHOSE to land there, where Snipe is aimed by the archer at a victim with
+ *  no say. The knockback version left the hunter with a kit that was 100%
+ *  denial and 0% tempo — the failure this file has now recorded four times
+ *  (the old necromancer attrition kit, the cleric's first pass, Bulwark's
+ *  own trace, and this): in a RACE, delaying the opponent does not advance
+ *  you, so every mana spent on denial is a mana the opponent simply
+ *  out-runs. See TRAP_BOUNTY for the other half of the same correction. */
+export const WOLF_CAPTURES = true;
+
+/** What a sprung trap pays its SETTER, in charges. The hunter's income
+ *  engine and the second half of the denial-to-tempo fix above: without
+ *  it, Snare converted mana into nothing but the opponent's inconvenience
+ *  at a miserable rate (measured: 12.9 snares per game producing 2.3
+ *  springs, of which 0.49 sent anyone home — the rest of that mana simply
+ *  evaporated). Paying on the SPRING rather than the placement is what
+ *  keeps it honest: a trap the enemy successfully routes around still
+ *  costs the hunter full price, so good placement is the skill the ability
+ *  rewards. Runs through addCharge, so it caps at CHARGE_CAP like all
+ *  generic income. Deliberately paid even when the victim's armour absorbs
+ *  the throw — the trap did its job by being stepped in. */
+export const TRAP_BOUNTY = 1;
+
+/** Hunter's Snare: mana cost of setting a trap. Keeps the turn (Curse /
+ *  Bless / Pickpocket's contract) — set the trap, then still make your
+ *  move, which is what makes a trap a piece of board development rather
+ *  than a whole turn spent on a maybe. */
+export const SNARE_COST = 1;
+
+/** How far a sprung trap throws its victim back along its own path.
+ *  Bigger than the wolf's nip (the trap cost mana and a placement) but
+ *  short of Charged Shot's 4 — an archer's full-bank shot should still be
+ *  the biggest single knockback in the game. */
+export const TRAP_KNOCKBACK = 2;
+
+/** Hunter's Piercing Shot: the full-bank cast (Charged Shot / Sacrifice's
+ *  spend pattern). The hunter's most-advanced stone looses an arrow down
+ *  the contested row and takes the FIRST enemy stone ahead of it, at any
+ *  range — the class's only real removal, and the reason it can win a race
+ *  at all.
+ *
+ *  REPLACED HAMSTRING (a full-bank 2-turn freeze on one stone) after the
+ *  first balance run, which the original plan pre-authorised. The reason
+ *  turned out not to be the predicted one ("miserable to play against") but
+ *  something this file has now recorded five times: DENIAL DOES NOT WIN
+ *  RACES. The shipped Hunter was 100% denial — wolf shove, trap shove,
+ *  freeze, freeze-plus-one-kill — so every mana it spent bought the
+ *  opponent a delay and the hunter nothing, and it lost 60-81% to the whole
+ *  field. Paying the traps and letting the wolf capture (see TRAP_BOUNTY /
+ *  WOLF_CAPTURES) recovered ~6 points; the rest needed an actual offensive
+ *  spend, because pausing ONE of four stones for two turns is close to
+ *  worthless at any price. Freeze survives as Wild Hunt's ultimate-only
+ *  effect, which is where an effect that strong and that un-counterable
+ *  belongs anyway. The bow in the portrait was always the better read. */
+export const PIERCING_SHOT_COST = 2;
+
+/** Hunter's Wild Hunt ultimate: every trap in the world snaps shut at once
+ *  — every enemy stone in shared water is frozen for this many of its
+ *  owner's turn-starts, and the wolf takes the nearest one through every
+ *  protection there is. ONE turn, and freeze is now an ultimate-only
+ *  effect: the mortal-tier freeze this constant was originally the shorter
+ *  counterpart to (Hamstring) was cut after the first balance run — see
+ *  PIERCING_SHOT_COST. A board-wide multi-turn freeze would simply end
+ *  games on the spot, which is why the breadth is paid for in duration. */
+export const WILD_HUNT_FREEZE_TURNS = 1;
+
+/** Barbarian's Rage (passive, free, added 2026-07-27): how many extra tiles
+ *  the barbarian's every move gets when they are DOWN stones relative to
+ *  their opponent — one per stone of deficit, capped here. The roster's
+ *  only comeback mechanic and its only upward modifier of the mover's own
+ *  stride (Curse of Chains bends it the other way; the two compose
+ *  additively — see getLegalPowerMoves).
+ *
+ *  THE DEFICIT, NOT THE RAW RESERVE COUNT, and the first balance run is why.
+ *  Rage first shipped as "one per own stone in reserve", on the theory that
+ *  reserve = losses. It is not: at the opening BOTH players have all four
+ *  stones home, so the barbarian simply got a free +2 on every move for the
+ *  whole development phase — a permanent head start wearing a comeback
+ *  mechanic's clothes. It took 67-86% off the entire field (archer 84.6,
+ *  rogue 86.2, warlock 82.2) while its three ACTIVES fired at perfectly
+ *  healthy rates (reckless 1.1/g, whirlwind 0.8/g, bloodbath 0.27/g) — the
+ *  tell that the passive was the whole problem. Measuring own-reserve MINUS
+ *  foe-reserve makes it zero at the opening, zero whenever the barbarian is
+ *  ahead, and positive exactly when they are behind, which is what the
+ *  design was always supposed to say. */
+export const RAGE_MAX = 2;
+
+/** How many stones of deficit the barbarian eats before Rage pays anything.
+ *  Zero: being down even one stone stokes it. The tuning that made this
+ *  workable lives in RAGE_SCOPE below, not here. */
+export const RAGE_FREE_DEFICIT = 0;
+
+/** WHICH of the barbarian's stones Rage speeds up — and this is the dial
+ *  that finally made the passive tunable at all.
+ *
+ *  THE TUNING TRACE, 400-500 games/matchup, everything else held fixed.
+ *  Rage began as a flat bonus on EVERY move the barbarian made, and at that
+ *  scope it is an enormous, un-dialable lever in a race:
+ *    all stones, RAGE_MAX 2, raw reserve count ... 67-86% (broken; the raw
+ *      count also meant a free opening burst — see RAGE_MAX's own doc)
+ *    all stones, RAGE_MAX 2, deficit-based .......  45-71% (over)
+ *    all stones, RAGE_MAX 1, deficit-based .......  42-74% (over)
+ *    all stones, RAGE_MAX 0 (rage off) ...........  23-51% (badly under —
+ *      the three actives cannot carry the class alone)
+ *    all stones, first deficit free ..............  26-58% (under)
+ *  The class swings ~25-30 points between "no rage" and "one tile of rage
+ *  on everything", with no integer stop in between, and gating on a bigger
+ *  deficit overshot the other way because a two-stone hole is rare.
+ *
+ *  Narrowing the SCOPE is the missing granularity: the bonus keeps its full
+ *  uptime (any deficit at all) but touches one stone instead of four. The
+ *  stone it touches is the LEAST-advanced — counting reserve as least — so
+ *  in practice it is whichever stone just died coming back angry, which is
+ *  both the tightest fit to "comeback" and the best picture the passive
+ *  has. */
+export type RageScope = "all" | "least-advanced";
+export const RAGE_SCOPE: RageScope = "least-advanced";
+
+/** Barbarian's Reckless Swing: mana cost of the adjacent strike that kills
+ *  through BULWARK and VANISH — the PHYSICAL half of the defence roster,
+ *  the counterpart to the Warlock's Sacrifice piercing the magical half
+ *  (Ward, Blessing). Neither tool answers everything and that split is
+ *  load-bearing across the whole expansion: do not widen either side. A
+ *  Ward, a shield tile and — being a mortal weapon — a Blessing all still
+ *  stop it. */
+export const RECKLESS_SWING_COST = 1;
+
+/** What the swing costs the SWINGER: its own stone is thrown this many
+ *  tiles backwards along its own path, standard collision math (a blocked
+ *  landing is a send-home — recklessness can genuinely kill you). This is
+ *  the whole price of a Bulwark-piercing kill at 1 mana, so it must stay
+ *  meaningful; the Warlock's Sacrifice pays a whole stone for the magical
+ *  equivalent. */
+export const RECKLESS_SELF_KNOCKBACK = 2;
+
+/** Barbarian's Whirlwind: the full-bank spin. Every enemy within
+ *  WHIRLWIND_RADIUS of ANY of the barbarian's on-board stones, anywhere on
+ *  the contested row, is caught: up to WHIRLWIND_CAP of them are captured
+ *  and the rest are knocked back 1. Radial and stationary, where Warrior's
+ *  Charge is a lane the warrior moves along. The capture cap deliberately
+ *  matches CHARGE_SWEEP_CAP's own principle — no class's single move should
+ *  out-capture the others by more than one extra — with the knockbacks as
+ *  the compensation for the breadth. Respects every protection (isProtected):
+ *  this is a wide swing, not a piercing one. */
+export const WHIRLWIND_COST = 2;
+export const WHIRLWIND_RADIUS = 1;
+export const WHIRLWIND_CAP = 1;
+
+/** Barbarian's Bloodbath ultimate: the lead stone charges to the END of
+ *  shared water, taking every enemy in its path through every protection
+ *  there is — the uncapped version of Charge, which is exactly what an
+ *  ultimate is for (Warpath's own doc makes the same argument for its
+ *  uncapped sweep). This is the last contested tile it runs to; a blocked
+ *  destination walks back the way Exhume's occupancy walk does. */
+export const BLOODBATH_END_POSITION = 11;
+
+/** Bard's Encore (passive, free, added 2026-07-27): what a ZERO FLIP pays a
+ *  bard, instead of the usual 1. The class's income engine, and the thing
+ *  that makes a buff-stacking kit affordable at all — every other class
+ *  treats a dead flip as a consolation charge, the bard turns it into the
+ *  next verse. Nothing else in the game modifies the zero-flip grant, so
+ *  this is scoped by construction. */
+export const ENCORE_ZERO_FLIP_CHARGES = 2;
+
+/** The bard's charge cap — deeper than everyone else's CHARGE_CAP, and the
+ *  fix that made the class function at all.
+ *
+ *  A buff-stacking kit needs a purse it can stack OUT OF. The first balance
+ *  run had the bard on the standard 2-charge bank and it collapsed to
+ *  18-40% against the field with the mirror stalemating 28% of games at the
+ *  turn cap: Inspire (1 each) and Song of Haste (the full bank) were
+ *  competing for the same two charges, so the bard spammed the cheap buff
+ *  and could never afford the payoff — measured inspire/g 18-48 against
+ *  haste/g 2.2, with each song marching only ~1.4 stones. Neither half of
+ *  the kit ever ran.
+ *
+ *  Unlike NECRO_CHARGE_CAP — whose third pip is a SOUL GEM only
+ *  grantKillBounty can reach — this raises the cap for ordinary income too
+ *  (see chargeCapFor/addCharge): the bard's whole design is having mana to
+ *  spread, and gating it behind a special income source would just recreate
+ *  the starvation. Safe by construction against the other classes' full-bank
+ *  gates: Ward, Charged Shot and Reinforced Bulwark all test CHARGE_CAP and
+ *  are class-locked to mage/archer/warrior, so none of them can ever see
+ *  this number. */
+export const BARD_CHARGE_CAP = 4;
+
+/** Bard's Inspire: mana per stone. Deliberately the cheapest active in the
+ *  game, because the kit's whole identity is having SEVERAL stones lit at
+ *  once (the user's brief: "I want the bard to be able to buff a lot") —
+ *  there is no cap on how many stones may carry it, only what the bank can
+ *  fund. Keeps the turn (Re-flip / Bless / Curse / Snare's contract), so a
+ *  bard with a full bank can light two stones and still move. */
+export const INSPIRE_COST = 2;
+
+/* INSPIRE_COST IS THE CLASS'S BALANCE LEVER — found last, after everything
+ * else turned out to be nearly inert. Once the exact-escape bug and the
+ * can't-escape-on-a-march bug were fixed (see getLegalPowerMoves and
+ * advanceStones), the bard sat at 48-81% and every obvious dial barely
+ * moved it, measured at 300-400 games/matchup:
+ *     bank 4 -> 3 ............ ~3 points
+ *     march 2 tiles -> 1 ..... ~1 point
+ *     Song of Haste 2 -> 3 ... ~1 point
+ *     adding INSPIRE_CAP=2 ... ~1 point
+ *     Encore 2 -> 1 .......... ~5 points
+ * The overtuning was spread thinly across all of them, which is the shape
+ * you get when the CORE effect is underpriced rather than any one rider
+ * being wrong. Doubling the buff's own price did in one step what five
+ * other levers could not: 55.0 archer, 44.8 warrior, 53.3 necromancer,
+ * 46.5 cleric, 54.5 rogue, 56.3 warlock, 51.2 hunter, 50.5 barbarian,
+ * 47.8 mirror — eight of nine matchups inside 35/65 and most within a few
+ * points of even. (Only mage-vs-bard sits outside at 67.3/32.8, the same
+ * roster-wide Mage thread every other class in this expansion also runs
+ * into; do not chase it with bard levers.)
+ *
+ * BARD_CHARGE_CAP was then restored to 4 with the cost held here: it kept
+ * every number in range while giving the class back the room to actually
+ * stack buffs, which is the brief. */
+
+/** How many extra tiles an inspired stone moves.
+ *
+ *  ONE, and the Barbarian's Rage trace two passes earlier is exactly why —
+ *  that pass measured a flat per-move stride bonus as worth ~25-30 points
+ *  of win rate at +1 across a whole army, with no integer stop below it.
+ *  Rage had to be narrowed to a single stone to become tunable at all. The
+ *  bard deliberately buys the un-narrowed version, several stones at once,
+ *  which is the same lever pointed the other way — so the magnitude stays
+ *  at the floor and the ECONOMY (one mana per stone, a duration that
+ *  expires, and a bank that only refills on zero flips and the usual
+ *  income) is what does the limiting. Do not raise this without re-running
+ *  the whole matrix. */
+export const INSPIRE_BONUS = 1;
+
+/** Whether an inspiration EXPIRES on its own.
+ *
+ *  It does not — a lit stone stays lit until it dies, the Cleric's blessing
+ *  model rather than the curse/freeze countdown model. It shipped as a
+ *  3-turn countdown and that was the class's second structural failure
+ *  (after the exact-escape overshoot; see getLegalPowerMoves): buffs faded
+ *  faster than a 4-charge bank could lay them down, so the board was never
+ *  more than one or two stones lit, and Song of Haste — which SPENDS THE
+ *  WHOLE TURN, replacing the mover's own flip — was worth less than simply
+ *  moving. Measured: inspire/g 18-48 against haste/g 2.2, each song
+ *  marching ~1.5 stones. Cheapening the song made it strictly worse
+ *  (7-21%, 65% mirror stalemates) because the bot then traded good flips
+ *  for bad marches.
+ *
+ *  Persistent-until-death makes Inspire a one-time investment per stone —
+ *  four mana lights the whole army for good — which is what "buff a lot"
+ *  has to mean for the payoff to ever be worth a turn. The counterplay is
+ *  the honest one: killing a lit stone strips the buff with it
+ *  (clearInspireOnCapture), so the opponent can un-do the investment. */
+export const INSPIRE_PERMANENT = false;
+
+/** How many of the bard's stones may carry an inspiration AT ONCE — Bless's
+ *  BLESSING_CAP in every respect, including that only the ULTIMATE
+ *  (Crescendo) may exceed it.
+ *
+ *  THE CLASS'S MAIN BALANCE LEVER, found by elimination. With escapes fixed
+ *  the bard was 48-81% and the obvious dials all turned out to be nearly
+ *  inert: the bank 4 -> 3 moved it ~3 points, the march 2 tiles -> 1 moved
+ *  it ~1. What actually carries the class is INSPIRE itself, which is the
+ *  Barbarian's Rage finding restated — a +1 stride is worth ~25-30 points
+ *  when it applies broadly, and Rage had to be narrowed to a single stone
+ *  for exactly this reason. The bard is allowed the wide version, so the
+ *  COUNT is where it gets priced. Two lit stones is still "a lot" beside a
+ *  roster where nobody else buys movement at all, and Crescendo's
+ *  army-wide light stays the thing that feels like a crescendo. */
+export const INSPIRE_CAP = 2;
+
+/** The countdown an inspiration is stored with. Inert while
+ *  INSPIRE_PERMANENT is true (tickInspireForNewTurn returns early), and
+ *  kept as a real number so flipping that flag back is a one-line
+ *  experiment rather than a schema change. */
+export const INSPIRE_TURNS = 3;
+
+/** Bard's Song of Haste: the full-bank payoff that cashes every inspired
+ *  stone at once — each advances this many tiles immediately, no flip,
+ *  capturing normally on landing. The reason to spread inspirations wide
+ *  rather than keep one stone lit: the song scales with how much of the
+ *  army is singing. Ends the turn.
+ *
+ *  BOUGHT MOVEMENT, NEVER AN EXTRA TURN — the one hard constraint carried
+ *  down from the plan, and this file's two recorded catastrophes are why
+ *  (Push-grants-extra-turn at 95/5, the necromancer's tile-12 placement at
+ *  97.8/2.2). The stones move; the turn ends. */
+export const HASTE_COST = 2;
+export const HASTE_TILES = 2;
+
+/** Bard's Crescendo ultimate: inspires the bard's ENTIRE on-board army for
+ *  INSPIRE_TURNS and immediately advances every one of them this far — the
+ *  whole kit fired at once, and the only way to light four stones without
+ *  paying four mana. */
+export const CRESCENDO_TILES = 3;
+
 // ============================================================================
 // TYPES
 // ============================================================================
 
-export type PlayerClass = "archer" | "mage" | "warrior" | "necromancer" | "cleric" | "rogue";
+/** Every class the game KNOWS ABOUT — not every class you can pick. The
+ *  four at the end (2026-07-26) have portraits and a full set of UI colours
+ *  but no kit yet; they're built one at a time, and each one becomes
+ *  selectable only when its abilities land. The shipped-and-playable subset
+ *  is room-engine.ts's MK_CLASSES, which is what the class picker offers and
+ *  what the CPU draws from — keeping the two lists separate is what lets a
+ *  portrait ship ahead of its rules without ever handing a player an empty
+ *  class. */
+export type PlayerClass =
+  | "archer"
+  | "mage"
+  | "warrior"
+  | "necromancer"
+  | "cleric"
+  | "rogue"
+  | "warlock"
+  | "hunter"
+  | "barbarian"
+  | "bard";
 
 export interface PowerState {
   classes: Record<PlayerId, PlayerClass>;
@@ -686,6 +1106,48 @@ export interface PowerState {
    *  legality/targeting enumeration. At most one thrall per player by
    *  construction (a single slot, and Revive requires it empty). */
   thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Warlock's Curse of Chains (2026-07-26): the caster's single live curse
+   *  — the afflicted enemy token and how many of the VICTIM's turn-starts
+   *  it has left (see CURSE_TURNS). Keyed by the CASTER (the corpse
+   *  convention): at most one curse per warlock, and a fresh cast simply
+   *  re-aims it (the old mark lifts — you pay full price each time, so
+   *  there's nothing to exploit). Only ever populated for a warlock.
+   *  Ticked by tickCurseForNewTurn on the victim's fresh flips; cleared
+   *  early when the cursed token is killed (clearCurseOnCapture — the
+   *  reserve-trip hygiene every status gets) or escapes (resolveTurn — a
+   *  stone that came home in glory drags no chains). */
+  curse: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Hunter's Snare (2026-07-26): each hunter's single armed trap, as the
+   *  CONTESTED TILE INDEX it sits on — the game's only piece of persistent
+   *  board state that isn't a stone. Keyed by the setter (the corpse/curse
+   *  convention): one trap per hunter, and a fresh Snare re-sites it (the
+   *  old trap is lifted — full price each time, nothing to exploit).
+   *  PUBLIC to both seats by design: routing around a visible trap is the
+   *  play, and hidden board state would break the both-clients-can-verify
+   *  model this codebase is built on. Sprung (and cleared) by the first
+   *  enemy stone to LAND on the tile — see the trap check in resolveTurn.
+   *  Tile index only: contested tiles 4-11 are the same physical square in
+   *  both players' numbering, so no owner disambiguation is needed. */
+  /** Bard's Inspire (2026-07-27): token id -> the BARD's own turn-starts
+   *  remaining on that stone's inspiration. Keyed by token rather than by
+   *  caster (the curse's shape) precisely because the class is built to
+   *  have SEVERAL lit at once — that is the kit's identity, not an edge
+   *  case. Only ever populated for a bard's own stones. Ticked by
+   *  tickInspireForNewTurn on the bard's fresh flips and cleared on a
+   *  reserve trip (clearInspireOnCapture) like every other per-token
+   *  status. */
+  inspired: Record<number, number>;
+  traps: Record<PlayerId, number | null>;
+  /** Hunter's Hamstring / Wild Hunt (2026-07-26): token id -> the VICTIM's
+   *  turn-starts remaining before the stone can move again. Unlike `curse`
+   *  (one slot per caster) this is keyed by TOKEN, because Wild Hunt
+   *  freezes the whole enemy row at once. A frozen stone is skipped
+   *  entirely by getLegalPowerMoves; everything else about it is normal
+   *  (it can still be captured, still blocks tiles, still carries its own
+   *  protections). Ticked on the victim's fresh flips
+   *  (tickHamstringForNewTurn) and cleared on a reserve trip
+   *  (clearHamstringOnCapture) like every other per-token status. */
+  hamstrung: Record<number, number>;
   /** Cleric's per-token life state (2026-07-21): token id -> "blessed"
    *  (carries the second life — the next capture wounds instead of kills)
    *  or "wounded" (the blessing broke; back to one life, but mendable by
@@ -774,7 +1236,44 @@ export type PowerAction =
   | { kind: "vanish"; tokenId: number }
   /** Rogue's Grand Heist ultimate: teleport-capture like Blink Strike/
    *  Warpath, plus draining the target owner's entire bank. */
-  | { kind: "grandHeist"; targetTokenId: number };
+  | { kind: "grandHeist"; targetTokenId: number }
+  /** Warlock's Curse of Chains: targets an enemy in shared water (see
+   *  getCurseTargets). Keeps the turn — Bless's commit contract. */
+  | { kind: "curse"; targetTokenId: number }
+  /** Warlock's Sacrifice: targets the enemy stone to kill; the warlock's
+   *  own least-advanced stone is auto-selected as the price (Blink
+   *  Strike's one-tap convention — see SACRIFICE_COST). */
+  | { kind: "sacrifice"; targetTokenId: number }
+  /** Warlock's Fel Storm ultimate: no target — the whole shared row is the
+   *  target. getFelStormTargets is the shared oracle (empty pool = no one
+   *  to drag = not castable, Benediction's misclick rule). */
+  | { kind: "felStorm" }
+  /** Bard's Inspire: targets one of the caster's OWN stones (Bulwark's
+   *  shape). Several may carry it at once — see getInspireTargets. */
+  | { kind: "inspire"; targetTokenId: number }
+  /** Bard's Song of Haste / Crescendo: no target — every inspired stone
+   *  (Haste) or the whole army (Crescendo) is the subject. */
+  | { kind: "songOfHaste" }
+  | { kind: "crescendo" }
+  /** Barbarian's Reckless Swing: targets the enemy to kill; the striker
+   *  (the barbarian stone directly behind it) is determined by the board,
+   *  not chosen — see getRecklessSwingTargets. */
+  | { kind: "recklessSwing"; targetTokenId: number }
+  /** Barbarian's Whirlwind: no target — every enemy in reach is caught. */
+  | { kind: "whirlwind" }
+  /** Barbarian's Bloodbath ultimate: no target — the lead stone runs the
+   *  whole row. */
+  | { kind: "bloodbath" }
+  /** Hunter's Snare: the only action in the game that targets a TILE
+   *  rather than a stone (see getSnareTiles). */
+  | { kind: "snare"; tile: number }
+  /** Hunter's Hamstring: targets an enemy in shared water. */
+  /** Hunter's Piercing Shot: no target — the arrow's path decides who it
+   *  hits (see piercingShotVictim). */
+  | { kind: "piercingShot" }
+  /** Hunter's Wild Hunt ultimate: no target — the whole row freezes and
+   *  the wolf picks its own quarry (getWildHuntTargets is the oracle). */
+  | { kind: "wildHunt" };
 
 // ============================================================================
 // STATE
@@ -791,6 +1290,10 @@ export function initialPowerState(): PowerState {
     bulwarkSaves: {},
     corpse: { p1: null, p2: null },
     thrall: { p1: null, p2: null },
+    curse: { p1: null, p2: null },
+    inspired: {},
+    traps: { p1: null, p2: null },
+    hamstrung: {},
     vitality: {},
   };
 }
@@ -984,14 +1487,32 @@ function pushDistance(state: GameState, power: PowerState, target: TokenState): 
   return isWarded(state, power, target) ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
 }
 
+/** How deep this player's bank goes for ORDINARY income. CHARGE_CAP for
+ *  everyone except the bard, whose kit is built on having mana to spread
+ *  (see BARD_CHARGE_CAP). Deliberately does NOT return NECRO_CHARGE_CAP:
+ *  the necromancer's third pip is a soul gem only grantKillBounty may
+ *  reach, and routing it through here would hand it away for free. */
+export function chargeCapFor(power: PowerState, player: PlayerId): number {
+  return power.classes[player] === "bard" ? BARD_CHARGE_CAP : CHARGE_CAP;
+}
+
 function addCharge(power: PowerState, player: PlayerId): PowerState {
   const current = power.charges[player];
-  if (current >= CHARGE_CAP) return power;
+  if (current >= chargeCapFor(power, player)) return power;
   return { ...power, charges: { ...power.charges, [player]: current + 1 } };
 }
 
+/** The zero-flip consolation charge — ENCORE_ZERO_FLIP_CHARGES of them for a
+ *  BARD (see that constant: a dead flip is the class's income engine), one
+ *  for everyone else. Gated on class here so every call site stays
+ *  unconditional, grantKillBounty's own shape. Still runs through addCharge,
+ *  so it caps at CHARGE_CAP like all generic income — a bard at 1 charge
+ *  rolling a zero reaches the cap and no further. */
 export function grantZeroFlipCharge(power: PowerState, mover: PlayerId): PowerState {
-  return addCharge(power, mover);
+  const n = power.classes[mover] === "bard" ? ENCORE_ZERO_FLIP_CHARGES : 1;
+  let next = power;
+  for (let i = 0; i < n; i++) next = addCharge(next, mover);
+  return next;
 }
 
 /** Necromancer's Soul Harvest (passive, REWORKED — see SOUL_BOUNTY_CHARGES
@@ -1029,6 +1550,148 @@ function clearThrallIfCaptured(power: PowerState, capturedIds: number[]): PowerS
   const thrall = { ...power.thrall };
   for (const pl of hit) thrall[pl] = null;
   return { ...power, thrall };
+}
+
+/** Warlock's Blood Pact (see BLOOD_PACT_CHARGES): every kill pays the
+ *  VICTIM's owner when that owner is a warlock — real `token.owner`, not
+ *  effective: a warlock's stone dying while possessed against them is
+ *  still their blood, and the pact still pays (mercy kills included).
+ *  Same call-site discipline as clearThrallIfCaptured/clearVitality:
+ *  every path that sends tokens home for good must run this — resolveTurn
+ *  kills, Push/Charged Shot send-homes, Blink Strike, Warpath, Corpse
+ *  Explosion, Grand Heist (whose drain-to-zero then robs the grant right
+ *  back — see BLOOD_PACT_CHARGES's ordering note), Sacrifice, and Fel
+ *  Storm's thrall-crumble deaths. Not the non-kill returns (thrall
+ *  expiry, Exhume). No-op (same reference back) when no warlock lost a
+ *  stone. Gated on the VICTIM owner's class here so call sites stay
+ *  unconditional, grantKillBounty's own shape. */
+function grantBloodPact(power: PowerState, tokens: TokenState[], killedIds: number[]): PowerState {
+  let next = power;
+  for (const id of killedIds) {
+    const owner = tokens.find((t) => t.id === id)?.owner;
+    if (owner !== undefined && power.classes[owner] === "warlock") {
+      for (let i = 0; i < BLOOD_PACT_CHARGES; i++) next = addCharge(next, owner);
+    }
+  }
+  return next;
+}
+
+/** A killed token's curse lifts with it — the same reserve-trip hygiene
+ *  clearCapturedBulwarks/clearVitality apply, same call-site discipline:
+ *  any path that sends tokens home for good must run this. Without it, a
+ *  stale curse entry would ride the reserve trip and re-shackle the stone
+ *  the moment it re-enters — un-recast, unpaid-for slowdown, the exact
+ *  leak shape the Bulwark cleanup guards against in reverse. No-op (same
+ *  reference back) when nothing captured was cursed. */
+function clearCurseOnCapture(power: PowerState, capturedIds: number[]): PowerState {
+  const hit = (["p1", "p2"] as PlayerId[]).filter((pl) => {
+    const c = power.curse[pl];
+    return c !== null && capturedIds.includes(c.tokenId);
+  });
+  if (hit.length === 0) return power;
+  const curse = { ...power.curse };
+  for (const pl of hit) curse[pl] = null;
+  return { ...power, curse };
+}
+
+/** Is this token wearing Curse of Chains right now? Either caster's slot —
+ *  the filter in getLegalPowerMoves and the client's ring both key on the
+ *  token, not the caster. */
+export function isCursed(power: PowerState, tokenId: number): boolean {
+  return power.curse.p1?.tokenId === tokenId || power.curse.p2?.tokenId === tokenId;
+}
+
+/** Barbarian's Rage (see RAGE_MAX): how many extra tiles every one of this
+ *  player's moves gets right now — one per stone of theirs in reserve,
+ *  capped. Zero for every other class, so the call site in
+ *  getLegalPowerMoves stays unconditional. Real `owner`, not effective: a
+ *  stone of theirs serving an enemy necromancer as a thrall is on the
+ *  BOARD, not in reserve, so it correctly stokes nothing — and the moment
+ *  it crumbles home it does. Exported for the client's rage pip and the
+ *  bot's eval. */
+export function rageFor(state: GameState, power: PowerState, player: PlayerId): number {
+  if (power.classes[player] !== "barbarian") return 0;
+  const reserveOf = (pl: PlayerId) =>
+    state.tokens.filter((t) => t.owner === pl && t.position < 0).length;
+  // The DIFFERENTIAL, not the raw count — this is what makes it a comeback
+  // mechanic instead of a permanent head start (see RAGE_MAX's doc) — and
+  // the first RAGE_FREE_DEFICIT stones of that deficit pay nothing, which
+  // is the fine dial the tuning actually needed (see its own doc).
+  const deficit = reserveOf(player) - reserveOf(otherPlayerId(player)) - RAGE_FREE_DEFICIT;
+  return Math.max(0, Math.min(RAGE_MAX, deficit));
+}
+
+/** The single stone Rage speeds up under RAGE_SCOPE="least-advanced": the
+ *  mover's least-advanced token, counting RESERVE as least of all (so the
+ *  stone that just died is the one that comes back running). Effective
+ *  ownership, so a stone serving an enemy necromancer is not a candidate.
+ *  Exported for the client's rage marker and the bot. */
+export function ragedToken(state: GameState, power: PowerState, player: PlayerId): number | null {
+  const mine = state.tokens.filter(
+    (t) => effectiveOwner(power, t) === player && t.position < PATH_LENGTH_PER_PLAYER,
+  );
+  if (mine.length === 0) return null;
+  return mine.reduce((best, t) => (t.position < best.position ? t : best)).id;
+}
+
+/** Is this stone carrying the Bard's inspiration right now (+INSPIRE_BONUS
+ *  to its every move)? Several of a bard's stones may be, at once — that is
+ *  the class's whole point. */
+export function isInspired(power: PowerState, tokenId: number): boolean {
+  return (power.inspired?.[tokenId] ?? 0) > 0;
+}
+
+/** An inspired stone sent home loses the song — the reserve-trip hygiene
+ *  every per-token status gets, and the same leak it prevents: a stale
+ *  entry would re-light the stone the moment it re-entered, unpaid for. */
+function clearInspireOnCapture(power: PowerState, capturedIds: number[]): PowerState {
+  if (!capturedIds.some((id) => power.inspired?.[id] !== undefined)) return power;
+  const inspired = { ...power.inspired };
+  for (const id of capturedIds) delete inspired[id];
+  return { ...power, inspired };
+}
+
+/** Is this token frozen by Hamstring / Wild Hunt? A frozen stone generates
+ *  no moves at all this turn (see getLegalPowerMoves) — every other rule
+ *  treats it as an ordinary stone. */
+export function isHamstrung(power: PowerState, tokenId: number): boolean {
+  return (power.hamstrung?.[tokenId] ?? 0) > 0;
+}
+
+/** Which contested tile the hunter's wolf currently guards — the tile
+ *  directly ahead of their MOST-advanced on-board stone, or null when they
+ *  have no stone on the board, the wolf stands at the row's end, or the
+ *  guarded square isn't contested (a wolf in its own private lane guards
+ *  nothing: tiles 0-3 and 12-14 are a different physical square for each
+ *  owner, the same rule that makes home base safe from Snipe).
+ *  Exported because the client draws the guarded tile and the bot reads it.
+ *
+ *  MOST-advanced, corrected 2026-07-26 after the first balance run. The
+ *  wolf was first tied to the LEAST-advanced stone (Warpath's convention,
+ *  picked without thinking about where that stone actually stands), which
+ *  made the passive nearly dead: a hunter's rearmost stone spends most of
+ *  the game in its own private lane, where this function correctly returns
+ *  null, so wolfBite/g sat at 0.46 across a whole game. The lead stone is
+ *  out in the contested row by definition, so the wolf now ranges ahead of
+ *  the pack — which is also the right picture. */
+export function wolfGuardTile(state: GameState, power: PowerState, hunter: PlayerId): number | null {
+  if (power.classes[hunter] !== "hunter") return null;
+  const wolf = findMostAdvancedToken(state, power, hunter);
+  if (!wolf) return null;
+  const guarded = wolf.position + 1;
+  if (guarded >= PATH_LENGTH_PER_PLAYER || !BOARD_LAYOUT[guarded].isContested) return null;
+  return guarded;
+}
+
+/** A frozen token's timer dies with it — the reserve-trip hygiene every
+ *  per-token status gets (clearVitality/clearCurseOnCapture's discipline),
+ *  and the same leak it prevents: a stale entry would re-freeze the stone
+ *  the moment it re-entered, unpaid for. */
+function clearHamstringOnCapture(power: PowerState, capturedIds: number[]): PowerState {
+  if (!capturedIds.some((id) => power.hamstrung?.[id] !== undefined)) return power;
+  const hamstrung = { ...power.hamstrung };
+  for (const id of capturedIds) delete hamstrung[id];
+  return { ...power, hamstrung };
 }
 
 /** Is this token carrying an unbroken blessing (a second life)? Blessing is
@@ -1108,6 +1771,12 @@ export function getLegalPowerMoves(
   const player = state.currentPlayer;
   const cls = power.classes[player];
   const moves: PowerMove[] = [];
+  const rageBonus = rageFor(state, power, player);
+  // Which single stone Rage speeds up (see RAGE_SCOPE) — the least-advanced
+  // one, with reserve counting as least, so the stone that just died comes
+  // back running. Null when the scope is "all" or there is no rage at all.
+  const ragedTokenId =
+    rageBonus > 0 && RAGE_SCOPE === "least-advanced" ? ragedToken(state, power, player) : null;
 
   for (const token of state.tokens) {
     // Effective ownership (see effectiveOwner): the mover's pool includes a
@@ -1118,8 +1787,49 @@ export function getLegalPowerMoves(
     if (token.position >= PATH_LENGTH_PER_PLAYER) continue; // already escaped
     const isThrall = possessorOf(power, token.id) === player;
 
+    // Hunter's Hamstring / Wild Hunt: a frozen stone generates no moves at
+    // all — the only status in the game that removes a stone from its own
+    // owner's options entirely. Checked before the stride math below
+    // because a frozen stone's stride is moot.
+    if (isHamstrung(power, token.id)) continue;
+
+    // The two stride modifiers, applied together. Warlock's Curse of Chains
+    // shortens THIS token by CURSE_SLOW; Barbarian's Rage lengthens every
+    // one of the mover's by however many of their stones sit in reserve
+    // (capped at RAGE_MAX). The flip itself is untouched in both cases —
+    // the victim's other stones move their full distance, and a Mage
+    // re-flipping doesn't shake the chains, it only re-rolls what they
+    // bind. At effFlip <= 0 the stone has no move at all this turn.
+    //
+    // Order matters only in that they are ADDITIVE and then floored: a
+    // cursed barbarian is slowed relative to its own rage, not cancelled
+    // outright, which is the reading that keeps both abilities honest when
+    // they meet. Rage is deliberately computed per MOVER (not per token) so
+    // a barbarian's whole army speeds up together.
+    const myRage = ragedTokenId === null || ragedTokenId === token.id ? rageBonus : 0;
+    const slow = isCursed(power, token.id) ? CURSE_SLOW : 0;
+    // THE SONG NEVER CARRIES YOU PAST THE FINISH. An escape needs the stone
+    // to land on PATH_LENGTH_PER_PLAYER-1 EXACTLY, so a permanent stride
+    // bonus is a liability at the end of the lane, not a gift: an inspired
+    // stone on tile 13 would need an effective flip of 1 and can no longer
+    // produce one, so it could never escape until the song faded. The first
+    // balance run caught it as a grind — the bard mirror stalemating 28%
+    // (and 50% once the bank got deeper and the buff got wider) with the
+    // class at 10-40% against the field. Dropping the bonus rather than the
+    // move keeps the invariant that an inspiration only ever ADDS options.
+    // Deliberately checked against the boosted total, not the plain one, so
+    // the bonus still applies whenever it doesn't overshoot.
+    const boosted = isInspired(power, token.id) ? INSPIRE_BONUS : 0;
+    // `to` is position+effFlip on the board and effFlip-1 from reserve —
+    // the same arithmetic, since a reserve token sits at -1.
+    const wouldOvershoot =
+      token.position + flip + myRage + boosted - slow > PATH_LENGTH_PER_PLAYER - 1;
+    const inspireBonus = wouldOvershoot ? 0 : boosted;
+    const effFlip = flip + myRage + inspireBonus - slow;
+    if (effFlip <= 0) continue;
+
     const from = token.position;
-    const to = from === -1 ? flip - 1 : from + flip;
+    const to = from === -1 ? effFlip - 1 : from + effFlip;
 
     // SOUL CLAIM: a token whose corpse the enemy necromancer has marked
     // AND funded (full soul bank) cannot re-enter from reserve — the soul
@@ -1400,6 +2110,12 @@ function resolveTurn(
   rainOfArrows: { targetTokenId: number | null } | null;
   wounded: { tokenId: number; to: number }[];
   mendedTokenIds: number[];
+  /** Hunter's Snare sprung on the mover's landing (null otherwise) — the
+   *  tile it was set on, who stepped in it, and whether the throw sent
+   *  them home. Server-computed so the client never re-derives it. */
+  trapSprung: { tile: number; tokenId: number; sentHome: boolean } | null;
+  /** Hunter's Wolf Companion bit the mover (null otherwise). */
+  wolfBite: { tokenId: number; sentHome: boolean } | null;
 } {
   const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
   power = streakResult.power;
@@ -1465,6 +2181,14 @@ function resolveTurn(
   // Vitality bookkeeping: the dead lose their entries, the wounded gain
   // theirs.
   nextPower = clearVitality(nextPower, kills);
+  // A dead stone's curse lifts (reserve-trip hygiene); so does the mover's
+  // own if THIS move carried the cursed stone off the board entirely — an
+  // escape drags no chains, and a stale entry on position 15 would draw a
+  // curse ring on an escaped token until expiry.
+  nextPower = clearCurseOnCapture(nextPower, kills);
+  if (to >= PATH_LENGTH_PER_PLAYER && isCursed(nextPower, tokenId)) {
+    nextPower = clearCurseOnCapture(nextPower, [tokenId]);
+  }
   if (woundIds.length > 0) {
     const vitality = { ...nextPower.vitality };
     for (const id of woundIds) vitality[id] = "wounded";
@@ -1543,6 +2267,93 @@ function resolveTurn(
     };
   }
 
+  // Warlock's Blood Pact: the victim's owner banks for every stone of
+  // theirs that just died. AFTER Larceny by design — see
+  // BLOOD_PACT_CHARGES's ordering note (the soul's price can't be
+  // pickpocketed off the corpse).
+  nextPower = grantBloodPact(nextPower, state.tokens, kills);
+  // A dead stone's freeze timer dies with it (reserve-trip hygiene).
+  nextPower = clearHamstringOnCapture(nextPower, kills);
+
+  // ---- HUNTER's reactive layer: the enemy's SNARE and their WOLF both
+  // fire on the mover's landing, after every capture above has settled.
+  // Order is trap-then-wolf and it matters: a trap throws the mover clear
+  // of the wolf's tile, so a stone can't be punished twice for one step.
+  // Both are skipped entirely when the move ends the game (nothing may
+  // rewind a win) and when the mover is protected (isProtected — a shield
+  // tile, Ward or Bulwark stops a trap and a wolf exactly as it stops
+  // every other shove).
+  let trapSprung: { tile: number; tokenId: number; sentHome: boolean } | null = null;
+  let wolfBite: { tokenId: number; sentHome: boolean } | null = null;
+  if (!causesWin && to >= 0 && to < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[to].isContested) {
+    const knockBack = (distance: number): boolean | null => {
+      const working: GameState = { ...state, tokens };
+      const victim = tokens.find((t) => t.id === tokenId)!;
+      if (isProtected(working, nextPower, victim)) return null;
+      const landing = computeKnockbackLanding(working, nextPower, victim, distance);
+      // A blessing absorbs the send-home exactly as it does for Push: the
+      // stone is wounded and holds its ground.
+      if (landing === -1 && isBlessed(nextPower, tokenId)) {
+        nextPower = { ...nextPower, vitality: { ...nextPower.vitality, [tokenId]: "wounded" } };
+        wounded.push({ tokenId, to: victim.position });
+        return false;
+      }
+      tokens = tokens.map((t) => (t.id === tokenId ? { ...t, position: landing } : t));
+      if (landing === -1) {
+        nextPower = clearThrallIfCaptured(nextPower, [tokenId]);
+        nextPower = clearVitality(nextPower, [tokenId]);
+        nextPower = clearCurseOnCapture(nextPower, [tokenId]);
+        nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+        nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
+        nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
+      }
+      return landing === -1;
+    };
+
+    if (nextPower.traps?.[foe] === to) {
+      // The trap is consumed whether or not the victim was protected —
+      // stepping on it springs it; armour only decides if it hurts. The
+      // BOUNTY is paid on the same terms, for the same reason (see
+      // TRAP_BOUNTY): the trap did its job by being stepped in.
+      nextPower = { ...nextPower, traps: { ...nextPower.traps, [foe]: null } };
+      const sentHome = knockBack(TRAP_KNOCKBACK);
+      for (let i = 0; i < TRAP_BOUNTY; i++) nextPower = addCharge(nextPower, foe);
+      trapSprung = { tile: to, tokenId, sentHome: sentHome === true };
+    }
+    // Re-read the mover's tile: a sprung trap may have moved it off the
+    // wolf's square (or off the board entirely).
+    const nowAt = tokens.find((t) => t.id === tokenId)!.position;
+    if (nowAt >= 0 && wolfGuardTile({ ...state, tokens }, nextPower, foe) === nowAt) {
+      const working: GameState = { ...state, tokens };
+      const victim = tokens.find((t) => t.id === tokenId)!;
+      if (!isProtected(working, nextPower, victim)) {
+        if (WOLF_CAPTURES && isBlessed(nextPower, tokenId)) {
+          // A blessing absorbs the wolf exactly as it absorbs any other
+          // kill: wounded, holds its ground, and the hunter still earns
+          // the standard capture charge for breaking it (resolveTurn's own
+          // tuned wounds-pay-the-breaker line).
+          nextPower = { ...nextPower, vitality: { ...nextPower.vitality, [tokenId]: "wounded" } };
+          wounded.push({ tokenId, to: victim.position });
+          nextPower = addCharge(nextPower, foe);
+          wolfBite = { tokenId, sentHome: false };
+        } else if (WOLF_CAPTURES) {
+          tokens = tokens.map((t) => (t.id === tokenId ? { ...t, position: -1 } : t));
+          nextPower = clearThrallIfCaptured(nextPower, [tokenId]);
+          nextPower = clearVitality(nextPower, [tokenId]);
+          nextPower = clearCurseOnCapture(nextPower, [tokenId]);
+          nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+          nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
+          nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
+          nextPower = addCharge(nextPower, foe); // the kill pays the hunter, like any capture
+          wolfBite = { tokenId, sentHome: true };
+        } else {
+          const sentHome = knockBack(WOLF_BITE_DISTANCE);
+          if (sentHome !== null) wolfBite = { tokenId, sentHome };
+        }
+      }
+    }
+  }
+
   const extraTurn = landsOnShield;
   const nextState: GameState = {
     tokens,
@@ -1551,7 +2362,15 @@ function resolveTurn(
     winner: causesWin ? mover : null,
     extraTurn,
   };
-  return { state: nextState, power: resetTurnFlags(nextPower), rainOfArrows, wounded, mendedTokenIds };
+  return {
+    state: nextState,
+    power: resetTurnFlags(nextPower),
+    rainOfArrows,
+    wounded,
+    mendedTokenIds,
+    trapSprung,
+    wolfBite,
+  };
 }
 
 export function applyPowerMove(
@@ -1566,6 +2385,8 @@ export function applyPowerMove(
   rainOfArrows: { targetTokenId: number | null } | null;
   wounded: { tokenId: number; to: number }[];
   mendedTokenIds: number[];
+  trapSprung: { tile: number; tokenId: number; sentHome: boolean } | null;
+  wolfBite: { tokenId: number; sentHome: boolean } | null;
 } {
   const allCaptures = [...move.captures, ...move.bonusCaptures];
   return resolveTurn(
@@ -1594,6 +2415,8 @@ export function applyCharge(
   rainOfArrows: { targetTokenId: number | null } | null;
   wounded: { tokenId: number; to: number }[];
   mendedTokenIds: number[];
+  trapSprung: { tile: number; tokenId: number; sentHome: boolean } | null;
+  wolfBite: { tokenId: number; sentHome: boolean } | null;
 } {
   const allCaptures = [...move.captures, ...move.bonusCaptures, ...move.chargeSweepCaptures];
   const spent: PowerState = {
@@ -1768,9 +2591,12 @@ export function applyPush(
     // A pushed-home THRALL dies for real (incl. the below-row crumble in
     // computeKnockbackLanding) — its possession entry falls with it. A
     // WOUNDED stone's vitality entry dies with it too (reserve-trip
-    // hygiene, same as Bulwark's).
+    // hygiene, same as Bulwark's). Ditto a cursed one's chains, and the
+    // Blood Pact pays a warlock victim for the loss.
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
     spentPower = clearVitality(spentPower, [targetTokenId]);
+    spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
@@ -1876,9 +2702,11 @@ export function applyChargedShot(
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
     // Same thrall-death rule as Push's — see clearThrallIfCaptured. And
-    // the same vitality reserve-trip hygiene.
+    // the same vitality/curse reserve-trip hygiene + Blood Pact payout.
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
     spentPower = clearVitality(spentPower, [targetTokenId]);
+    spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
   const nextState: GameState = {
@@ -1985,8 +2813,11 @@ export function applyBlinkStrike(
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
   // Ultimates PIERCE the blessing — a blessed target dies for real here
   // (the wound split is resolveTurn's, for mortal weapons), and the dead
-  // token's vitality entry clears with it.
+  // token's vitality entry clears with it. Curse hygiene + Blood Pact,
+  // the same every-kill-path pair.
   nextPower = clearVitality(nextPower, [targetTokenId]);
+  nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
     tokens,
@@ -2059,7 +2890,10 @@ export function applyWarpath(
   nextPower = clearThrallIfCaptured(nextPower, allCaptures);
   // Warpath pierces the blessing on everything it touches, primary and
   // swept alike — full kills, entries cleared (same rule as Blink Strike).
+  // Curse hygiene + Blood Pact, the same every-kill-path pair.
   nextPower = clearVitality(nextPower, allCaptures);
+  nextPower = clearCurseOnCapture(nextPower, allCaptures);
+  nextPower = grantBloodPact(nextPower, state.tokens, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
     tokens,
@@ -2455,6 +3289,11 @@ export function applyCorpseExplosion(
   nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds); // unreachable while Bulwark blocks the blast, but a reserve trip must never carry protection — same guard as every send-home path
   nextPower = clearVitality(nextPower, sentHomeIds); // a WOUNDED (unblessed) victim sent home loses its entry — reserve-trip hygiene
+  nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
+  // Desecration denies the CASTER's income (no bounty, no corpse) — not
+  // the VICTIM's compensation: a warlock's stones killed in the blast
+  // still pay their owner's Blood Pact.
+  nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover); // never lands the mover on a shield
 
   const nextState: GameState = {
@@ -2884,6 +3723,12 @@ export function applyGrandHeist(
   );
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
   nextPower = clearVitality(nextPower, [targetTokenId]);
+  nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  // Blood Pact's grant lands here — and the drain-to-zero below takes it
+  // straight back. Deliberate (see BLOOD_PACT_CHARGES's ordering note):
+  // the heist robs the grave too. The call stays for uniform kill-path
+  // discipline, not effect.
+  nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   nextPower = { ...nextPower, charges: { ...nextPower.charges, [foe]: 0 } };
   const nextState: GameState = {
@@ -2894,4 +3739,1075 @@ export function applyGrandHeist(
     extraTurn: false,
   };
   return { state: nextState, power: resetTurnFlags(nextPower) };
+}
+
+// ============================================================================
+// WARLOCK (added 2026-07-26) — profits from its own dead; the only class
+// that WANTS to lose stones. Passive: BLOOD PACT — every kill of a
+// warlock-owned stone banks the warlock BLOOD_PACT_CHARGES (grantBloodPact,
+// threaded through every kill path the way clearVitality is). Actives:
+// CURSE OF CHAINS (CURSE_COST, keeps the turn) shortens one enemy stone's
+// every move by CURSE_SLOW for CURSE_TURNS of the victim's turn-starts —
+// the game's only move-DISTANCE modifier; SACRIFICE (SACRIFICE_COST, the
+// full bank) trades the warlock's own most-advanced stone for a kill
+// through Ward and Blessing — the magical half of the defense roster,
+// pierced below ultimate tier (Bulwark/Vanish/shield tiles still block it).
+// Ultimate: FEL STORM drags every enemy stone in shared water back to the
+// row's gate (FEL_STORM_RETURN_POSITION), through everything. The class's
+// persistent footprint is PowerState.curse.
+// ============================================================================
+
+/** Warlock's Curse of Chains: valid targets are enemy stones in shared
+ *  water — getRainOfArrowsTargets' pool (possession resolved via
+ *  effectiveOwner) minus two exclusions: a VANISHED stone (untargetable by
+ *  every enemy ability below an ultimate — Vanish's absolute contract) and
+ *  the stone the mover's own curse already binds (re-cursing it would be a
+ *  full-price no-op — the pool refusing it is the same legal-but-worthless
+ *  trap-avoidance getPickpocketTargets documents). Ward, Bulwark,
+ *  Blessing, and shield tiles do NOT block it — the chains bind the legs,
+ *  not the armor; nothing is captured or moved, Pickpocket's own
+ *  reasoning. Affordability (CURSE_COST) baked in, uniform for every
+ *  target. */
+export function getCurseTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < CURSE_COST) return [];
+  return getRainOfArrowsTargets(state, power, mover)
+    .filter((id) => !isVanished(power, state.tokens.find((t) => t.id === id)!))
+    .filter((id) => power.curse[mover]?.tokenId !== id);
+}
+
+/** Warlock's Curse of Chains: spends CURSE_COST and aims the mover's single
+ *  curse slot at the target for CURSE_TURNS of the victim's turn-starts —
+ *  overwriting any previous mark (one curse per warlock; the old chains
+ *  lift the instant the new ones bind). Does NOT end the turn
+ *  (Re-flip/Bless/Pickpocket's contract) and touches no token positions —
+ *  the whole effect lives in getLegalPowerMoves's per-token filter.
+ *  Leaves the shield streak untouched, same as every turn-keeper. */
+export function applyCurse(power: PowerState, targetTokenId: number, mover: PlayerId): PowerState {
+  return {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - CURSE_COST },
+    curse: { ...power.curse, [mover]: { tokenId: targetTokenId, turnsLeft: CURSE_TURNS } },
+  };
+}
+
+/** Curse bookkeeping for the START of a brand-new turn — the
+ *  tickThrallForNewTurn convention exactly: call once per fresh flip dealt
+ *  to state.currentPlayer (extra turns included, Re-flips not), BEFORE
+ *  computing the turn's move list — an expiring curse frees the stone for
+ *  THIS turn's moves. Decrements the curse AFFLICTING the current player
+ *  (i.e. the one cast by their opponent — curse slots are keyed by
+ *  caster); at 0 the chains lift. Returns the freed token id so the
+ *  server can announce it (lastCurseExpired), or null. */
+export function tickCurseForNewTurn(
+  state: GameState,
+  power: PowerState,
+): { power: PowerState; expiredTokenId: number | null } {
+  const caster = otherPlayerId(state.currentPlayer);
+  const c = power.curse[caster];
+  if (!c) return { power, expiredTokenId: null };
+  const turnsLeft = c.turnsLeft - 1;
+  if (turnsLeft > 0) {
+    return {
+      power: { ...power, curse: { ...power.curse, [caster]: { ...c, turnsLeft } } },
+      expiredTokenId: null,
+    };
+  }
+  return {
+    power: { ...power, curse: { ...power.curse, [caster]: null } },
+    expiredTokenId: c.tokenId,
+  };
+}
+
+/** Warlock's Sacrifice: valid targets are enemy stones in shared water,
+ *  INCLUDING Warded and Blessed ones (the pierce is the point — see
+ *  SACRIFICE_COST) but never a shield-tile squatter, a Bulwarked stone, or
+ *  a Vanished one (isBulwarked covers Vanish too — same underlying map).
+ *  Empty when the warlock has no on-board stone to give (the ritual needs
+ *  blood — findMostAdvancedToken's null, Blink Strike's shape) or can't
+ *  afford the cast (baked in, Charged Shot's uniform-cost convention). */
+export function getSacrificeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < SACRIFICE_COST) return [];
+  if (!findMostAdvancedToken(state, power, mover)) return [];
+  const foe = otherPlayerId(mover);
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => BOARD_LAYOUT[t.position].isContested)
+    .filter((t) => !onShieldTile(t))
+    .filter((t) => !isBulwarked(power, t))
+    .map((t) => t.id);
+}
+
+/** Warlock's Sacrifice: sends the mover's own MOST-ADVANCED on-board stone
+ *  home and kills the target outright — through Ward and a Blessing (a
+ *  FULL kill, never a wound; the blessing's entry clears like any ultimate
+ *  kill's). The kill banks no capture charge (desecrate economy — see
+ *  SACRIFICE_COST), and Blood Pact deliberately does NOT pay for the stone
+ *  the warlock spends itself (see below). Ends the turn, breaks the shield
+ *  streak. Returns the sacrificed stone's id so the server can announce
+ *  both deaths.
+ *
+ *  THE RITUAL DEMANDS YOUR BEST, NOT YOUR WORST — and this is a balance
+ *  decision before it is a flavor one. First implementation auto-selected
+ *  the LEAST-advanced stone (Warpath's convention, chosen to keep the
+ *  one-tap targeting UI). That made the "a body" half of the price
+ *  routinely free: the rearmost stone is usually sitting on tile 0-4 with
+ *  no run invested, so a guaranteed pierce-kill cost little more than the
+ *  mana. Measured at 500-600 games/matchup, least-advanced vs
+ *  most-advanced with everything else identical:
+ *    archer   25.6/74.4 -> 36.2/63.8
+ *    warrior  34.0/66.0 -> 44.2/55.8
+ *    cleric   30.0/70.0 -> 48.6/51.4
+ *    rogue    30.0/70.0 -> 34.4/65.6
+ *    mirror   47.5/52.5 -> 49.4/50.6
+ *  Every matchup moved toward parity and none moved away — the clean
+ *  result a real root-cause fix gives, versus the compensating-lever
+ *  shape this file's history is full of. Spending the lead runner makes
+ *  the trade self-limiting: it is worth it to remove a deep enemy runner
+ *  or something no other tool can touch, and never worth it as a routine
+ *  attrition loop. Cross-check on the same runs: mage-vs-warlock sits
+ *  61/39 mage-favored, consistent with Mage's known roster-wide edge
+ *  rather than anything warlock-specific — do not "fix" that here. */
+export function applySacrifice(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; sacrificedTokenId: number } {
+  const mine = findMostAdvancedToken(state, power, mover)!;
+  const killed = [mine.id, targetTokenId];
+  const tokens = state.tokens.map((t) => (killed.includes(t.id) ? { ...t, position: -1 } : t));
+  let nextPower: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - SACRIFICE_COST },
+  };
+  // The full kill-path hygiene set: the target could be a thrall (a mercy
+  // kill of the mover's own possessed stone — effectiveOwner made it an
+  // enemy) or blessed or cursed; the sacrificed stone could itself be
+  // cursed. Bulwark hygiene is a structural no-op (neither stone can carry
+  // one — the pool excludes Bulwarked targets and a warlock's own stones
+  // are never Bulwark/Vanish-eligible) but stays for uniform discipline.
+  nextPower = clearCapturedBulwarks(nextPower, killed);
+  nextPower = clearThrallIfCaptured(nextPower, killed);
+  nextPower = clearVitality(nextPower, killed);
+  nextPower = clearCurseOnCapture(nextPower, killed);
+  // THE PACT DOES NOT PAY FOR SUICIDE. Blood Pact covers blood the ENEMY
+  // spills, never blood the warlock spends itself — so the sacrificed
+  // stone is excluded here (an enemy warlock's stone dying as the TARGET
+  // in a mirror still pays its own owner, hence filtering by id rather
+  // than skipping the call). Corpse Explosion's desecrate rule is the
+  // precedent: an ability may deny its own caster the income its kills
+  // would normally pay.
+  //
+  // This is not a flavor nicety, it is the ability's whole economy. First
+  // balance run WITH the refund: sacrifice/g hit 14-95 and the warlock
+  // took 76-89% off the entire field, because SACRIFICE_COST(2) minus the
+  // refund(1) made a guaranteed pierce-kill cost ~1 mana. (The stone spent
+  // was ALSO nearly free at the time — that was the other half of the same
+  // blowout, fixed separately by switching the auto-selection to the
+  // most-advanced stone; see this function's own doc.) The warlock mirror
+  // stalemated 45-49% of games at the 1000-turn cap: both sides farmed
+  // their own bodies forever and nobody raced. Without the refund the cast
+  // costs the full bank AND a real runner, which is the trade the ability
+  // was designed around.
+  nextPower = grantBloodPact(
+    nextPower,
+    state.tokens,
+    killed.filter((id) => id !== mine.id),
+  );
+  nextPower = breakShieldStreak(nextPower, mover); // an attack, not a placement
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), sacrificedTokenId: mine.id };
+}
+
+/** Warlock's Fel Storm: the victim pool is every enemy stone in shared
+ *  water — getRainOfArrowsTargets verbatim (the ultimate pool: every
+ *  protection pierced, possession resolved). Empty pool = no one to drag
+ *  = not castable (Benediction's misclick rule). ultimateReady gating
+ *  stays at the dispatch layer, same as every active ultimate. */
+export function getFelStormTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Warlock's Fel Storm: drags every victim back to the row's gate —
+ *  most-advanced placed first at FEL_STORM_RETURN_POSITION, each later
+ *  victim walking further down its own path (applyExhume's collision
+ *  semantics against the working board, corpse explosion's sequential
+ *  discipline) so the pack stacks 4, 3, 2, ... in preserved order. A
+ *  THRALL whose walk lands below tile 4 crumble-dies instead (the
+ *  chained-to-the-row rule — computeKnockbackLanding's precedent), a real
+ *  death: thrall entry cleared, Blood Pact paid to its real owner, and it
+ *  goes to that owner's reserve. Ordinary victims walking below 4 land in
+ *  their OWN private lane — real tiles, no kill. Dragged stones keep
+ *  their Bulwark/Blessing/curse (they never died; Exhume's
+ *  rides-through-the-return precedent). No charge income for anyone —
+ *  nothing was captured. Spends ultimateReady, ends the turn, breaks the
+ *  shield streak. */
+export function applyFelStorm(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; struckTokenIds: number[]; sentHomeIds: number[] } {
+  const victims = getFelStormTargets(state, power, mover)
+    .map((id) => state.tokens.find((t) => t.id === id)!)
+    .sort((a, b) => b.position - a.position);
+
+  let tokens = state.tokens;
+  const sentHomeIds: number[] = [];
+  for (const victim of victims) {
+    let landing = FEL_STORM_RETURN_POSITION;
+    while (landing >= 0) {
+      const contested = BOARD_LAYOUT[landing].isContested;
+      const occupied = tokens.some(
+        (t) => t.id !== victim.id && t.position === landing && (t.owner === victim.owner || contested),
+      );
+      if (!occupied) break;
+      landing--;
+    }
+    // A thrall may not stand below the row (crumble-death), and the walk
+    // running out entirely (-1) is staggerBackTile's same defensive
+    // degenerate — both resolve as a send-home.
+    if (landing < 4 && possessorOf(power, victim.id) !== null) landing = -1;
+    if (landing === -1) sentHomeIds.push(victim.id);
+    tokens = tokens.map((t) => (t.id === victim.id ? { ...t, position: landing } : t));
+  }
+
+  let nextPower: PowerState = {
+    ...power,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
+  nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
+  nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
+  nextPower = clearVitality(nextPower, sentHomeIds);
+  nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
+  nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
+  nextPower = breakShieldStreak(nextPower, mover); // an attack, not a placement
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(nextPower),
+    struckTokenIds: victims.map((v) => v.id),
+    sentHomeIds,
+  };
+}
+
+// ============================================================================
+// HUNTER (added 2026-07-26) — zone control: the class that STOPS enemies
+// rather than moving them. Passive: WOLF COMPANION — the hunter's
+// least-advanced stone guards the contested tile ahead of it, and any enemy
+// landing there is knocked back WOLF_BITE_DISTANCE (resolveTurn's reactive
+// layer). Actives: SNARE (SNARE_COST, keeps the turn) arms a trap on an
+// empty contested TILE — the game's only non-stone board state, public to
+// both seats — which throws the first enemy to land on it TRAP_KNOCKBACK
+// tiles back; PIERCING SHOT (PIERCING_SHOT_COST, the full bank) looses an
+// arrow down the row that kills the first unprotected enemy ahead of the
+// hunter's lead stone, at any range — the first body stops the arrow, which
+// is the ability's counterplay. Ultimate:
+// WILD HUNT freezes the whole enemy row for WILD_HUNT_FREEZE_TURNS and the
+// wolf takes the nearest quarry through every protection. Persistent
+// footprint: PowerState.traps + PowerState.hamstrung.
+// ============================================================================
+
+/** Hunter's Snare: legal tiles are EMPTY contested squares (4-11) that
+ *  aren't the middle shield and aren't already trapped by this hunter.
+ *  Empty is required because a trap is a thing you walk INTO — arming one
+ *  under a stone already standing there would either fire instantly or
+ *  never, both bad. The shield tile is excluded on the same principle every
+ *  other ability respects it: holy ground, no ambushes. Affordability baked
+ *  in (Charged Shot's uniform-cost convention).
+ *
+ *  Note the enemy's OWN trap tile is still legal for this hunter in a
+ *  mirror: two traps can share a square, and each springs for its own
+ *  setter's opponent. Nothing needs disambiguating — resolveTurn checks the
+ *  MOVER's foe's slot only. */
+export function getSnareTiles(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < SNARE_COST) return [];
+  const tiles: number[] = [];
+  for (let tile = 0; tile < PATH_LENGTH_PER_PLAYER; tile++) {
+    if (!BOARD_LAYOUT[tile].isContested) continue;
+    if (BOARD_LAYOUT[tile].type === "shield") continue;
+    if (power.traps?.[mover] === tile) continue;
+    if (state.tokens.some((t) => t.position === tile)) continue;
+    tiles.push(tile);
+  }
+  return tiles;
+}
+
+/** Hunter's Snare: spends SNARE_COST and arms the hunter's single trap on
+ *  `tile`, lifting any trap they had elsewhere (one per hunter — a re-site
+ *  costs full price, so there is nothing to farm). Does NOT end the turn
+ *  (Curse/Bless/Pickpocket's contract) and moves no stone, so the shield
+ *  streak is untouched — setting a trap is board development, not an
+ *  attack. */
+export function applySnare(power: PowerState, tile: number, mover: PlayerId): PowerState {
+  return {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - SNARE_COST },
+    traps: { ...power.traps, [mover]: tile },
+  };
+}
+
+/** Which stone Piercing Shot would actually hit: walking FORWARD along the
+ *  contested row from the hunter's most-advanced stone, the first occupied
+ *  tile decides everything. If that stone is an unprotected enemy it dies;
+ *  if it is protected, or is one of the hunter's own, the arrow stops
+ *  there and the shot has no target at all. That "first body stops the
+ *  arrow" rule is the ability's whole counterplay — a Ward, a Bulwark, a
+ *  Vanish or a shield tile doesn't just save that stone, it body-blocks
+ *  for everything behind it. Shared by the oracle and the apply so the two
+ *  can never disagree. */
+function piercingShotVictim(state: GameState, power: PowerState, mover: PlayerId): TokenState | null {
+  const archer = findMostAdvancedToken(state, power, mover);
+  if (!archer) return null;
+  for (let tile = archer.position + 1; tile < PATH_LENGTH_PER_PLAYER; tile++) {
+    if (!BOARD_LAYOUT[tile].isContested) break; // the arrow leaves the shared row
+    const occupant = state.tokens.find((t) => t.position === tile);
+    if (!occupant) continue;
+    if (effectiveOwner(power, occupant) === mover) return null; // own stone blocks the lane
+    if (isProtected(state, power, occupant)) return null; // armour stops the arrow
+    return occupant;
+  }
+  return null;
+}
+
+/** Hunter's Piercing Shot: a single-entry pool (the arrow's path decides
+ *  the target, not the player) or empty — the same "one candidate, no
+ *  choice" collapse Revive and Exhume already use. Affordability baked in,
+ *  Charged Shot's uniform-cost convention. */
+export function getPiercingShotTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < PIERCING_SHOT_COST) return [];
+  const victim = piercingShotVictim(state, power, mover);
+  return victim ? [victim.id] : [];
+}
+
+/** Hunter's Piercing Shot: spends the full bank; the arrow kills the stone
+ *  piercingShotVictim picked. A real kill (not a knockback), so a BLESSED
+ *  victim is wounded instead — a mortal weapon, not an ultimate. Grants the
+ *  standard capture charge either way (resolveTurn's tuned
+ *  wounds-pay-the-breaker line). No stone of the hunter's moves: ends the
+ *  turn and breaks the shield streak, Push's precedent exactly. */
+export function applyPiercingShot(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; killedTokenId: number | null; woundedTokenId: number | null } {
+  const victim = piercingShotVictim(state, power, mover);
+  let next: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - PIERCING_SHOT_COST },
+  };
+  let tokens = state.tokens;
+  let killedTokenId: number | null = null;
+  let woundedTokenId: number | null = null;
+  if (victim) {
+    if (isBlessed(next, victim.id)) {
+      next = { ...next, vitality: { ...next.vitality, [victim.id]: "wounded" } };
+      woundedTokenId = victim.id;
+    } else {
+      tokens = tokens.map((t) => (t.id === victim.id ? { ...t, position: -1 } : t));
+      next = clearCapturedBulwarks(next, [victim.id]);
+      next = clearThrallIfCaptured(next, [victim.id]);
+      next = clearVitality(next, [victim.id]);
+      next = clearCurseOnCapture(next, [victim.id]);
+      next = clearHamstringOnCapture(next, [victim.id]);
+      next = grantBloodPact(next, state.tokens, [victim.id]);
+      killedTokenId = victim.id;
+    }
+    next = addCharge(next, mover);
+  }
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(next),
+    killedTokenId,
+    woundedTokenId,
+  };
+}
+
+/** Freeze bookkeeping for the START of a brand-new turn — the
+ *  tickThrallForNewTurn/tickCurseForNewTurn convention: call once per fresh
+ *  flip dealt to state.currentPlayer, BEFORE the move list is computed, so
+ *  the turn a freeze expires is a turn the stone actually moves. Ticks only
+ *  the CURRENT player's OWN stones (the freeze is measured in the victim's
+ *  turns). Returns the ids that thawed so the server can announce them. */
+export function tickHamstringForNewTurn(
+  state: GameState,
+  power: PowerState,
+): { power: PowerState; thawedTokenIds: number[] } {
+  const mover = state.currentPlayer;
+  const mine = Object.keys(power.hamstrung ?? {})
+    .map(Number)
+    .filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
+  if (mine.length === 0) return { power, thawedTokenIds: [] };
+  const hamstrung = { ...power.hamstrung };
+  const thawedTokenIds: number[] = [];
+  for (const id of mine) {
+    const left = hamstrung[id] - 1;
+    if (left <= 0) {
+      delete hamstrung[id];
+      thawedTokenIds.push(id);
+    } else {
+      hamstrung[id] = left;
+    }
+  }
+  return { power: { ...power, hamstrung }, thawedTokenIds };
+}
+
+/** Hunter's Wild Hunt: the pool is every enemy stone in shared water —
+ *  Rain of Arrows' ultimate pool (every protection pierced, possession
+ *  resolved). Empty pool = nothing to hunt = not castable (Benediction's
+ *  misclick rule). ultimateReady gating stays at the dispatch layer. */
+export function getWildHuntTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  return getRainOfArrowsTargets(state, power, mover);
+}
+
+/** Hunter's Wild Hunt: every trap in the world snaps shut at once. Every
+ *  enemy stone in shared water is frozen for WILD_HUNT_FREEZE_TURNS of its
+ *  owner's turn-starts, AND the wolf takes the nearest one — the
+ *  least-advanced victim, the stone the wolf could actually run down —
+ *  through shield tiles, Ward, Bulwark, Vanish and a Blessing alike, the
+ *  ultimate convention. Unlike the teleport-capture ultimates the hunter's
+ *  own stones do not move: the wolf hunts, the hunter stands. Grants 1
+ *  charge on the kill (Blink Strike/Warpath's economy). Spends the hunter's
+ *  own armed trap too — the ability is every trap firing, including theirs.
+ *  Ends the turn, breaks the shield streak. */
+export function applyWildHunt(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; frozenTokenIds: number[]; killedTokenId: number | null } {
+  const pool = getWildHuntTargets(state, power, mover)
+    .map((id) => state.tokens.find((t) => t.id === id)!)
+    .sort((a, b) => a.position - b.position);
+  const quarry = pool[0] ?? null;
+  const frozen = pool.filter((t) => t.id !== quarry?.id);
+
+  const tokens = state.tokens.map((t) => (quarry && t.id === quarry.id ? { ...t, position: -1 } : t));
+  let next: PowerState = {
+    ...power,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+    traps: { ...power.traps, [mover]: null },
+  };
+  if (frozen.length > 0) {
+    const hamstrung = { ...next.hamstrung };
+    for (const t of frozen) hamstrung[t.id] = WILD_HUNT_FREEZE_TURNS;
+    next = { ...next, hamstrung };
+  }
+  if (quarry) {
+    next = clearCapturedBulwarks(next, [quarry.id]);
+    next = clearThrallIfCaptured(next, [quarry.id]);
+    next = clearVitality(next, [quarry.id]);
+    next = clearCurseOnCapture(next, [quarry.id]);
+    next = clearHamstringOnCapture(next, [quarry.id]);
+    next = grantBloodPact(next, state.tokens, [quarry.id]);
+    next = addCharge(next, mover);
+  }
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(next),
+    frozenTokenIds: frozen.map((t) => t.id),
+    killedTokenId: quarry?.id ?? null,
+  };
+}
+
+// ============================================================================
+// BARBARIAN (added 2026-07-27) — the comeback engine: the only class that
+// gets FASTER the worse it is doing. Passive: RAGE — every stone in reserve
+// adds a tile to every move, up to RAGE_MAX (rageFor, read by
+// getLegalPowerMoves). Actives: RECKLESS SWING (RECKLESS_SWING_COST) kills
+// an adjacent enemy through BULWARK and VANISH — the physical half of the
+// defence roster, the counterpart to Warlock's Sacrifice — and throws the
+// swinger RECKLESS_SELF_KNOCKBACK tiles back for its trouble; WHIRLWIND
+// (WHIRLWIND_COST, the full bank) catches every enemy within
+// WHIRLWIND_RADIUS of ANY of the barbarian's stones, capturing up to
+// WHIRLWIND_CAP and shoving the rest. Ultimate: BLOODBATH sends the lead
+// stone the length of the row, taking everything in its path through every
+// protection there is. No persistent PowerState of its own — Rage is
+// derived from the board, which is what makes it impossible to hoard.
+// ============================================================================
+
+/** Which of the barbarian's stones would swing at this victim: the one
+ *  standing directly behind it. At most one stone can occupy that tile, so
+ *  the striker is determined by the board rather than chosen — which is
+ *  what keeps Reckless Swing on the one-tap "tap an enemy" UI every other
+ *  targeted ability uses. */
+function recklessSwinger(state: GameState, power: PowerState, mover: PlayerId, victim: TokenState): TokenState | null {
+  const behind = state.tokens.find(
+    (t) => effectiveOwner(power, t) === mover && t.position === victim.position - 1 && t.position >= 0,
+  );
+  return behind ?? null;
+}
+
+/** Barbarian's Reckless Swing: valid targets are enemy stones in shared
+ *  water with one of the barbarian's own stones directly behind them.
+ *  PIERCES Bulwark and Vanish (the physical half — see
+ *  RECKLESS_SWING_COST); a Ward and a shield tile still stop it, and a
+ *  Blessing still absorbs it as a wound, this being a mortal weapon.
+ *  Affordability baked in, Charged Shot's uniform-cost convention. */
+export function getRecklessSwingTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < RECKLESS_SWING_COST) return [];
+  const foe = otherPlayerId(mover);
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => BOARD_LAYOUT[t.position].isContested)
+    .filter((t) => !onShieldTile(t))
+    .filter((t) => !isWarded(state, power, t))
+    .filter((t) => recklessSwinger(state, power, mover, t) !== null)
+    .map((t) => t.id);
+}
+
+/** Barbarian's Reckless Swing: the stone behind the victim kills it —
+ *  through a Bulwark or a Vanish — and is thrown RECKLESS_SELF_KNOCKBACK
+ *  tiles back along its own path for the effort, standard collision math,
+ *  so a blocked recoil sends the swinger home too. Grants the usual capture
+ *  charge. Ends the turn and breaks the shield streak (Push's precedent).
+ *  Returns both halves so the server can announce the trade honestly. */
+export function applyRecklessSwing(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): {
+  state: GameState;
+  power: PowerState;
+  swingerTokenId: number;
+  killedTokenId: number | null;
+  woundedTokenId: number | null;
+  swingerSentHome: boolean;
+} {
+  const victim = state.tokens.find((t) => t.id === targetTokenId)!;
+  const swinger = recklessSwinger(state, power, mover, victim)!;
+  let next: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - RECKLESS_SWING_COST },
+  };
+  let tokens = state.tokens;
+  let killedTokenId: number | null = null;
+  let woundedTokenId: number | null = null;
+
+  if (isBlessed(next, targetTokenId)) {
+    // A mortal weapon: the blessing breaks and the stone holds its ground.
+    next = { ...next, vitality: { ...next.vitality, [targetTokenId]: "wounded" } };
+    woundedTokenId = targetTokenId;
+  } else {
+    tokens = tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
+    next = clearCapturedBulwarks(next, [targetTokenId]);
+    next = clearThrallIfCaptured(next, [targetTokenId]);
+    next = clearVitality(next, [targetTokenId]);
+    next = clearCurseOnCapture(next, [targetTokenId]);
+    next = clearHamstringOnCapture(next, [targetTokenId]);
+    next = grantBloodPact(next, state.tokens, [targetTokenId]);
+    killedTokenId = targetTokenId;
+  }
+  next = addCharge(next, mover); // the blow landed, wound or kill
+
+  // The recoil, resolved against the post-kill board so the swinger can
+  // fall back into the tile it just emptied.
+  const working: GameState = { ...state, tokens };
+  const current = tokens.find((t) => t.id === swinger.id)!;
+  const landing = computeKnockbackLanding(working, next, current, RECKLESS_SELF_KNOCKBACK);
+  tokens = tokens.map((t) => (t.id === swinger.id ? { ...t, position: landing } : t));
+  const swingerSentHome = landing === -1;
+  if (swingerSentHome) {
+    next = clearThrallIfCaptured(next, [swinger.id]);
+    next = clearVitality(next, [swinger.id]);
+    next = clearCurseOnCapture(next, [swinger.id]);
+    next = clearHamstringOnCapture(next, [swinger.id]);
+    next = clearCapturedBulwarks(next, [swinger.id]);
+    next = grantBloodPact(next, state.tokens, [swinger.id]);
+  }
+
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(next),
+    swingerTokenId: swinger.id,
+    killedTokenId,
+    woundedTokenId,
+    swingerSentHome,
+  };
+}
+
+/** Barbarian's Whirlwind: everything the spin would catch — enemy stones on
+ *  the contested row within WHIRLWIND_RADIUS of ANY of the barbarian's own
+ *  on-board stones, minus anything protected (isProtected: this is a wide
+ *  swing, not a piercing one). Empty pool = not castable, Benediction's
+ *  misclick rule. Affordability baked in. */
+export function getWhirlwindTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < WHIRLWIND_COST) return [];
+  const mine = state.tokens.filter(
+    (t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+  );
+  if (mine.length === 0) return [];
+  const foe = otherPlayerId(mover);
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => BOARD_LAYOUT[t.position].isContested)
+    .filter((t) => mine.some((m) => Math.abs(m.position - t.position) <= WHIRLWIND_RADIUS))
+    .filter((t) => !isProtected(state, power, t))
+    .map((t) => t.id);
+}
+
+/** Barbarian's Whirlwind: spends the full bank. The WHIRLWIND_CAP
+ *  most-advanced victims are captured outright (deepest runners first —
+ *  deterministic, and the ones worth taking); everyone else the spin
+ *  reaches is knocked back 1 with standard collision math, so a blocked
+ *  shove is a send-home. Grants exactly one charge if anything died at all,
+ *  Charge's own sweep economy (one capturing action = one charge, however
+ *  many it takes down). Ends the turn, breaks the shield streak. */
+export function applyWhirlwind(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): {
+  state: GameState;
+  power: PowerState;
+  capturedTokenIds: number[];
+  knockedTokenIds: number[];
+  sentHomeIds: number[];
+  woundedTokenIds: number[];
+} {
+  const victims = getWhirlwindTargets(state, power, mover)
+    .map((id) => state.tokens.find((t) => t.id === id)!)
+    .sort((a, b) => b.position - a.position);
+  const toCapture = victims.slice(0, WHIRLWIND_CAP);
+  const toShove = victims.slice(WHIRLWIND_CAP);
+
+  let next: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - WHIRLWIND_COST },
+  };
+  let tokens = state.tokens;
+  const capturedTokenIds: number[] = [];
+  const woundedTokenIds: number[] = [];
+
+  for (const v of toCapture) {
+    if (isBlessed(next, v.id)) {
+      next = { ...next, vitality: { ...next.vitality, [v.id]: "wounded" } };
+      woundedTokenIds.push(v.id);
+      continue;
+    }
+    tokens = tokens.map((t) => (t.id === v.id ? { ...t, position: -1 } : t));
+    capturedTokenIds.push(v.id);
+  }
+  if (capturedTokenIds.length > 0) {
+    next = clearCapturedBulwarks(next, capturedTokenIds);
+    next = clearThrallIfCaptured(next, capturedTokenIds);
+    next = clearVitality(next, capturedTokenIds);
+    next = clearCurseOnCapture(next, capturedTokenIds);
+    next = clearHamstringOnCapture(next, capturedTokenIds);
+    next = grantBloodPact(next, state.tokens, capturedTokenIds);
+  }
+
+  // The shoves, resolved outward-in against the working board so a vacated
+  // tile is free for the next victim — Corpse Explosion's discipline.
+  const knockedTokenIds: number[] = [];
+  const sentHomeIds: number[] = [];
+  for (const v of toShove) {
+    const working: GameState = { ...state, tokens };
+    const current = tokens.find((t) => t.id === v.id)!;
+    const landing = computeKnockbackLanding(working, next, current, 1);
+    if (landing === -1 && isBlessed(next, v.id)) {
+      next = { ...next, vitality: { ...next.vitality, [v.id]: "wounded" } };
+      woundedTokenIds.push(v.id);
+      continue;
+    }
+    tokens = tokens.map((t) => (t.id === v.id ? { ...t, position: landing } : t));
+    knockedTokenIds.push(v.id);
+    if (landing === -1) {
+      sentHomeIds.push(v.id);
+      next = clearThrallIfCaptured(next, [v.id]);
+      next = clearVitality(next, [v.id]);
+      next = clearCurseOnCapture(next, [v.id]);
+      next = clearHamstringOnCapture(next, [v.id]);
+      next = clearCapturedBulwarks(next, [v.id]);
+      next = grantBloodPact(next, state.tokens, [v.id]);
+    }
+  }
+
+  if (capturedTokenIds.length > 0 || woundedTokenIds.length > 0) next = addCharge(next, mover);
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(next),
+    capturedTokenIds,
+    knockedTokenIds,
+    sentHomeIds,
+    woundedTokenIds,
+  };
+}
+
+/** Barbarian's Bloodbath: the pool is every enemy on the contested row
+ *  AHEAD of the barbarian's lead stone — everything the charge would run
+ *  through. Empty (or no lead stone at all) means nothing to charge, so
+ *  not castable. ultimateReady gating stays at the dispatch layer. */
+export function getBloodbathTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  const lead = findMostAdvancedToken(state, power, mover);
+  if (!lead) return [];
+  const foe = otherPlayerId(mover);
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === foe && t.position > lead.position)
+    .filter((t) => t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[t.position].isContested)
+    .map((t) => t.id);
+}
+
+/** Barbarian's Bloodbath: the lead stone charges to BLOODBATH_END_POSITION,
+ *  taking every enemy on the contested row between where it stood and where
+ *  it stops — through shield tiles, Ward, Bulwark, Vanish and Blessings
+ *  alike, the ultimate convention, and uncapped, which is what separates it
+ *  from Charge. If the destination is occupied by a stone the charge does
+ *  not take (one of the barbarian's own), it walks back the way Exhume's
+ *  occupancy walk does. Grants exactly one charge however many it kills
+ *  (Warpath's economy). Ends the turn, breaks the shield streak. */
+export function applyBloodbath(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; killedTokenIds: number[]; endedOn: number } {
+  const lead = findMostAdvancedToken(state, power, mover)!;
+  const killedTokenIds = getBloodbathTargets(state, power, mover).filter((id) => {
+    const t = state.tokens.find((x) => x.id === id)!;
+    return t.position <= BLOODBATH_END_POSITION;
+  });
+
+  let tokens = state.tokens.map((t) => (killedTokenIds.includes(t.id) ? { ...t, position: -1 } : t));
+  // Where the charge actually stops: the end of the row, walking back past
+  // anything still standing there (only the barbarian's own stones can be,
+  // the enemies in reach having just died).
+  let landing = BLOODBATH_END_POSITION;
+  while (landing > lead.position) {
+    const contested = BOARD_LAYOUT[landing].isContested;
+    const occupied = tokens.some(
+      (t) => t.id !== lead.id && t.position === landing && (t.owner === lead.owner || contested),
+    );
+    if (!occupied) break;
+    landing--;
+  }
+  tokens = tokens.map((t) => (t.id === lead.id ? { ...t, position: landing } : t));
+
+  let next: PowerState = { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } };
+  if (killedTokenIds.length > 0) {
+    next = clearCapturedBulwarks(next, killedTokenIds);
+    next = clearThrallIfCaptured(next, killedTokenIds);
+    next = clearVitality(next, killedTokenIds);
+    next = clearCurseOnCapture(next, killedTokenIds);
+    next = clearHamstringOnCapture(next, killedTokenIds);
+    next = grantBloodPact(next, state.tokens, killedTokenIds);
+    next = addCharge(next, mover);
+  }
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(next),
+    killedTokenIds,
+    endedOn: landing,
+  };
+}
+
+// ============================================================================
+// BARD (added 2026-07-27) — the buff engine. The user's brief was literally
+// "I want the bard to be able to buff a lot", which supersedes the tempo kit
+// originally planned (Rally / Discordant Note): the class is now built to
+// have SEVERAL of its stones lit at once. Passive: ENCORE — a zero flip pays
+// ENCORE_ZERO_FLIP_CHARGES instead of 1, the income that funds the whole
+// thing (wired into grantZeroFlipCharge). Actives: INSPIRE (INSPIRE_COST,
+// keeps the turn) lights one own stone for INSPIRE_TURNS, uncapped in how
+// many may carry it; SONG OF HASTE (HASTE_COST, the full bank) cashes every
+// lit stone at once, advancing each HASTE_TILES. Ultimate: CRESCENDO lights
+// the whole army AND advances it CRESCENDO_TILES. Persistent footprint:
+// PowerState.inspired.
+//
+// EVERY ADVANCE HERE IS BOUGHT MOVEMENT, NEVER AN EXTRA TURN. See
+// HASTE_COST's doc for the two recorded blowouts that rule exists to avoid.
+// ============================================================================
+
+/** Bard's Inspire: valid targets are the bard's own on-board stones not
+ *  already lit (re-lighting would be a full-price no-op — the
+ *  legal-but-worthless trap getPickpocketTargets documents). Deliberately
+ *  NO cap on how many may be inspired at once: the mana is the only limit,
+ *  which is what "buff a lot" means. Affordability baked in. */
+export function getInspireTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < INSPIRE_COST) return [];
+  // INSPIRE_CAP: the pool empties while the count is met, Bless's exact
+  // convention. Counts the mover's OWN lit stones only, so a bard mirror
+  // keeps two independent ledgers.
+  const lit = Object.keys(power.inspired ?? {}).filter(
+    (id) => state.tokens.find((t) => t.id === Number(id))?.owner === mover,
+  ).length;
+  if (lit >= INSPIRE_CAP) return [];
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => !isInspired(power, t.id))
+    .map((t) => t.id);
+}
+
+/** Bard's Inspire: spends INSPIRE_COST and lights one stone for
+ *  INSPIRE_TURNS of the bard's own turn-starts. Does NOT end the turn
+ *  (Re-flip / Bless / Curse / Snare's contract) and moves nothing, so the
+ *  shield streak is untouched — singing is not an attack. */
+export function applyInspire(power: PowerState, targetTokenId: number, mover: PlayerId): PowerState {
+  return {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - INSPIRE_COST },
+    inspired: { ...power.inspired, [targetTokenId]: INSPIRE_TURNS },
+  };
+}
+
+/** Inspiration bookkeeping for the START of a brand-new turn — the
+ *  tickCurseForNewTurn / tickHamstringForNewTurn convention: call once per
+ *  fresh flip dealt to state.currentPlayer, BEFORE the move list is
+ *  computed, so a stone whose song has just faded moves at its true speed.
+ *  Ticks only the CURRENT player's own stones (the duration is measured in
+ *  the bard's turns). Returns the ids that went quiet so the server can
+ *  announce them. */
+export function tickInspireForNewTurn(
+  state: GameState,
+  power: PowerState,
+): { power: PowerState; fadedTokenIds: number[] } {
+  // Inspirations don't expire (see INSPIRE_PERMANENT) — a lit stone stays
+  // lit until it dies. The whole tick stays wired up so the alternative is
+  // one constant away.
+  if (INSPIRE_PERMANENT) return { power, fadedTokenIds: [] };
+  const mover = state.currentPlayer;
+  const mine = Object.keys(power.inspired ?? {})
+    .map(Number)
+    .filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
+  if (mine.length === 0) return { power, fadedTokenIds: [] };
+  const inspired = { ...power.inspired };
+  const fadedTokenIds: number[] = [];
+  for (const id of mine) {
+    const left = inspired[id] - 1;
+    if (left <= 0) {
+      delete inspired[id];
+      fadedTokenIds.push(id);
+    } else {
+      inspired[id] = left;
+    }
+  }
+  return { power: { ...power, inspired }, fadedTokenIds };
+}
+
+/** Shared by Song of Haste and Crescendo: walk a set of the mover's stones
+ *  forward `distance` tiles at once, deepest-first so a vacated tile is
+ *  free for the stone behind it (Corpse Explosion's sequential discipline).
+ *  Ordinary movement rules throughout — this is BOUGHT movement, not an
+ *  ultimate's licence: a stone blocked by one of the mover's own simply
+ *  doesn't move, an unprotected enemy on the landing tile is captured, and
+ *  a protected one blocks — INCLUDING the exact-escape rule: a stone whose
+ *  advance lands it precisely on the finish tile escapes, and one that
+ *  would overshoot simply doesn't move.
+ *
+ *  ESCAPES ARE ALLOWED, corrected after the first balance run. They were
+ *  forbidden at first on the theory that "a purchased advance may not end
+ *  the game" — reading across from this file's extra-turn blowups. That
+ *  read was wrong: those catastrophes were about extra ACTIONS per turn,
+ *  and Song of Haste is one action that ends the turn like any other. The
+ *  ban's actual effect was to make the ability unable to finish a job it
+ *  had started, and since the bot correctly valued a wide march above a
+ *  single move, a bard would sing every turn and NEVER escape anything —
+ *  the bard mirror stalemated 51-65% of games at the turn cap. An ability
+ *  that cannot win is not a safe ability, it is a broken one. */
+function advanceStones(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+  ids: number[],
+  distance: number,
+): { state: GameState; power: PowerState; movedIds: number[]; capturedIds: number[]; woundedIds: number[] } {
+  const ordered = ids
+    .map((id) => state.tokens.find((t) => t.id === id)!)
+    .filter((t) => t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .sort((a, b) => b.position - a.position);
+
+  let tokens = state.tokens;
+  let next = power;
+  const movedIds: number[] = [];
+  const capturedIds: number[] = [];
+  const woundedIds: number[] = [];
+
+  for (const stone of ordered) {
+    const from = tokens.find((t) => t.id === stone.id)!.position;
+    const to = from + distance;
+    if (to >= PATH_LENGTH_PER_PLAYER - 1) {
+      // The classic exact-escape rule: land precisely on the finish tile or
+      // don't move at all.
+      if (to !== PATH_LENGTH_PER_PLAYER - 1) continue;
+      tokens = tokens.map((t) => (t.id === stone.id ? { ...t, position: PATH_LENGTH_PER_PLAYER } : t));
+      movedIds.push(stone.id);
+      continue;
+    }
+    const destTile = BOARD_LAYOUT[to];
+    const occupants = tokens.filter(
+      (t) => t.position === to && t.id !== stone.id && (destTile.isContested || t.owner === stone.owner),
+    );
+    const self = occupants.find((t) => effectiveOwner(next, t) === mover);
+    if (self) continue; // own stone blocks, same as a normal move
+    const enemy = occupants.find((t) => effectiveOwner(next, t) !== mover);
+    if (enemy && isProtected(state, next, enemy)) continue; // armour blocks the advance
+    if (enemy) {
+      if (isBlessed(next, enemy.id)) {
+        // A mortal advance: the blessing breaks and the stone holds, so the
+        // singer cannot take the tile — it stays put, having spent its step.
+        next = { ...next, vitality: { ...next.vitality, [enemy.id]: "wounded" } };
+        next = addCharge(next, mover);
+        woundedIds.push(enemy.id);
+        continue;
+      }
+      tokens = tokens.map((t) => (t.id === enemy.id ? { ...t, position: -1 } : t));
+      next = clearCapturedBulwarks(next, [enemy.id]);
+      next = clearThrallIfCaptured(next, [enemy.id]);
+      next = clearVitality(next, [enemy.id]);
+      next = clearCurseOnCapture(next, [enemy.id]);
+      next = clearHamstringOnCapture(next, [enemy.id]);
+      next = clearInspireOnCapture(next, [enemy.id]);
+      next = grantBloodPact(next, state.tokens, [enemy.id]);
+      next = addCharge(next, mover);
+      capturedIds.push(enemy.id);
+    }
+    tokens = tokens.map((t) => (t.id === stone.id ? { ...t, position: to } : t));
+    movedIds.push(stone.id);
+  }
+  return { state: { ...state, tokens }, power: next, movedIds, capturedIds, woundedIds };
+}
+
+/** Did this march just bring the mover's LAST stone home? A purchased
+ *  advance can escape (see advanceStones), so both bard casts have to be
+ *  able to declare a win — the same real-owner counting rule
+ *  getLegalPowerMoves uses for causesWin. */
+function marchCausesWin(tokens: TokenState[], mover: PlayerId): boolean {
+  return tokens
+    .filter((t) => t.owner === mover)
+    .every((t) => t.position >= PATH_LENGTH_PER_PLAYER);
+}
+
+/** Every stone Song of Haste would move — the bard's lit stones. Empty
+ *  (nothing inspired, or nothing that can move) means not castable, the
+ *  Benediction misclick rule. Affordability baked in. */
+export function getSongOfHasteTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < HASTE_COST) return [];
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER - 1)
+    .filter((t) => isInspired(power, t.id))
+    .map((t) => t.id);
+}
+
+/** Bard's Song of Haste: spends the full bank and advances every lit stone
+ *  HASTE_TILES at once, under ordinary movement rules (see advanceStones).
+ *  The inspirations SURVIVE the song — it cashes their position, not the
+ *  buff itself, so a wide board stays wide. Ends the turn and breaks the
+ *  shield streak: stones moved, but not onto a shield by any rule this
+ *  path honours. */
+export function applySongOfHaste(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; movedIds: number[]; capturedIds: number[]; woundedIds: number[] } {
+  const ids = getSongOfHasteTargets(state, power, mover);
+  const spent: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - HASTE_COST },
+  };
+  const r = advanceStones(state, spent, mover, ids, HASTE_TILES);
+  const nextPower = breakShieldStreak(r.power, mover);
+  return {
+    state: {
+      tokens: r.state.tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: marchCausesWin(r.state.tokens, mover) ? mover : null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(nextPower),
+    movedIds: r.movedIds,
+    capturedIds: r.capturedIds,
+    woundedIds: r.woundedIds,
+  };
+}
+
+/** Every stone Crescendo would touch: the bard's whole on-board army,
+ *  inspired or not. Empty = nothing to sing to = not castable. */
+export function getCrescendoTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .map((t) => t.id);
+}
+
+/** Bard's Crescendo: lights the ENTIRE on-board army for INSPIRE_TURNS and
+ *  advances every one of them CRESCENDO_TILES immediately — the only way to
+ *  inspire four stones without paying four mana, and the kit fired at once.
+ *  Ordinary movement rules on the advance (advanceStones), so unlike its
+ *  ultimate siblings this one does NOT pierce protection: the bard's magic
+ *  is in the marching, not the sword. Spends ultimateReady, ends the turn,
+ *  breaks the shield streak. */
+export function applyCrescendo(
+  state: GameState,
+  power: PowerState,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; inspiredIds: number[]; movedIds: number[]; capturedIds: number[]; woundedIds: number[] } {
+  const ids = getCrescendoTargets(state, power, mover);
+  const inspired = { ...power.inspired };
+  for (const id of ids) inspired[id] = INSPIRE_TURNS;
+  const lit: PowerState = {
+    ...power,
+    inspired,
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
+  const r = advanceStones(state, lit, mover, ids, CRESCENDO_TILES);
+  const nextPower = breakShieldStreak(r.power, mover);
+  return {
+    state: {
+      tokens: r.state.tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: marchCausesWin(r.state.tokens, mover) ? mover : null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(nextPower),
+    inspiredIds: ids,
+    movedIds: r.movedIds,
+    capturedIds: r.capturedIds,
+    woundedIds: r.woundedIds,
+  };
 }

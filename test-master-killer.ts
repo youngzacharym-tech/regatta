@@ -20,7 +20,30 @@ import {
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   CORPSE_EXPLOSION_COST,
+  CURSE_COST,
+  CURSE_SLOW,
+  CURSE_TURNS,
   EXHUME_RETURN_POSITION,
+  FEL_STORM_RETURN_POSITION,
+  BARD_CHARGE_CAP,
+  BLOODBATH_END_POSITION,
+  ENCORE_ZERO_FLIP_CHARGES,
+  HASTE_COST,
+  HASTE_TILES,
+  INSPIRE_BONUS,
+  INSPIRE_CAP,
+  INSPIRE_COST,
+  PIERCING_SHOT_COST,
+  RAGE_MAX,
+  RECKLESS_SELF_KNOCKBACK,
+  RECKLESS_SWING_COST,
+  WHIRLWIND_CAP,
+  WHIRLWIND_COST,
+  SACRIFICE_COST,
+  SNARE_COST,
+  TRAP_BOUNTY,
+  TRAP_KNOCKBACK,
+  WILD_HUNT_FREEZE_TURNS,
   HEAL_COST,
   NECRO_CHARGE_CAP,
   PICKPOCKET_COST,
@@ -43,8 +66,20 @@ import {
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
+  applyCurse,
   applyExhume,
+  applyFelStorm,
   applyGrandHeist,
+  applyBloodbath,
+  applyCrescendo,
+  applyInspire,
+  applySongOfHaste,
+  applyPiercingShot,
+  applyRecklessSwing,
+  applyWhirlwind,
+  applySacrifice,
+  applySnare,
+  applyWildHunt,
   applyPickpocket,
   applyPowerMove,
   applyPush,
@@ -66,8 +101,21 @@ import {
   getHealTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
+  getCurseTargets,
   getExhumeTargets,
+  getFelStormTargets,
   getLegalPowerMoves,
+  getBloodbathTargets,
+  getCrescendoTargets,
+  getInspireTargets,
+  getSongOfHasteTargets,
+  chargeCapFor,
+  getPiercingShotTargets,
+  getRecklessSwingTargets,
+  getWhirlwindTargets,
+  getSacrificeTargets,
+  getSnareTiles,
+  getWildHuntTargets,
   getPickpocketTargets,
   getPushTargets,
   getRainOfArrowsTargets,
@@ -76,12 +124,20 @@ import {
   getWarpathTargets,
   grantZeroFlipCharge,
   initialPowerState,
+  isCursed,
+  isHamstrung,
+  isInspired,
   isWarded,
+  rageFor,
+  ragedToken,
   resetTurnFlags,
   tickBulwarkExpiry,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
+  tickCurseForNewTurn,
+  tickHamstringForNewTurn,
   tickThrallForNewTurn,
+  wolfGuardTile,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -2786,6 +2842,564 @@ function check(name: string, cond: boolean, detail?: string) {
     "Grand Heist: still drains the entire bank even on a pierced-blessing kill",
     rBlessed.power.charges.p2 === 0,
   );
+}
+
+// ---------------------------------------------------------------------------
+// WARLOCK (2026-07-26) — Blood Pact / Curse of Chains / Sacrifice / Fel Storm
+// ---------------------------------------------------------------------------
+{
+  // --- Blood Pact: the warlock banks when its OWN stones die -------------
+  // p2 archer at 8 pushes the p1 warlock's stone at 9 back 1 -> tile 8 is
+  // occupied by the archer, so the landing collides and it goes home.
+  const sPact = state("p2", { 0: 9, 4: 8 });
+  const pwPact = power({ p1: "warlock", p2: "archer" }, { p2: 1 });
+  const rPact = applyPush(sPact, pwPact, 0, "p2");
+  check("Blood Pact: a pushed-home warlock stone actually goes home", rPact.state.tokens.find((t) => t.id === 0)!.position === -1);
+  check("Blood Pact: the warlock banks a charge for its own dead", rPact.power.charges.p1 === 1);
+
+  // Non-warlock owners get nothing from the same death.
+  const pwNoPact = power({ p1: "mage", p2: "archer" }, { p2: 1 });
+  const rNoPact = applyPush(sPact, pwNoPact, 0, "p2");
+  check("Blood Pact: a non-warlock victim banks nothing", rNoPact.power.charges.p1 === 0);
+
+  // Capped by CHARGE_CAP like all generic income — no third pip.
+  const pwFull = power({ p1: "warlock", p2: "archer" }, { p1: CHARGE_CAP, p2: 1 });
+  const rFull = applyPush(sPact, pwFull, 0, "p2");
+  check("Blood Pact: respects CHARGE_CAP", rFull.power.charges.p1 === CHARGE_CAP);
+
+  // --- Curse of Chains: targeting -----------------------------------------
+  const sCurse = state("p1", { 0: 5, 4: 9, 5: 2 });
+  const pwCurse = power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST });
+  const curseTargets = getCurseTargets(sCurse, pwCurse, "p1");
+  check("Curse: an enemy in shared water is a legal target", curseTargets.includes(4));
+  check("Curse: an enemy in its own private lane is NOT", !curseTargets.includes(5));
+  check(
+    "Curse: no targets below CURSE_COST",
+    getCurseTargets(sCurse, power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST - 1 }), "p1").length === 0,
+  );
+  // Already-cursed by THIS caster is excluded (a full-price no-op).
+  const pwAlready = applyCurse(power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST * 2 }), 4, "p1");
+  check("Curse: re-cursing the same stone is not offered", !getCurseTargets(sCurse, pwAlready, "p1").includes(4));
+  // Vanish makes a stone untargetable by every enemy ability below an ult.
+  const pwVanished: PowerState = {
+    ...power({ p1: "warlock", p2: "rogue" }, { p1: CURSE_COST }),
+    bulwarked: { 4: VANISH_TURNS },
+  };
+  check("Curse: a Vanished stone cannot be cursed", !getCurseTargets(sCurse, pwVanished, "p1").includes(4));
+  // Ward/shield tiles do NOT block it — the chains bind the legs, not armor.
+  const sWard = state("p1", { 0: 5, 4: 9, 6: 3 });
+  const pwWard = power({ p1: "warlock", p2: "mage" }, { p1: CURSE_COST, p2: CHARGE_CAP });
+  check("Curse: a Warded stone IS cursable", getCurseTargets(sWard, pwWard, "p1").includes(4));
+
+  // --- Curse of Chains: the stride reduction -------------------------------
+  const sSlow = state("p2", { 4: 6, 0: 0 });
+  const pwSlow = applyCurse(power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST }), 4, "p1");
+  check("Curse: applyCurse spends CURSE_COST", pwSlow.charges.p1 === 0);
+  check("Curse: the mark is live", isCursed(pwSlow, 4));
+  const slowed = getLegalPowerMoves(sSlow, pwSlow, 3).find((m) => m.tokenId === 4);
+  check("Curse: a flip of 3 moves the cursed stone only 3 - CURSE_SLOW", slowed?.to === 6 + 3 - CURSE_SLOW);
+  const uncursed = getLegalPowerMoves(sSlow, power({ p1: "warlock", p2: "archer" }), 3).find((m) => m.tokenId === 4);
+  check("Curse: an unafflicted stone moves its full distance", uncursed?.to === 6 + 3);
+  check(
+    "Curse: at flip CURSE_SLOW the cursed stone has no move at all",
+    getLegalPowerMoves(sSlow, pwSlow, CURSE_SLOW).every((m) => m.tokenId !== 4),
+  );
+  // The victim's OTHER stones are untouched — the hex is per-token.
+  const sBoth = state("p2", { 4: 6, 5: 6 });
+  const pwBoth = applyCurse(power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST }), 4, "p1");
+  const other = getLegalPowerMoves(sBoth, pwBoth, 3).find((m) => m.tokenId === 5);
+  check("Curse: only the marked stone is slowed", other?.to === 9);
+
+  // --- Curse of Chains: expiry ---------------------------------------------
+  {
+    // Ticks on the VICTIM's turn-starts (curse slots are keyed by caster).
+    let p = applyCurse(power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST }), 4, "p1");
+    const victimTurn = state("p2", { 4: 6 });
+    for (let i = 1; i < CURSE_TURNS; i++) {
+      const r = tickCurseForNewTurn(victimTurn, p);
+      p = r.power;
+      check(`Curse: still bound after ${i} victim turn(s)`, isCursed(p, 4) && r.expiredTokenId === null);
+    }
+    const last = tickCurseForNewTurn(victimTurn, p);
+    check("Curse: lifts after CURSE_TURNS victim turn-starts", !isCursed(last.power, 4));
+    check("Curse: announces which stone was freed", last.expiredTokenId === 4);
+    // The CASTER's own turn-starts must not tick it down.
+    const casterTurn = state("p1", { 4: 6 });
+    const pCaster = applyCurse(power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST }), 4, "p1");
+    check(
+      "Curse: the caster's own turn does not burn a curse turn",
+      tickCurseForNewTurn(casterTurn, pCaster).power.curse.p1?.turnsLeft === CURSE_TURNS,
+    );
+  }
+
+  // --- Curse hygiene: a reserve trip lifts the chains ----------------------
+  {
+    // p2 archer at 8 pushes the cursed p1 stone at 9 home; the curse must
+    // not ride the reserve trip back onto the board.
+    const sHyg = state("p2", { 0: 9, 4: 8 });
+    const pwHyg = applyCurse(power({ p1: "warlock", p2: "archer" }, { p1: CURSE_COST, p2: 1 }), 0, "p2");
+    check("Curse hygiene: the mark is live before the kill", isCursed(pwHyg, 0));
+    const rHyg = applyPush(sHyg, pwHyg, 0, "p2");
+    check("Curse hygiene: a killed stone's curse lifts", !isCursed(rHyg.power, 0));
+  }
+
+  // --- Sacrifice: targeting -------------------------------------------------
+  // Target on 8, not 7: tile 7 is the board's middle SHIELD (see
+  // BOARD_LAYOUT), which every class including this one is barred from.
+  const sSac = state("p1", { 0: 5, 1: 9, 4: 8, 5: 2 });
+  const pwSac = power({ p1: "warlock", p2: "archer" }, { p1: SACRIFICE_COST });
+  const sacTargets = getSacrificeTargets(sSac, pwSac, "p1");
+  check("Sacrifice: an enemy in shared water is a legal target", sacTargets.includes(4));
+  check("Sacrifice: an enemy in its own private lane is NOT", !sacTargets.includes(5));
+  check(
+    "Sacrifice: no targets below SACRIFICE_COST",
+    getSacrificeTargets(sSac, power({ p1: "warlock", p2: "archer" }, { p1: SACRIFICE_COST - 1 }), "p1").length === 0,
+  );
+  check(
+    "Sacrifice: no targets with no stone to give",
+    getSacrificeTargets(state("p1", { 4: 7 }), pwSac, "p1").length === 0,
+  );
+  // Bulwark/Vanish DO block it — only the magical half is pierced.
+  const pwSacBul: PowerState = { ...pwSac, bulwarked: { 4: BULWARK_TURNS } };
+  check("Sacrifice: a Bulwarked stone is protected", !getSacrificeTargets(sSac, pwSacBul, "p1").includes(4));
+  // Ward does NOT.
+  const pwSacWard = power({ p1: "warlock", p2: "mage" }, { p1: SACRIFICE_COST, p2: CHARGE_CAP });
+  const sSacWard = state("p1", { 0: 5, 1: 9, 4: 8 });
+  check(
+    "Sacrifice: a Warded stone IS a legal target (the pierce is the point)",
+    isWarded(sSacWard, pwSacWard, sSacWard.tokens.find((t) => t.id === 4)!) &&
+      getSacrificeTargets(sSacWard, pwSacWard, "p1").includes(4),
+  );
+
+  // --- Sacrifice: resolution + economy --------------------------------------
+  {
+    const rSac = applySacrifice(sSac, pwSac, 4, "p1");
+    check("Sacrifice: the target dies", rSac.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Sacrifice: the MOST-advanced own stone is the price", rSac.sacrificedTokenId === 1);
+    check("Sacrifice: that stone goes home", rSac.state.tokens.find((t) => t.id === 1)!.position === -1);
+    check("Sacrifice: the rear stone is untouched", rSac.state.tokens.find((t) => t.id === 0)!.position === 5);
+    // THE economy invariant this ability was rebalanced around: the full
+    // bank is spent and the pact does NOT refund the self-inflicted death.
+    check("Sacrifice: spends the full bank and banks nothing back", rSac.power.charges.p1 === 0);
+    check("Sacrifice: ends the turn", rSac.state.currentPlayer === "p2");
+  }
+  {
+    // A BLESSED target dies outright — no wound split (the pierce covers it).
+    const pwSacBless: PowerState = { ...pwSac, vitality: { 4: "blessed" } };
+    const rBless = applySacrifice(sSac, pwSacBless, 4, "p1");
+    check("Sacrifice: kills a Blessed target outright, not a wound", rBless.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Sacrifice: clears the dead stone's vitality entry", rBless.power.vitality[4] === undefined);
+  }
+  {
+    // In a mirror, the ENEMY warlock is still paid for the stone it lost.
+    const pwMirror = power({ p1: "warlock", p2: "warlock" }, { p1: SACRIFICE_COST });
+    const rMirror = applySacrifice(sSac, pwMirror, 4, "p1");
+    check("Sacrifice: an enemy warlock's Blood Pact still pays for its dead", rMirror.power.charges.p2 === 1);
+    check("Sacrifice: the caster still gets nothing for its own", rMirror.power.charges.p1 === 0);
+  }
+
+  // --- Fel Storm ------------------------------------------------------------
+  {
+    // The private-lane decoy sits at 1, not 2: the stacking walk runs
+    // 4 -> 3 -> 2 for three victims, so a stone parked on 2 would
+    // legitimately push the third one further back and muddy the check.
+    const sStorm = state("p1", { 0: 5, 4: 11, 5: 9, 6: 8, 7: 1 });
+    const pwStorm: PowerState = {
+      ...power({ p1: "warlock", p2: "archer" }),
+      ultimateReady: { p1: true, p2: false },
+    };
+    const stormTargets = getFelStormTargets(sStorm, pwStorm, "p1");
+    check("Fel Storm: catches every enemy in shared water", [4, 5, 6].every((id) => stormTargets.includes(id)));
+    check("Fel Storm: spares an enemy in its own private lane", !stormTargets.includes(7));
+
+    const rStorm = applyFelStorm(sStorm, pwStorm, "p1");
+    const pos = (id: number) => rStorm.state.tokens.find((t) => t.id === id)!.position;
+    // Most-advanced lands on the gate; the rest stack backward in order.
+    check("Fel Storm: the lead victim lands on the gate", pos(4) === FEL_STORM_RETURN_POSITION);
+    check("Fel Storm: the pack stacks backward, order preserved", pos(5) === FEL_STORM_RETURN_POSITION - 1 && pos(6) === FEL_STORM_RETURN_POSITION - 2);
+    check("Fel Storm: a private-lane enemy is untouched", pos(7) === 1);
+    check("Fel Storm: the warlock's own stone is untouched", pos(0) === 5);
+    check("Fel Storm: nobody dies", rStorm.sentHomeIds.length === 0);
+    check("Fel Storm: spends the ultimate", rStorm.power.ultimateReady.p1 === false);
+    check("Fel Storm: ends the turn", rStorm.state.currentPlayer === "p2");
+    check("Fel Storm: grants no charge (displacement, not capture)", rStorm.power.charges.p1 === 0);
+
+    // Pierces everything: Ward, Bulwark and a shield tile are all irrelevant.
+    const sPierce = state("p1", { 0: 5, 4: 11 });
+    const pwPierce: PowerState = {
+      ...power({ p1: "warlock", p2: "mage" }, { p2: CHARGE_CAP }),
+      ultimateReady: { p1: true, p2: false },
+      bulwarked: { 4: BULWARK_TURNS },
+      vitality: { 4: "blessed" },
+    };
+    const rPierce = applyFelStorm(sPierce, pwPierce, "p1");
+    check(
+      "Fel Storm: drags a Warded + Bulwarked + Blessed stone anyway",
+      rPierce.state.tokens.find((t) => t.id === 4)!.position === FEL_STORM_RETURN_POSITION,
+    );
+    check("Fel Storm: a dragged stone keeps its Bulwark (it never died)", rPierce.power.bulwarked[4] !== undefined);
+    check("Fel Storm: a dragged stone keeps its blessing", rPierce.power.vitality[4] === "blessed");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HUNTER (2026-07-26) — Wolf Companion / Snare / Piercing Shot / Wild Hunt
+// ---------------------------------------------------------------------------
+{
+  // --- Wolf Companion -----------------------------------------------------
+  // p2 hunter's lead stone sits on 8, so the wolf guards 9.
+  const sWolf = state("p1", { 0: 6, 4: 8 });
+  const pwWolf = power({ p1: "archer", p2: "hunter" });
+  check("Wolf: guards the tile ahead of the hunter's LEAD stone", wolfGuardTile(sWolf, pwWolf, "p2") === 9);
+  check("Wolf: a non-hunter has none", wolfGuardTile(sWolf, power({ p1: "archer", p2: "archer" }), "p2") === null);
+  // A hunter whose only stone is in its private lane guards nothing (the
+  // tile ahead isn't contested) — the flaw the first balance run exposed.
+  check(
+    "Wolf: guards nothing from the private lane",
+    wolfGuardTile(state("p1", { 4: 1 }), pwWolf, "p2") === null,
+  );
+
+  // p1 moves 6 -> 9 (flip 3) and lands on the guarded tile: the wolf takes it.
+  const wolfMove = getLegalPowerMoves(sWolf, pwWolf, 3).find((m) => m.tokenId === 0)!;
+  const rWolf = applyPowerMove(sWolf, pwWolf, wolfMove, "p1");
+  check("Wolf: the stone that landed there is taken", rWolf.state.tokens.find((t) => t.id === 0)!.position === -1);
+  check("Wolf: the bite is announced", rWolf.wolfBite?.tokenId === 0 && rWolf.wolfBite?.sentHome === true);
+  check("Wolf: the kill pays the hunter a charge", rWolf.power.charges.p2 === 1);
+  // Landing anywhere else is safe.
+  const safeMove = getLegalPowerMoves(sWolf, pwWolf, 2).find((m) => m.tokenId === 0)!;
+  check("Wolf: only the guarded tile bites", applyPowerMove(sWolf, pwWolf, safeMove, "p1").wolfBite === null);
+  // Protection walks past it.
+  const pwWolfWard = power({ p1: "mage", p2: "hunter" }, { p1: CHARGE_CAP });
+  const rWarded = applyPowerMove(sWolf, pwWolfWard, getLegalPowerMoves(sWolf, pwWolfWard, 3).find((m) => m.tokenId === 0)!, "p1");
+  check("Wolf: a Warded stone walks past untouched", rWarded.wolfBite === null);
+
+  // --- Snare: placement ---------------------------------------------------
+  const sSnare = state("p1", { 0: 5, 4: 9 });
+  const pwSnare = power({ p1: "hunter", p2: "archer" }, { p1: SNARE_COST });
+  const tiles = getSnareTiles(sSnare, pwSnare, "p1");
+  check("Snare: offers empty contested tiles", tiles.includes(6) && tiles.includes(8));
+  check("Snare: never the middle shield tile", !tiles.includes(7));
+  check("Snare: never a private-lane tile", !tiles.some((t) => t < 4 || t > 11));
+  check("Snare: never an occupied tile", !tiles.includes(5) && !tiles.includes(9));
+  check(
+    "Snare: nothing offered below SNARE_COST",
+    getSnareTiles(sSnare, power({ p1: "hunter", p2: "archer" }, { p1: SNARE_COST - 1 }), "p1").length === 0,
+  );
+  const pwArmed = applySnare(pwSnare, 8, "p1");
+  check("Snare: applySnare spends SNARE_COST", pwArmed.charges.p1 === 0);
+  check("Snare: the trap is armed on the chosen tile", pwArmed.traps.p1 === 8);
+  check("Snare: re-siting is not re-offered on the same tile", !getSnareTiles(sSnare, { ...pwArmed, charges: { p1: 2, p2: 0 } }, "p1").includes(8));
+
+  // --- Snare: springing ---------------------------------------------------
+  {
+    // p2's stone on 6 flips 2 -> lands on 8, where p1's trap waits. The
+    // hunter's own stone is parked on 10 ON PURPOSE: at 5 its wolf would
+    // guard tile 6, which is exactly where the trap throws the victim —
+    // the trap feeds the wolf, a real and rather good interaction, but it
+    // would confound the knockback assertions below. It gets its own check
+    // right after this block.
+    const sSpring = state("p2", { 0: 10, 4: 6 });
+    const pwSpring: PowerState = { ...power({ p1: "hunter", p2: "archer" }), traps: { p1: 8, p2: null } };
+    const m = getLegalPowerMoves(sSpring, pwSpring, 2).find((t) => t.tokenId === 4)!;
+    const r = applyPowerMove(sSpring, pwSpring, m, "p2");
+    check("Snare: springs on the landing", r.trapSprung?.tile === 8 && r.trapSprung?.tokenId === 4);
+    check("Snare: throws the victim TRAP_KNOCKBACK back", r.state.tokens.find((t) => t.id === 4)!.position === 8 - TRAP_KNOCKBACK);
+    check("Snare: the trap is consumed", r.power.traps.p1 === null);
+    check("Snare: pays its setter TRAP_BOUNTY", r.power.charges.p1 === TRAP_BOUNTY);
+    // Landing elsewhere leaves it armed.
+    const m1 = getLegalPowerMoves(sSpring, pwSpring, 1).find((t) => t.tokenId === 4)!;
+    const rMiss = applyPowerMove(sSpring, pwSpring, m1, "p2");
+    check("Snare: an untripped trap stays armed", rMiss.power.traps.p1 === 8 && rMiss.trapSprung === null);
+  }
+  {
+    // TRAP FEEDS WOLF: the hunter's stone on 5 guards tile 6, and a trap on
+    // 8 throws its victim to exactly 6 — so the two halves of the kit chain
+    // into a kill. Emergent from the resolve order (trap, then wolf, each
+    // re-reading the board), not special-cased anywhere, and worth pinning
+    // down so a future reorder can't silently break it.
+    const sChain = state("p2", { 0: 5, 4: 6 });
+    const pwChain: PowerState = { ...power({ p1: "hunter", p2: "archer" }), traps: { p1: 8, p2: null } };
+    const m = getLegalPowerMoves(sChain, pwChain, 2).find((t) => t.tokenId === 4)!;
+    const r = applyPowerMove(sChain, pwChain, m, "p2");
+    check("Trap into wolf: the trap springs first", r.trapSprung?.tile === 8);
+    check("Trap into wolf: the throw lands in the wolf's jaws and it kills", r.wolfBite?.sentHome === true);
+    check("Trap into wolf: the victim ends up home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Trap into wolf: the hunter is paid for both", r.power.charges.p1 === TRAP_BOUNTY + 1);
+  }
+
+  // --- Piercing Shot ------------------------------------------------------
+  {
+    // p1 hunter's lead stone on 5; enemy on 9 with a clear lane between.
+    const sShot = state("p1", { 0: 5, 4: 9 });
+    const pwShot = power({ p1: "hunter", p2: "archer" }, { p1: PIERCING_SHOT_COST });
+    check("Piercing Shot: finds the first enemy down the lane", getPiercingShotTargets(sShot, pwShot, "p1")[0] === 4);
+    check(
+      "Piercing Shot: nothing offered below the full bank",
+      getPiercingShotTargets(sShot, power({ p1: "hunter", p2: "archer" }, { p1: PIERCING_SHOT_COST - 1 }), "p1").length === 0,
+    );
+    const r = applyPiercingShot(sShot, pwShot, "p1");
+    check("Piercing Shot: the victim dies", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Piercing Shot: reports the kill", r.killedTokenId === 4);
+    check("Piercing Shot: spends the bank and earns the capture charge", r.power.charges.p1 === 1);
+    check("Piercing Shot: ends the turn", r.state.currentPlayer === "p2");
+
+    // THE counterplay: the first body stops the arrow, for everything behind.
+    const sBlocked = state("p1", { 0: 5, 4: 9, 5: 6 });
+    const pwBlocked: PowerState = { ...pwShot, bulwarked: { 5: BULWARK_TURNS } };
+    check(
+      "Piercing Shot: a protected stone body-blocks the lane",
+      getPiercingShotTargets(sBlocked, pwBlocked, "p1").length === 0,
+    );
+    // An UNPROTECTED nearer stone is simply the one that dies.
+    check("Piercing Shot: the nearer unprotected stone is the victim", getPiercingShotTargets(sBlocked, pwShot, "p1")[0] === 5);
+    // No enemy ahead at all = no shot. (The own-stone arm of
+    // piercingShotVictim is defensive only: the arrow fires FROM the
+    // hunter's most-advanced stone, so by construction none of their own
+    // stones can be ahead of it. It is kept for effectiveOwner's sake and
+    // against a future change to which stone shoots.)
+    check(
+      "Piercing Shot: no enemy down the lane means no shot",
+      getPiercingShotTargets(state("p1", { 0: 9, 4: 5 }), pwShot, "p1").length === 0,
+    );
+    // A BLESSED victim is wounded, not killed — a mortal weapon.
+    const pwBless: PowerState = { ...pwShot, vitality: { 4: "blessed" } };
+    const rBless = applyPiercingShot(sShot, pwBless, "p1");
+    check("Piercing Shot: a Blessing absorbs it", rBless.woundedTokenId === 4 && rBless.killedTokenId === null);
+    check("Piercing Shot: the wounded stone holds its tile", rBless.state.tokens.find((t) => t.id === 4)!.position === 9);
+  }
+
+  // --- Wild Hunt ----------------------------------------------------------
+  {
+    const sHunt = state("p1", { 0: 5, 4: 6, 5: 9, 6: 11, 7: 2 });
+    const pwHunt: PowerState = {
+      ...power({ p1: "hunter", p2: "archer" }),
+      ultimateReady: { p1: true, p2: false },
+      traps: { p1: 8, p2: null },
+    };
+    const pool = getWildHuntTargets(sHunt, pwHunt, "p1");
+    check("Wild Hunt: pools every enemy in shared water", [4, 5, 6].every((id) => pool.includes(id)));
+    check("Wild Hunt: spares a private-lane enemy", !pool.includes(7));
+
+    const r = applyWildHunt(sHunt, pwHunt, "p1");
+    check("Wild Hunt: the wolf takes the NEAREST quarry", r.killedTokenId === 4);
+    check("Wild Hunt: that stone goes home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Wild Hunt: everyone else in the row freezes", r.frozenTokenIds.includes(5) && r.frozenTokenIds.includes(6));
+    check("Wild Hunt: the private-lane enemy is untouched", !r.frozenTokenIds.includes(7));
+    check("Wild Hunt: frozen stones carry the timer", isHamstrung(r.power, 5) && isHamstrung(r.power, 6));
+    check("Wild Hunt: spends the ultimate", r.power.ultimateReady.p1 === false);
+    check("Wild Hunt: springs the hunter's own trap too", r.power.traps.p1 === null);
+    check("Wild Hunt: the kill pays a charge", r.power.charges.p1 === 1);
+
+    // A frozen stone generates no moves at all, and its owner's others do.
+    const frozenTurn: GameState = { ...r.state, currentPlayer: "p2" };
+    const moves = getLegalPowerMoves(frozenTurn, r.power, 2);
+    check("Frozen: the stone offers no moves", moves.every((m) => m.tokenId !== 5));
+    check("Frozen: the army's other stones move normally", moves.some((m) => m.tokenId === 7));
+    // It thaws on the victim's own turn-starts.
+    let p = r.power;
+    for (let i = 0; i < WILD_HUNT_FREEZE_TURNS; i++) p = tickHamstringForNewTurn(frozenTurn, p).power;
+    check("Frozen: thaws after WILD_HUNT_FREEZE_TURNS victim turns", !isHamstrung(p, 5));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BARBARIAN (2026-07-27) — Rage / Reckless Swing / Whirlwind / Bloodbath
+// ---------------------------------------------------------------------------
+{
+  // --- Rage: the deficit, not the raw reserve count -----------------------
+  const even = state("p1", { 0: 5, 4: 5 }); // 3 in reserve each
+  const pwBarb = power({ p1: "barbarian", p2: "archer" });
+  check("Rage: nothing while the reserves are level (incl. the opening)", rageFor(even, pwBarb, "p1") === 0);
+  check("Rage: a non-barbarian never rages", rageFor(even, power({ p1: "archer", p2: "archer" }), "p1") === 0);
+  // Barbarian down two stones (1 on board) vs archer with 3 on board.
+  const behind = state("p1", { 0: 5, 4: 4, 5: 6, 6: 8 });
+  check("Rage: stokes when behind on stones", rageFor(behind, pwBarb, "p1") === 2);
+  // Barbarian AHEAD gets nothing.
+  const ahead = state("p1", { 0: 5, 1: 6, 2: 8, 4: 4 });
+  check("Rage: nothing while ahead", rageFor(ahead, pwBarb, "p1") === 0);
+  check("Rage: capped at RAGE_MAX", rageFor(state("p1", { 4: 4, 5: 5, 6: 6, 7: 8 }), pwBarb, "p1") === RAGE_MAX);
+
+  // --- Rage: scoped to ONE stone (RAGE_SCOPE) -----------------------------
+  {
+    // p1 barbarian has stones on 5 and 9, two in reserve; the archer has
+    // all four on the board, so the deficit is 2.
+    const s = state("p1", { 0: 5, 1: 9, 4: 2, 5: 4, 6: 6, 7: 8 });
+    const raged = ragedToken(s, pwBarb, "p1");
+    check("Rage: the raged stone is the least-advanced (reserve counts as least)", raged === 2 || raged === 3);
+    const moves = getLegalPowerMoves(s, pwBarb, 1);
+    // The two BOARD stones move their plain distance; only the raged
+    // (reserve) stone gets the bonus, entering further up the lane.
+    check("Rage: an unraged board stone moves its plain distance", moves.some((m) => m.tokenId === 0 && m.to === 6));
+    const entering = moves.find((m) => m.tokenId === raged);
+    check("Rage: the raged stone enters further in", entering !== undefined && entering.to === 1 - 1 + RAGE_MAX);
+  }
+
+  // --- Reckless Swing -----------------------------------------------------
+  {
+    // p1 barbarian on 8, enemy directly ahead on 9.
+    const s = state("p1", { 0: 8, 4: 9 });
+    const pw = power({ p1: "barbarian", p2: "archer" }, { p1: RECKLESS_SWING_COST });
+    check("Reckless: the enemy directly ahead is a target", getRecklessSwingTargets(s, pw, "p1").includes(4));
+    // Not adjacent = not a target.
+    check(
+      "Reckless: a distant enemy is not",
+      !getRecklessSwingTargets(state("p1", { 0: 5, 4: 9 }), pw, "p1").includes(4),
+    );
+    // PIERCES Bulwark/Vanish — the physical half.
+    const pwBul: PowerState = { ...pw, bulwarked: { 4: BULWARK_TURNS } };
+    check("Reckless: pierces a Bulwark", getRecklessSwingTargets(s, pwBul, "p1").includes(4));
+    // Does NOT pierce Ward or a shield tile — the magical half is Warlock's.
+    const pwWard = power({ p1: "barbarian", p2: "mage" }, { p1: RECKLESS_SWING_COST, p2: CHARGE_CAP });
+    check("Reckless: a Ward still stops it", !getRecklessSwingTargets(s, pwWard, "p1").includes(4));
+    check(
+      "Reckless: a shield tile still stops it",
+      !getRecklessSwingTargets(state("p1", { 0: 6, 4: 7 }), pw, "p1").includes(4),
+    );
+
+    const r = applyRecklessSwing(s, pw, 4, "p1");
+    check("Reckless: the victim dies", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Reckless: the swinger is thrown back", r.state.tokens.find((t) => t.id === 0)!.position === 8 - RECKLESS_SELF_KNOCKBACK);
+    check("Reckless: reports both halves of the trade", r.swingerTokenId === 0 && r.killedTokenId === 4);
+    check("Reckless: spends the mana and earns the capture charge", r.power.charges.p1 === RECKLESS_SWING_COST - 1 + 1);
+    check("Reckless: ends the turn", r.state.currentPlayer === "p2");
+    // A BLESSED victim is wounded, not killed — a mortal weapon.
+    const pwBless: PowerState = { ...pw, vitality: { 4: "blessed" } };
+    const rB = applyRecklessSwing(s, pwBless, 4, "p1");
+    check("Reckless: a Blessing absorbs it", rB.woundedTokenId === 4 && rB.killedTokenId === null);
+    // Recklessness can genuinely kill you: swinging from tile 1 recoils home.
+    const rHome = applyRecklessSwing(state("p1", { 0: 1, 4: 2 }), pw, 4, "p1");
+    check("Reckless: a recoil with nowhere to land sends the swinger home", rHome.swingerSentHome === true);
+  }
+
+  // --- Whirlwind ----------------------------------------------------------
+  {
+    // p1 barbarian on 6 and 10; enemies on 5, 7 (in reach) and 11 (also in
+    // reach of the stone on 10) and 2 (private lane, out).
+    const s = state("p1", { 0: 6, 1: 10, 4: 5, 5: 8, 6: 11, 7: 2 });
+    const pw = power({ p1: "barbarian", p2: "archer" }, { p1: WHIRLWIND_COST });
+    const pool = getWhirlwindTargets(s, pw, "p1");
+    check("Whirlwind: catches enemies within reach of any of your stones", pool.includes(4) && pool.includes(6));
+    check("Whirlwind: spares a private-lane enemy", !pool.includes(7));
+    check(
+      "Whirlwind: nothing offered below the full bank",
+      getWhirlwindTargets(s, power({ p1: "barbarian", p2: "archer" }, { p1: WHIRLWIND_COST - 1 }), "p1").length === 0,
+    );
+    const r = applyWhirlwind(s, pw, "p1");
+    check("Whirlwind: captures at most WHIRLWIND_CAP", r.capturedTokenIds.length <= WHIRLWIND_CAP);
+    check("Whirlwind: takes the deepest runner first", r.capturedTokenIds[0] === 6);
+    check("Whirlwind: shoves whatever it didn't take", r.knockedTokenIds.length > 0);
+    check("Whirlwind: the barbarian's own stones never move", r.state.tokens.find((t) => t.id === 0)!.position === 6);
+    check("Whirlwind: ends the turn", r.state.currentPlayer === "p2");
+  }
+
+  // --- Bloodbath ----------------------------------------------------------
+  {
+    // p1 barbarian's lead stone on 5; enemies at 6, 8, 10 all ahead of it.
+    const s = state("p1", { 0: 5, 4: 6, 5: 8, 6: 10 });
+    const pw: PowerState = {
+      ...power({ p1: "barbarian", p2: "archer" }),
+      ultimateReady: { p1: true, p2: false },
+    };
+    const path = getBloodbathTargets(s, pw, "p1");
+    check("Bloodbath: pools everything ahead of the lead stone", [4, 5, 6].every((id) => path.includes(id)));
+    const r = applyBloodbath(s, pw, "p1");
+    check("Bloodbath: runs down every one of them — uncapped", r.killedTokenIds.length === 3);
+    check("Bloodbath: they all go home", [4, 5, 6].every((id) => r.state.tokens.find((t) => t.id === id)!.position === -1));
+    check("Bloodbath: the charge ends at the row's end", r.state.tokens.find((t) => t.id === 0)!.position === BLOODBATH_END_POSITION);
+    check("Bloodbath: spends the ultimate", r.power.ultimateReady.p1 === false);
+    // Pierces everything, ultimate convention.
+    const pwArmoured: PowerState = { ...pw, bulwarked: { 5: BULWARK_TURNS }, vitality: { 4: "blessed" } };
+    const rA = applyBloodbath(s, pwArmoured, "p1");
+    check("Bloodbath: pierces a Bulwark and a Blessing alike", rA.killedTokenIds.length === 3);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BARD (2026-07-27) — Encore / Inspire / Song of Haste / Crescendo
+// ---------------------------------------------------------------------------
+{
+  // --- Encore: the deeper purse and the double zero-flip ------------------
+  const pwBard = power({ p1: "bard", p2: "archer" });
+  check("Encore: a zero flip pays the bard double", grantZeroFlipCharge(pwBard, "p1").charges.p1 === ENCORE_ZERO_FLIP_CHARGES);
+  check("Encore: everyone else still gets one", grantZeroFlipCharge(power({ p1: "archer" }), "p1").charges.p1 === 1);
+  check("Encore: the bard's purse runs deeper", chargeCapFor(pwBard, "p1") === BARD_CHARGE_CAP);
+  check("Encore: everyone else's does not", chargeCapFor(pwBard, "p2") === CHARGE_CAP);
+
+  // --- Inspire ------------------------------------------------------------
+  const sBard = state("p1", { 0: 5, 1: 8, 2: 2, 4: 9 });
+  const pwLit = power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST });
+  const pool = getInspireTargets(sBard, pwLit, "p1");
+  check("Inspire: offers the bard's own on-board stones", pool.includes(0) && pool.includes(1));
+  check("Inspire: never an enemy stone", !pool.includes(4));
+  check(
+    "Inspire: nothing offered below INSPIRE_COST",
+    getInspireTargets(sBard, power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST - 1 }), "p1").length === 0,
+  );
+  const lit1 = applyInspire(pwLit, 0, "p1");
+  check("Inspire: spends INSPIRE_COST", lit1.charges.p1 === 0);
+  check("Inspire: the stone is lit", isInspired(lit1, 0));
+  check("Inspire: an already-lit stone is not re-offered", !getInspireTargets(sBard, { ...lit1, charges: { p1: 4, p2: 0 } }, "p1").includes(0));
+  // INSPIRE_CAP closes the pool once enough are burning.
+  let capped: PowerState = { ...pwLit, charges: { p1: 4, p2: 0 } };
+  for (let i = 0; i < INSPIRE_CAP; i++) capped = applyInspire(capped, i, "p1");
+  check("Inspire: the pool closes at INSPIRE_CAP", getInspireTargets(sBard, capped, "p1").length === 0);
+
+  // --- Inspire: the stride bonus, and the exact-escape guard --------------
+  {
+    const s = state("p1", { 0: 5 });
+    const lit = applyInspire(power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST }), 0, "p1");
+    const m = getLegalPowerMoves(s, lit, 2).find((x) => x.tokenId === 0);
+    check("Inspire: a lit stone strides INSPIRE_BONUS further", m?.to === 5 + 2 + INSPIRE_BONUS);
+    const plain = getLegalPowerMoves(s, power({ p1: "bard", p2: "archer" }), 2).find((x) => x.tokenId === 0);
+    check("Inspire: an unlit stone strides normally", plain?.to === 7);
+    // THE GUARD: a lit stone on 13 must still be able to take the exact
+    // step home — the bonus is dropped rather than the move.
+    const sEnd = state("p1", { 0: 13 });
+    const litEnd = applyInspire(power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST }), 0, "p1");
+    const esc = getLegalPowerMoves(sEnd, litEnd, 1).find((x) => x.tokenId === 0);
+    check("Inspire: never overshoots the finish — the exact step still escapes", esc?.to === PATH_LENGTH_PER_PLAYER);
+  }
+
+  // --- Song of Haste ------------------------------------------------------
+  {
+    const s = state("p1", { 0: 5, 1: 8, 4: 11 });
+    // Enough to light two stones AND still sing: two inspires at
+    // INSPIRE_COST each, then HASTE_COST on top.
+    let pw = power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST * 2 + HASTE_COST });
+    pw = applyInspire(pw, 0, "p1");
+    pw = applyInspire(pw, 1, "p1");
+    check("Haste: the song's pool is the lit stones", getSongOfHasteTargets(s, pw, "p1").sort().join() === "0,1");
+    const r = applySongOfHaste(s, pw, "p1");
+    check("Haste: every lit stone marches HASTE_TILES", r.state.tokens.find((t) => t.id === 0)!.position === 5 + HASTE_TILES);
+    check("Haste: and the other one too", r.state.tokens.find((t) => t.id === 1)!.position === 8 + HASTE_TILES);
+    check("Haste: the inspirations survive the song", isInspired(r.power, 0) && isInspired(r.power, 1));
+    check("Haste: ends the turn", r.state.currentPlayer === "p2");
+    // An unlit stone stays put.
+    check("Haste: an unlit stone doesn't march", !r.movedIds.includes(2));
+  }
+  {
+    // The march CAN escape a stone — the fix that un-stuck the whole class.
+    const s = state("p1", { 0: PATH_LENGTH_PER_PLAYER - 1 - HASTE_TILES, 1: 3, 2: 3, 3: 3 });
+    let pw = power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST + HASTE_COST });
+    pw = applyInspire(pw, 0, "p1");
+    const r = applySongOfHaste(s, pw, "p1");
+    check("Haste: an exact landing escapes the stone", r.state.tokens.find((t) => t.id === 0)!.position === PATH_LENGTH_PER_PLAYER);
+  }
+
+  // --- Crescendo ----------------------------------------------------------
+  {
+    const s = state("p1", { 0: 5, 1: 7, 2: 9, 4: 2 });
+    const pw: PowerState = {
+      ...power({ p1: "bard", p2: "archer" }),
+      ultimateReady: { p1: true, p2: false },
+    };
+    check("Crescendo: its pool is the whole on-board army", getCrescendoTargets(s, pw, "p1").sort().join() === "0,1,2");
+    const r = applyCrescendo(s, pw, "p1");
+    check("Crescendo: lights every one of them — past INSPIRE_CAP", [0, 1, 2].every((id) => isInspired(r.power, id)));
+    check("Crescendo: and marches them", r.movedIds.length === 3);
+    check("Crescendo: spends the ultimate", r.power.ultimateReady.p1 === false);
+    check("Crescendo: ends the turn", r.state.currentPlayer === "p2");
+  }
 }
 
 // ---------------------------------------------------------------------------

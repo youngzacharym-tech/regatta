@@ -58,6 +58,20 @@ const NEUTRAL_POWER: PowerState = {
   thrall: { p1: null, p2: null },
   // Cleric-only state, equally inert here: no blessings anywhere.
   vitality: {},
+  // Warlock-only state, same: no chains bound, so getLegalPowerMoves's
+  // stride reduction never fires and every move keeps its classic length —
+  // which is exactly what this fixture has to hold for the comparison to
+  // mean anything.
+  curse: { p1: null, p2: null },
+  // Hunter-only state, same: no traps armed and nothing frozen, so neither
+  // the move generator's freeze skip nor resolveTurn's reactive trap/wolf
+  // layer can fire — which is what this fixture needs to stay a pure
+  // comparison against the classic generator.
+  traps: { p1: null, p2: null },
+  hamstrung: {},
+  // Bard-only state, inert here for the same reason: nothing inspired means
+  // no stride bonus, so every move keeps its classic length.
+  inspired: {},
 };
 
 function sharedFieldsMatch(a: Move, b: PowerMove): boolean {
