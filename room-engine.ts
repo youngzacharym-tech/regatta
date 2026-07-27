@@ -52,43 +52,79 @@ import {
   applyCharge as mkApplyCharge,
   applyChargedShot as mkApplyChargedShot,
   applyCorpseExplosion,
+  applyCurse,
   applyExhume,
+  applyFelStorm,
   applyGrandHeist,
+  applyBloodbath,
+  applyCrescendo,
+  applyInspire,
+  applySongOfHaste,
+  applyPiercingShot,
+  applyRecklessSwing,
+  applyWhirlwind,
   applyHeal,
   applyPickpocket,
   applyPowerMove,
   applyPush as mkApplyPush,
   applyReflip as mkApplyReflip,
   applyRevive,
+  applySacrifice,
+  applySnare,
   applyVanish,
   applyWarpath,
+  applyWildHunt,
   BLESS_COST,
   breakShieldStreak,
   canReflipAgain,
   CHARGE_CAP,
+  CURSE_COST,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
+  getCurseTargets,
   getExhumeTargets,
+  getFelStormTargets,
   getGrandHeistTargets,
+  getBloodbathTargets,
+  getCrescendoTargets,
+  getInspireTargets,
+  getSongOfHasteTargets,
+  getPiercingShotTargets,
+  getRecklessSwingTargets,
+  getWhirlwindTargets,
   getHealTargets,
   getLegalPowerMoves,
   getPickpocketTargets,
   getPushTargets,
   getReviveSpawnTile,
+  getSacrificeTargets,
+  getSnareTiles,
   getVanishTargets,
   getWarpathTargets,
+  getWildHuntTargets,
   grantZeroFlipCharge,
+  PIERCING_SHOT_COST,
+  RECKLESS_SWING_COST,
+  WHIRLWIND_COST,
+  HASTE_COST,
+  INSPIRE_COST,
+  rageFor,
+  tickInspireForNewTurn,
   initialPowerState,
   PICKPOCKET_COST,
   REVIVE_COST,
+  SNARE_COST,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
+  tickCurseForNewTurn,
+  tickHamstringForNewTurn,
   tickThrallForNewTurn,
   VANISH_COST,
+  wolfGuardTile,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -125,7 +161,17 @@ export const CHAT_TEXT_MAX = 200;
 export const OPPONENT_AWAY_MS = 20_000;
 export const OPPONENT_LEFT_MS = 120_000;
 
-export const MK_CLASSES: PlayerClass[] = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"];
+/** The SHIPPED-AND-PLAYABLE roster: what the class picker offers, what the
+ *  CPU draws from, and what the balance sim enumerates. Deliberately shorter
+ *  than master-killer.ts's PlayerClass union, which also carries the four
+ *  portrait-only classes (warlock/hunter/barbarian/bard) whose kits are being
+ *  built one at a time. Appending a name here is the single switch that makes
+ *  a finished class live — until then a player physically cannot be dealt one,
+ *  so half-built abilities can never reach a real game. */
+export const MK_CLASSES: PlayerClass[] = [
+  "archer", "mage", "warrior", "necromancer", "cleric", "rogue",
+  "warlock", "hunter", "barbarian", "bard",
+];
 
 // ============================================================================
 // WIRE-SAFE POWER STATE — PowerState is plain JSON now (safeTokens, its one
@@ -149,6 +195,16 @@ export interface WirePowerState {
   /** Cleric (2026-07-21): per-token blessed/wounded state — see
    *  PowerState.vitality. Plain JSON, rides the doc verbatim. */
   vitality: Record<number, "blessed" | "wounded">;
+  /** Warlock (2026-07-26): each caster's single live curse — see
+   *  PowerState.curse. Plain JSON, rides the doc verbatim. */
+  curse: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Hunter (2026-07-26): each hunter's armed trap tile, and every frozen
+   *  stone's remaining victim-turns — see PowerState.traps / .hamstrung. */
+  traps: Record<PlayerId, number | null>;
+  hamstrung: Record<number, number>;
+  /** Bard (2026-07-27): every lit stone's remaining bard-turns — see
+   *  PowerState.inspired. */
+  inspired: Record<number, number>;
 }
 
 export function toWirePower(p: PowerState): WirePowerState {
@@ -181,6 +237,14 @@ export function fromWirePower(w: WirePowerState): PowerState {
     // Docs persisted before the cleric existed have no vitality — no
     // blessings in flight, which the empty map means exactly.
     vitality: w.vitality ?? {},
+    // Docs persisted before the warlock existed have no curse — no chains
+    // in flight, which the null pair means exactly.
+    curse: w.curse ?? { p1: null, p2: null },
+    // Same for the hunter: no traps armed, nothing frozen.
+    traps: w.traps ?? { p1: null, p2: null },
+    hamstrung: w.hamstrung ?? {},
+    // Docs persisted before the bard existed have nothing lit.
+    inspired: w.inspired ?? {},
   };
 }
 
@@ -249,6 +313,51 @@ export interface PublicPower {
   pickpocketTargets?: number[];
   vanishTargets?: number[];
   grandHeistTargets?: number[];
+  /** Warlock (2026-07-26): Curse / Sacrifice pools for the CURRENT player
+   *  (affordability baked into both oracles — empty = not castable) and
+   *  Fel Storm's victim pool (gated on ultimateReady here like every
+   *  ultimate's list). ADDITIVE. */
+  curseTargets?: number[];
+  sacrificeTargets?: number[];
+  felStormTargets?: number[];
+  /** Every live curse (token id -> victim turn-starts remaining) — public
+   *  table-state, same visibility rule as bulwarkedTokenIds (the chains
+   *  are visible board truth for both seats). ADDITIVE. */
+  cursed?: Record<number, number>;
+  /** Hunter (2026-07-26): Snare's legal TILE pool (not a token pool — the
+   *  one ability that targets a square), Hamstring's enemy pool, and Wild
+   *  Hunt's (gated on ultimateReady like every ultimate list). ADDITIVE. */
+  snareTiles?: number[];
+  /** Piercing Shot's pool is at most ONE id — the arrow's own path picks
+   *  the victim, so this is a castability signal plus a highlight, not a
+   *  choice (Revive/Exhume's one-candidate collapse). */
+  piercingShotTargets?: number[];
+  wildHuntTargets?: number[];
+  /** Both hunters' armed traps and the tiles their wolves guard — PUBLIC
+   *  board truth for both seats by design (see PowerState.traps: routing
+   *  around a visible trap is the play). Keyed by seat so a hunter mirror
+   *  renders two of each. */
+  traps?: Record<PlayerId, number | null>;
+  wolfGuard?: Record<PlayerId, number | null>;
+  /** Every frozen stone (token id -> victim turn-starts remaining). */
+  hamstrung?: Record<number, number>;
+  /** Barbarian (2026-07-27): Reckless Swing's enemy pool, Whirlwind's
+   *  would-catch pool, and Bloodbath's would-run-down pool (gated on
+   *  ultimateReady like every ultimate list). Plus each player's live Rage
+   *  bonus — public board truth, since it is derived from visible reserve
+   *  counts anyway and both seats' plates show it. ADDITIVE. */
+  recklessSwingTargets?: number[];
+  whirlwindTargets?: number[];
+  bloodbathTargets?: number[];
+  rage?: Record<PlayerId, number>;
+  /** Bard (2026-07-27): Inspire's own-stone pool, and the two payoff pools
+   *  (Song of Haste's lit stones, Crescendo's whole army — the latter
+   *  gated on ultimateReady like every ultimate list). Plus every lit
+   *  stone's remaining turns, public board truth like the other statuses. */
+  inspireTargets?: number[];
+  songOfHasteTargets?: number[];
+  crescendoTargets?: number[];
+  inspired?: Record<number, number>;
   /** How many Re-flips the CURRENT player has already fired this turn —
    *  drives the client's Re-flip button gate (charges alone can't: a Mage
    *  at the REFLIPS_PER_TURN cap may still hold a charge, e.g. after a
@@ -360,6 +469,57 @@ export type RoomEvent =
        *  as lastBulwark, since it IS Bulwark's mechanic under a Rogue
        *  cast (see VANISH_COST's doc in master-killer.ts). */
       lastVanish?: { tokenId: number } | null;
+      /** Warlock's Curse of Chains just resolved on this commit — same
+       *  turn-continues lifecycle as lastReflip/lastBless. */
+      lastCurse?: { targetTokenId: number } | null;
+      /** A curse ran out at the start of this commit's turn — the chains
+       *  lifted (lastThrallExpired's lifecycle). */
+      lastCurseExpired?: { tokenId: number } | null;
+      /** Warlock's Sacrifice just resolved: the mover's own stone that was
+       *  given (server-selected, most-advanced) and the enemy it killed. */
+      lastSacrifice?: { sacrificedTokenId: number; targetTokenId: number } | null;
+      /** Warlock's Fel Storm ultimate — who the storm dragged, and the
+       *  (rare, thrall-only) crumble deaths. Positions are in `state`. */
+      lastFelStorm?: { struckTokenIds: number[]; sentHomeIds: number[] } | null;
+      /** Hunter's Snare was just ARMED this commit (turn-keeping, so the
+       *  same lifecycle as lastCurse). The tile is public board truth. */
+      lastSnare?: { tile: number } | null;
+      /** A trap SPRUNG on this commit's landing — server-computed inside
+       *  resolveTurn, never re-derived client-side. */
+      lastTrapSprung?: { tile: number; tokenId: number; sentHome: boolean } | null;
+      /** The Wolf Companion bit the mover on this commit's landing. */
+      lastWolfBite?: { tokenId: number; sentHome: boolean } | null;
+      /** Hunter's Hamstring just froze a stone. */
+      lastPiercingShot?: { killedTokenId: number | null; woundedTokenId: number | null } | null;
+      /** A freeze ran out at the start of this commit's turn — the stones
+       *  that thawed (lastThrallExpired's lifecycle). */
+      lastThaw?: { tokenIds: number[] } | null;
+      /** Hunter's Wild Hunt ultimate — who froze and what the wolf took. */
+      lastWildHunt?: { frozenTokenIds: number[]; killedTokenId: number | null } | null;
+      /** Barbarian's Reckless Swing — the trade, both halves: who swung,
+       *  what died (or was wounded), and whether the recoil sent the
+       *  swinger home too. */
+      lastRecklessSwing?: {
+        swingerTokenId: number;
+        killedTokenId: number | null;
+        woundedTokenId: number | null;
+        swingerSentHome: boolean;
+      } | null;
+      /** Barbarian's Whirlwind — captured vs merely shoved. */
+      lastWhirlwind?: { capturedTokenIds: number[]; knockedTokenIds: number[]; sentHomeIds: number[] } | null;
+      /** Barbarian's Bloodbath ultimate — everything the charge ran down,
+       *  and the tile it finished on. */
+      lastBloodbath?: { killedTokenIds: number[]; endedOn: number } | null;
+      /** Bard's Inspire lit a stone this commit (turn-keeping, lastCurse's
+       *  lifecycle). */
+      lastInspire?: { tokenId: number } | null;
+      /** Inspirations that faded at the start of this commit's turn. */
+      lastInspireFaded?: { tokenIds: number[] } | null;
+      /** Bard's Song of Haste / Crescendo resolved — which stones marched,
+       *  and anything they ran over on the way. Crescendo also reports the
+       *  ids it lit. */
+      lastSongOfHaste?: { movedIds: number[]; capturedIds: number[] } | null;
+      lastCrescendo?: { inspiredIds: number[]; movedIds: number[]; capturedIds: number[] } | null;
       wasSkipped: boolean;
       skippedPlayer: PlayerId | null;
       skipReason: "flip-zero" | "no-legal-move" | null;
@@ -460,6 +620,36 @@ export interface RoomDoc {
    *  Docs persisted before these fields existed read as undefined ≙ null. */
   lastPickpocket?: { targetTokenId: number; stolen: number } | null;
   lastVanish?: { tokenId: number } | null;
+  /** See RoomEvent's docs — the warlock's announcement slots (2026-07-26).
+   *  Docs persisted before these fields existed read as undefined ≙ null. */
+  lastCurse?: { targetTokenId: number } | null;
+  lastCurseExpired?: { tokenId: number } | null;
+  lastSacrifice?: { sacrificedTokenId: number; targetTokenId: number } | null;
+  lastFelStorm?: { struckTokenIds: number[]; sentHomeIds: number[] } | null;
+  /** See RoomEvent's docs — the hunter's announcement slots (2026-07-26).
+   *  Docs persisted before these fields existed read as undefined ≙ null. */
+  lastSnare?: { tile: number } | null;
+  lastTrapSprung?: { tile: number; tokenId: number; sentHome: boolean } | null;
+  lastWolfBite?: { tokenId: number; sentHome: boolean } | null;
+  lastPiercingShot?: { killedTokenId: number | null; woundedTokenId: number | null } | null;
+  lastThaw?: { tokenIds: number[] } | null;
+  lastWildHunt?: { frozenTokenIds: number[]; killedTokenId: number | null } | null;
+  /** See RoomEvent's docs — the barbarian's announcement slots (2026-07-27).
+   *  Docs persisted before these fields existed read as undefined ≙ null. */
+  lastRecklessSwing?: {
+    swingerTokenId: number;
+    killedTokenId: number | null;
+    woundedTokenId: number | null;
+    swingerSentHome: boolean;
+  } | null;
+  lastWhirlwind?: { capturedTokenIds: number[]; knockedTokenIds: number[]; sentHomeIds: number[] } | null;
+  lastBloodbath?: { killedTokenIds: number[]; endedOn: number } | null;
+  /** See RoomEvent's docs — the bard's announcement slots (2026-07-27).
+   *  Docs persisted before these fields existed read as undefined ≙ null. */
+  lastInspire?: { tokenId: number } | null;
+  lastInspireFaded?: { tokenIds: number[] } | null;
+  lastSongOfHaste?: { movedIds: number[]; capturedIds: number[] } | null;
+  lastCrescendo?: { inspiredIds: number[]; movedIds: number[]; capturedIds: number[] } | null;
 }
 
 // ============================================================================
@@ -644,6 +834,47 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
       doc.mk.classes[mover] === "rogue" && doc.mk.ultimateReady[mover]
         ? getGrandHeistTargets(doc.state, p, mover)
         : [],
+    curseTargets: doc.mk.classes[mover] === "warlock" ? getCurseTargets(doc.state, p, mover) : [],
+    sacrificeTargets: doc.mk.classes[mover] === "warlock" ? getSacrificeTargets(doc.state, p, mover) : [],
+    felStormTargets:
+      doc.mk.classes[mover] === "warlock" && doc.mk.ultimateReady[mover]
+        ? getFelStormTargets(doc.state, p, mover)
+        : [],
+    cursed: Object.fromEntries(
+      (["p1", "p2"] as PlayerId[])
+        .map((pl) => p.curse[pl])
+        .filter((c): c is { tokenId: number; turnsLeft: number } => c !== null)
+        .map((c) => [c.tokenId, c.turnsLeft]),
+    ),
+    snareTiles: doc.mk.classes[mover] === "hunter" ? getSnareTiles(doc.state, p, mover) : [],
+    piercingShotTargets:
+      doc.mk.classes[mover] === "hunter" ? getPiercingShotTargets(doc.state, p, mover) : [],
+    wildHuntTargets:
+      doc.mk.classes[mover] === "hunter" && doc.mk.ultimateReady[mover]
+        ? getWildHuntTargets(doc.state, p, mover)
+        : [],
+    traps: { p1: p.traps?.p1 ?? null, p2: p.traps?.p2 ?? null },
+    wolfGuard: {
+      p1: wolfGuardTile(doc.state, p, "p1"),
+      p2: wolfGuardTile(doc.state, p, "p2"),
+    },
+    hamstrung: { ...(p.hamstrung ?? {}) },
+    recklessSwingTargets:
+      doc.mk.classes[mover] === "barbarian" ? getRecklessSwingTargets(doc.state, p, mover) : [],
+    whirlwindTargets:
+      doc.mk.classes[mover] === "barbarian" ? getWhirlwindTargets(doc.state, p, mover) : [],
+    bloodbathTargets:
+      doc.mk.classes[mover] === "barbarian" && doc.mk.ultimateReady[mover]
+        ? getBloodbathTargets(doc.state, p, mover)
+        : [],
+    rage: { p1: rageFor(doc.state, p, "p1"), p2: rageFor(doc.state, p, "p2") },
+    inspireTargets: doc.mk.classes[mover] === "bard" ? getInspireTargets(doc.state, p, mover) : [],
+    songOfHasteTargets: doc.mk.classes[mover] === "bard" ? getSongOfHasteTargets(doc.state, p, mover) : [],
+    crescendoTargets:
+      doc.mk.classes[mover] === "bard" && doc.mk.ultimateReady[mover]
+        ? getCrescendoTargets(doc.state, p, mover)
+        : [],
+    inspired: { ...(p.inspired ?? {}) },
     reflipsUsedThisTurn: p.reflipsUsedThisTurn,
   };
 }
@@ -710,6 +941,23 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastMend: doc.lastMend ?? null,
     lastPickpocket: doc.lastPickpocket ?? null,
     lastVanish: doc.lastVanish ?? null,
+    lastCurse: doc.lastCurse ?? null,
+    lastCurseExpired: doc.lastCurseExpired ?? null,
+    lastSacrifice: doc.lastSacrifice ?? null,
+    lastFelStorm: doc.lastFelStorm ?? null,
+    lastSnare: doc.lastSnare ?? null,
+    lastTrapSprung: doc.lastTrapSprung ?? null,
+    lastWolfBite: doc.lastWolfBite ?? null,
+    lastPiercingShot: doc.lastPiercingShot ?? null,
+    lastThaw: doc.lastThaw ?? null,
+    lastWildHunt: doc.lastWildHunt ?? null,
+    lastRecklessSwing: doc.lastRecklessSwing ?? null,
+    lastWhirlwind: doc.lastWhirlwind ?? null,
+    lastBloodbath: doc.lastBloodbath ?? null,
+    lastInspire: doc.lastInspire ?? null,
+    lastInspireFaded: doc.lastInspireFaded ?? null,
+    lastSongOfHaste: doc.lastSongOfHaste ?? null,
+    lastCrescendo: doc.lastCrescendo ?? null,
     wasSkipped: doc.wasSkipped,
     skippedPlayer: doc.skippedPlayer,
     skipReason: doc.skipReason,
@@ -737,6 +985,10 @@ export function freshMatchFields(
   | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
   | "lastBless" | "lastHeal" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
   | "lastPickpocket" | "lastVanish"
+  | "lastCurse" | "lastCurseExpired" | "lastSacrifice" | "lastFelStorm"
+  | "lastSnare" | "lastTrapSprung" | "lastWolfBite" | "lastPiercingShot" | "lastThaw" | "lastWildHunt"
+  | "lastRecklessSwing" | "lastWhirlwind" | "lastBloodbath"
+  | "lastInspire" | "lastInspireFaded" | "lastSongOfHaste" | "lastCrescendo"
 > {
   return {
     phase: variant === "masterKiller" ? "classPick" : "opening",
@@ -774,6 +1026,23 @@ export function freshMatchFields(
     lastMend: null,
     lastPickpocket: null,
     lastVanish: null,
+    lastCurse: null,
+    lastCurseExpired: null,
+    lastSacrifice: null,
+    lastFelStorm: null,
+    lastSnare: null,
+    lastTrapSprung: null,
+    lastWolfBite: null,
+    lastPiercingShot: null,
+    lastThaw: null,
+    lastWildHunt: null,
+    lastRecklessSwing: null,
+    lastWhirlwind: null,
+    lastBloodbath: null,
+    lastInspire: null,
+    lastInspireFaded: null,
+    lastSongOfHaste: null,
+    lastCrescendo: null,
     rescueAttempted: false,
   };
 }
@@ -843,6 +1112,12 @@ export function applyAction(
     case "pickClass": {
       if (doc.phase !== "classPick" || !doc.mk) return { doc, error: "Not in class pick" };
       if (doc.classesPicked[seat]) return { doc, error: "Already picked" };
+      // The client greys out portrait-only classes, but the picker is the one
+      // place a client hands the server a class NAME rather than an index into
+      // a server-computed list — so it gets the same re-validation every other
+      // action does (see CLAUDE.md's trust model). Without this, a crafted
+      // pickClass could seat someone in a class whose kit doesn't exist yet.
+      if (!MK_CLASSES.includes(action.class)) return { doc, error: "Class not available" };
       let next: RoomDoc = {
         ...doc,
         mk: { ...doc.mk, classes: { ...doc.mk.classes, [seat]: action.class } },
@@ -916,6 +1191,18 @@ export function applyAction(
       if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
       if (a.kind === "vanish") return { doc: applyMkSimple(doc, seat, "vanish", a.tokenId, now, rand) };
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
+      if (a.kind === "curse") return { doc: applyMkCurse(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "sacrifice") return { doc: applyMkSacrifice(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "felStorm") return { doc: applyMkFelStorm(doc, seat, now) };
+      if (a.kind === "snare") return { doc: applyMkSnare(doc, seat, a.tile, now) };
+      if (a.kind === "piercingShot") return { doc: applyMkPiercingShot(doc, seat, now) };
+      if (a.kind === "wildHunt") return { doc: applyMkWildHunt(doc, seat, now) };
+      if (a.kind === "recklessSwing") return { doc: applyMkRecklessSwing(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "whirlwind") return { doc: applyMkWhirlwind(doc, seat, now) };
+      if (a.kind === "bloodbath") return { doc: applyMkBloodbath(doc, seat, now) };
+      if (a.kind === "inspire") return { doc: applyMkInspire(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "songOfHaste") return { doc: applyMkSongOfHaste(doc, seat, now) };
+      if (a.kind === "crescendo") return { doc: applyMkCrescendo(doc, seat, now) };
       // charge
       const move = doc.currentPowerMoves![a.moveIndex];
       return { doc: applyMkCharge(doc, seat, move, now, rand) };
@@ -1044,6 +1331,79 @@ function validateUsePower(
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (!getGrandHeistTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Grand Heist target";
       return null;
+    case "curse":
+      if (cls !== "warlock") return "Only a Warlock can Curse";
+      // Curse keeps the SAME flip alive (Bless's contract, see
+      // applyMkCurse) — there has to be one to keep.
+      if (doc.currentFlip === null) return "No flip yet";
+      if (!getCurseTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Curse target";
+      return null;
+    case "sacrifice":
+      // Turn-ending (Push's shape) — no flip guard needed.
+      if (cls !== "warlock") return "Only a Warlock can Sacrifice";
+      if (!getSacrificeTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Sacrifice target";
+      return null;
+    case "felStorm":
+      if (cls !== "warlock") return "Only a Warlock can call a Fel Storm";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getFelStormTargets(doc.state, p(), seat).length === 0) return "Fel Storm would drag no one";
+      return null;
+    case "snare":
+      if (cls !== "hunter") return "Only a Hunter can set a Snare";
+      // Snare keeps the SAME flip alive (Curse's contract, see
+      // applyMkSnare) — there has to be one to keep.
+      if (doc.currentFlip === null) return "No flip yet";
+      // A TILE, not a token id — the one action shaped this way.
+      if (!getSnareTiles(doc.state, p(), seat).includes(a.tile)) return "Invalid Snare tile";
+      return null;
+    case "piercingShot":
+      // Turn-ending (Push's shape) — no flip guard needed.
+      if (cls !== "hunter") return "Only a Hunter can loose a Piercing Shot";
+      if (doc.mk.charges[seat] < PIERCING_SHOT_COST) return "Piercing Shot needs a full charge bank";
+      // No target to validate — the arrow's path picks the victim. A
+      // non-empty oracle IS the castability check.
+      if (getPiercingShotTargets(doc.state, p(), seat).length === 0) return "No clear shot";
+      return null;
+    case "wildHunt":
+      if (cls !== "hunter") return "Only a Hunter can call the Wild Hunt";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getWildHuntTargets(doc.state, p(), seat).length === 0) return "Nothing left to hunt";
+      return null;
+    case "recklessSwing":
+      if (cls !== "barbarian") return "Only a Barbarian can swing recklessly";
+      if (doc.mk.charges[seat] < RECKLESS_SWING_COST) return "No charge available";
+      if (!getRecklessSwingTargets(doc.state, p(), seat).includes(a.targetTokenId)) {
+        return "Invalid Reckless Swing target";
+      }
+      return null;
+    case "whirlwind":
+      if (cls !== "barbarian") return "Only a Barbarian can Whirlwind";
+      if (doc.mk.charges[seat] < WHIRLWIND_COST) return "Whirlwind needs a full charge bank";
+      if (getWhirlwindTargets(doc.state, p(), seat).length === 0) return "Nothing within reach";
+      return null;
+    case "bloodbath":
+      if (cls !== "barbarian") return "Only a Barbarian can Bloodbath";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getBloodbathTargets(doc.state, p(), seat).length === 0) return "Nothing in the charge's path";
+      return null;
+    case "inspire":
+      if (cls !== "bard") return "Only a Bard can Inspire";
+      // Inspire keeps the SAME flip alive (Curse's contract, see
+      // applyMkInspire) — there has to be one to keep.
+      if (doc.currentFlip === null) return "No flip yet";
+      if (!getInspireTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Inspire target";
+      return null;
+    case "songOfHaste":
+      // Turn-ending (Push's shape) — no flip guard needed.
+      if (cls !== "bard") return "Only a Bard can sing the Song of Haste";
+      if (doc.mk.charges[seat] < HASTE_COST) return "Song of Haste needs a full charge bank";
+      if (getSongOfHasteTargets(doc.state, p(), seat).length === 0) return "No inspired stones to carry the song";
+      return null;
+    case "crescendo":
+      if (cls !== "bard") return "Only a Bard can play a Crescendo";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getCrescendoTargets(doc.state, p(), seat).length === 0) return "No one on the board to sing to";
+      return null;
   }
 }
 
@@ -1073,6 +1433,23 @@ const CLEAR_SLOTS = {
   lastMend: null,
   lastPickpocket: null,
   lastVanish: null,
+  lastCurse: null,
+  lastCurseExpired: null,
+  lastSacrifice: null,
+  lastFelStorm: null,
+  lastSnare: null,
+  lastTrapSprung: null,
+  lastWolfBite: null,
+  lastPiercingShot: null,
+  lastThaw: null,
+  lastWildHunt: null,
+  lastRecklessSwing: null,
+  lastWhirlwind: null,
+  lastBloodbath: null,
+  lastInspire: null,
+  lastInspireFaded: null,
+  lastSongOfHaste: null,
+  lastCrescendo: null,
   wasSkipped: false,
   skippedPlayer: null,
   skipReason: null,
@@ -1109,6 +1486,10 @@ function applyMkMove(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: number,
     lastRainOfArrows: r.rainOfArrows,
     lastWound: r.wounded.length > 0 ? { tokenIds: r.wounded.map((w) => w.tokenId) } : null,
     lastMend: r.mendedTokenIds.length > 0 ? { tokenIds: r.mendedTokenIds } : null,
+    // The enemy hunter's reactive layer fired on this landing (see
+    // resolveTurn) — server-computed, never re-derived client-side.
+    lastTrapSprung: r.trapSprung,
+    lastWolfBite: r.wolfBite,
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1136,6 +1517,8 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
     lastChargeSweep: { sweptTokenIds: move.chargeSweepCaptures },
     lastWound: r.wounded.length > 0 ? { tokenIds: r.wounded.map((w) => w.tokenId) } : null,
     lastMend: r.mendedTokenIds.length > 0 ? { tokenIds: r.mendedTokenIds } : null,
+    lastTrapSprung: r.trapSprung,
+    lastWolfBite: r.wolfBite,
   };
   return commitFrame(next, now, stateEventOf(next));
 }
@@ -1412,6 +1795,324 @@ function applyMkCorpseExplosion(doc: RoomDoc, seat: PlayerId, now: number): Room
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Warlock's Curse of Chains does NOT end the turn — Pickpocket's exact
+ *  commit contract (see applyMkPickpocket): the SAME flip stays live and
+ *  the move list is recomputed. The recompute is load-bearing here rather
+ *  than merely uniform: the curse changes the VICTIM's stride, not the
+ *  mover's, so the mover's own list is unchanged — but a Bulwark re-check
+ *  against the live flip still has to run, and keeping the shape identical
+ *  to every other turn-keeper is what stops the two servers drifting. */
+function applyMkCurse(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
+  const power = applyCurse(fromWirePower(doc.mk!), tokenId, seat);
+  const currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
+  const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastCurse: { targetTokenId: tokenId },
+    // A cast during a zero flip spends AFTER the flip commit banked the
+    // grant's baseline — applyMkRevive's exact bookkeeping.
+    zeroFlipChargeBefore:
+      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - CURSE_COST : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Sacrifice ends the turn (Push's shape): its own commit fn only because
+ *  it announces TWO deaths — the enemy killed and the mover's own stone
+ *  given for it (server-selected, never re-derived client-side). The
+ *  scoreboard counts the enemy kill only: giving your own stone is a
+ *  price, not a capture. */
+function applyMkSacrifice(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applySacrifice(doc.state, fromWirePower(doc.mk!), tokenId, seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures: { ...doc.captures, [seat]: doc.captures[seat] + 1 },
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastSacrifice: { sacrificedTokenId: r.sacrificedTokenId, targetTokenId: tokenId },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Fel Storm ends the turn (its ultimate siblings' shape) — its own commit
+ *  fn only because the announce payload is the dragged/crumbled id lists,
+ *  not a single token slot. No capture credit: the storm displaces, and
+ *  its rare thrall-crumble deaths are the possession rule collecting its
+ *  own debt, not a kill the warlock scored. */
+function applyMkFelStorm(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyFelStorm(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastFelStorm: { struckTokenIds: r.struckTokenIds, sentHomeIds: r.sentHomeIds },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Hunter's Snare does NOT end the turn — Curse's exact commit contract
+ *  (see applyMkCurse): same flip, move list recomputed. The recompute
+ *  genuinely matters here: the trap occupies a tile, and while it doesn't
+ *  change the mover's own legal moves, keeping the shape identical across
+ *  every turn-keeper is what stops the two servers drifting. */
+function applyMkSnare(doc: RoomDoc, seat: PlayerId, tile: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
+  const power = applySnare(fromWirePower(doc.mk!), tile, seat);
+  const currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
+  const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastSnare: { tile },
+    zeroFlipChargeBefore:
+      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - SNARE_COST : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Piercing Shot ends the turn (Push's shape). Its own commit fn because it
+ *  takes no target from the client at all — the arrow's path picks the
+ *  victim server-side — and its result splits into a kill or a wound (a
+ *  mortal weapon, so a Blessing absorbs it). */
+function applyMkPiercingShot(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyPiercingShot(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures: r.killedTokenId !== null ? { ...doc.captures, [seat]: doc.captures[seat] + 1 } : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastPiercingShot: { killedTokenId: r.killedTokenId, woundedTokenId: r.woundedTokenId },
+    lastWound: r.woundedTokenId !== null ? { tokenIds: [r.woundedTokenId] } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Wild Hunt ends the turn (its ultimate siblings' shape) — its own commit
+ *  fn because the payload is a frozen id list PLUS the wolf's kill, and the
+ *  kill is the only part that scores. */
+function applyMkWildHunt(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyWildHunt(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures: r.killedTokenId !== null ? { ...doc.captures, [seat]: doc.captures[seat] + 1 } : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastWildHunt: { frozenTokenIds: r.frozenTokenIds, killedTokenId: r.killedTokenId },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Reckless Swing ends the turn (Push's shape). Its own commit fn because
+ *  the announce payload is a TRADE — what died and what the recoil cost —
+ *  and the scoreboard must count only the enemy: the swinger going home is
+ *  a price the barbarian paid, never a capture for the opponent. */
+function applyMkRecklessSwing(doc: RoomDoc, seat: PlayerId, targetTokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyRecklessSwing(doc.state, fromWirePower(doc.mk!), targetTokenId, seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures: r.killedTokenId !== null ? { ...doc.captures, [seat]: doc.captures[seat] + 1 } : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastRecklessSwing: {
+      swingerTokenId: r.swingerTokenId,
+      killedTokenId: r.killedTokenId,
+      woundedTokenId: r.woundedTokenId,
+      swingerSentHome: r.swingerSentHome,
+    },
+    lastWound: r.woundedTokenId !== null ? { tokenIds: [r.woundedTokenId] } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Whirlwind ends the turn (Push's shape) — its own commit fn because the
+ *  payload splits captured from merely shoved, and only the former score. */
+function applyMkWhirlwind(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyWhirlwind(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures:
+      r.capturedTokenIds.length > 0
+        ? { ...doc.captures, [seat]: doc.captures[seat] + r.capturedTokenIds.length }
+        : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastWhirlwind: {
+      capturedTokenIds: r.capturedTokenIds,
+      knockedTokenIds: r.knockedTokenIds,
+      sentHomeIds: r.sentHomeIds,
+    },
+    lastWound: r.woundedTokenIds.length > 0 ? { tokenIds: r.woundedTokenIds } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Bloodbath ends the turn (its ultimate siblings' shape) — its own commit
+ *  fn because the charge kills an UNCAPPED number of stones, so the
+ *  scoreboard takes the whole list. */
+function applyMkBloodbath(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyBloodbath(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures:
+      r.killedTokenIds.length > 0
+        ? { ...doc.captures, [seat]: doc.captures[seat] + r.killedTokenIds.length }
+        : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBloodbath: { killedTokenIds: r.killedTokenIds, endedOn: r.endedOn },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Bard's Inspire does NOT end the turn — Curse's exact commit contract
+ *  (see applyMkCurse): same flip, move list recomputed. The recompute is
+ *  genuinely load-bearing here, unlike for most turn-keepers: the stone
+ *  just lit moves INSPIRE_BONUS further, so this turn's own move list
+ *  really does change under it. */
+function applyMkInspire(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
+  const power = applyInspire(fromWirePower(doc.mk!), tokenId, seat);
+  const currentPowerMoves = getLegalPowerMoves(doc.state, power, flip);
+  const bulwarkResult = tickBulwarkForReflip(doc.state, power, flip);
+  const nextPower = bulwarkResult.power;
+  const delta = nextPower.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    mk: toWirePower(nextPower),
+    currentFlip: flip,
+    currentPowerMoves,
+    lastMovePlayer: doc.lastMovePlayer,
+    lastBulwarkBlock: bulwarkResult.blockedIds.length > 0 ? { tokenIds: bulwarkResult.blockedIds } : null,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastInspire: { tokenId },
+    zeroFlipChargeBefore:
+      doc.zeroFlipChargeBefore !== null ? doc.zeroFlipChargeBefore - INSPIRE_COST : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Song of Haste ends the turn (Push's shape) — its own commit fn because
+ *  the payload is a march plus whatever it ran over, and only the captures
+ *  score. */
+function applyMkSongOfHaste(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applySongOfHaste(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures:
+      r.capturedIds.length > 0
+        ? { ...doc.captures, [seat]: doc.captures[seat] + r.capturedIds.length }
+        : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastSongOfHaste: { movedIds: r.movedIds, capturedIds: r.capturedIds },
+    lastWound: r.woundedIds.length > 0 ? { tokenIds: r.woundedIds } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Crescendo ends the turn (its ultimate siblings' shape) — lights the whole
+ *  army AND marches it, so the payload carries both lists. */
+function applyMkCrescendo(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyCrescendo(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures:
+      r.capturedIds.length > 0
+        ? { ...doc.captures, [seat]: doc.captures[seat] + r.capturedIds.length }
+        : doc.captures,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastCrescendo: { inspiredIds: r.inspiredIds, movedIds: r.movedIds, capturedIds: r.capturedIds },
+    lastWound: r.woundedIds.length > 0 ? { tokenIds: r.woundedIds } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 /** Benediction ends the turn (its ultimate siblings' shape) — its own
  *  commit fn only because the announce payload is the blessed id list,
  *  not a single token slot. */
@@ -1514,6 +2215,59 @@ function autoSkipDelay(doc: RoomDoc): number {
       (getPickpocketTargets(doc.state, p, mover).length > 0 ||
         (doc.mk.charges[mover] >= VANISH_COST && getVanishTargets(doc.state, p, mover).length > 0) ||
         (doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0))
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    // A human Warlock with a dead flip but a castable Curse (turn-keeping)
+    // or Sacrifice/Fel Storm (turn-ending, Heal/Benediction's shape) gets
+    // the same window — same "don't silently auto-skip a meaningful
+    // action" reasoning as every arm above. Flip-zero stays a snappy skip.
+    if (
+      doc.mk.classes[mover] === "warlock" &&
+      doc.currentFlip !== null &&
+      doc.currentFlip !== 0 &&
+      (getCurseTargets(doc.state, p, mover).length > 0 ||
+        getSacrificeTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.ultimateReady[mover] && getFelStormTargets(doc.state, p, mover).length > 0))
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    // A human Hunter with a dead flip but a castable Snare (turn-keeping)
+    // or Hamstring/Wild Hunt (turn-ending) gets the same window — the same
+    // "don't silently auto-skip a meaningful action" rule as every arm
+    // above. Flip-zero stays a snappy skip.
+    if (
+      doc.mk.classes[mover] === "hunter" &&
+      doc.currentFlip !== null &&
+      doc.currentFlip !== 0 &&
+      (getSnareTiles(doc.state, p, mover).length > 0 ||
+        getPiercingShotTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.ultimateReady[mover] && getWildHuntTargets(doc.state, p, mover).length > 0))
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    // A human Barbarian with a dead flip but a castable swing/spin/charge —
+    // all three turn-ending, all three worth more than a silent auto-skip.
+    if (
+      doc.mk.classes[mover] === "barbarian" &&
+      doc.currentFlip !== null &&
+      doc.currentFlip !== 0 &&
+      (getRecklessSwingTargets(doc.state, p, mover).length > 0 ||
+        getWhirlwindTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.ultimateReady[mover] && getBloodbathTargets(doc.state, p, mover).length > 0))
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS;
+    }
+    // A human Bard with a dead flip but a castable Inspire (turn-keeping —
+    // and the buff can itself unstick the flip, since a lit stone moves
+    // INSPIRE_BONUS further) or a payoff to sing gets the same window.
+    if (
+      doc.mk.classes[mover] === "bard" &&
+      doc.currentFlip !== null &&
+      doc.currentFlip !== 0 &&
+      (getInspireTargets(doc.state, p, mover).length > 0 ||
+        getSongOfHasteTargets(doc.state, p, mover).length > 0 ||
+        (doc.mk.ultimateReady[mover] && getCrescendoTargets(doc.state, p, mover).length > 0))
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
@@ -1690,6 +2444,30 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkSimple(doc, seat, "vanish", action.tokenId, now);
     case "grandHeist":
       return applyMkSimple(doc, seat, "grandHeist", action.targetTokenId, now);
+    case "curse":
+      return applyMkCurse(doc, seat, action.targetTokenId, now);
+    case "sacrifice":
+      return applyMkSacrifice(doc, seat, action.targetTokenId, now);
+    case "felStorm":
+      return applyMkFelStorm(doc, seat, now);
+    case "snare":
+      return applyMkSnare(doc, seat, action.tile, now);
+    case "piercingShot":
+      return applyMkPiercingShot(doc, seat, now);
+    case "wildHunt":
+      return applyMkWildHunt(doc, seat, now);
+    case "recklessSwing":
+      return applyMkRecklessSwing(doc, seat, action.targetTokenId, now);
+    case "whirlwind":
+      return applyMkWhirlwind(doc, seat, now);
+    case "bloodbath":
+      return applyMkBloodbath(doc, seat, now);
+    case "inspire":
+      return applyMkInspire(doc, seat, action.targetTokenId, now);
+    case "songOfHaste":
+      return applyMkSongOfHaste(doc, seat, now);
+    case "crescendo":
+      return applyMkCrescendo(doc, seat, now);
   }
 }
 
@@ -1704,6 +2482,9 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
   let zeroFlipChargeBefore: number | null = null;
   let lastBulwarkBlock: RoomDoc["lastBulwarkBlock"] = null;
   let lastThrallExpired: RoomDoc["lastThrallExpired"] = null;
+  let lastCurseExpired: RoomDoc["lastCurseExpired"] = null;
+  let lastThaw: RoomDoc["lastThaw"] = null;
+  let lastInspireFaded: RoomDoc["lastInspireFaded"] = null;
   if (doc.variant === "masterKiller" && mk) {
     let power = fromWirePower(mk);
     if (flip === 0) {
@@ -1714,6 +2495,22 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
     state = thrallResult.state;
     power = thrallResult.power;
     if (thrallResult.expiredTokenId !== null) lastThrallExpired = { tokenId: thrallResult.expiredTokenId };
+    // Curse expiry ticks BEFORE the move list, same as the thrall's: the
+    // turn a curse runs out is a turn the freed stone moves its full
+    // distance, not one more shackled turn.
+    const curseResult = tickCurseForNewTurn(state, power);
+    power = curseResult.power;
+    if (curseResult.expiredTokenId !== null) lastCurseExpired = { tokenId: curseResult.expiredTokenId };
+    // Freeze expiry, same rule and same reason as the curse's: the turn a
+    // Hamstring runs out is a turn the stone actually moves.
+    const thawResult = tickHamstringForNewTurn(state, power);
+    power = thawResult.power;
+    if (thawResult.thawedTokenIds.length > 0) lastThaw = { tokenIds: thawResult.thawedTokenIds };
+    // Inspiration expiry, same slot and same reason: a stone whose song has
+    // faded must move at its true speed on the turn it fades.
+    const fadeResult = tickInspireForNewTurn(state, power);
+    power = fadeResult.power;
+    if (fadeResult.fadedTokenIds.length > 0) lastInspireFaded = { tokenIds: fadeResult.fadedTokenIds };
     currentPowerMoves = getLegalPowerMoves(state, power, flip);
     const bulwarkResult = tickBulwarkForNewTurn(state, power, flip);
     power = bulwarkResult.power;
@@ -1730,6 +2527,9 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
     turns: doc.turns + 1,
     lastBulwarkBlock,
     lastThrallExpired,
+    lastCurseExpired,
+    lastThaw,
+    lastInspireFaded,
     zeroFlipChargeBefore,
   };
   return commitFrame(next, now, stateEventOf(next));

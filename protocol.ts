@@ -245,6 +245,44 @@ export type ServerMessage =
         pickpocketTargets?: number[];
         vanishTargets?: number[];
         grandHeistTargets?: number[];
+        /** Warlock (2026-07-26): Curse / Sacrifice pools for the CURRENT
+         *  player (affordability baked into both oracles — empty = not
+         *  castable) and Fel Storm's victim pool (gated on ultimateReady
+         *  like every ultimate list). */
+        curseTargets?: number[];
+        sacrificeTargets?: number[];
+        felStormTargets?: number[];
+        /** Every live curse (token id -> the VICTIM's turn-starts
+         *  remaining) — public table-state, the same visibility rule as
+         *  bulwarkedTokenIds. */
+        cursed?: Record<number, number>;
+        /** Hunter (2026-07-26): Snare's legal TILE pool (the one ability
+         *  that targets a square, not a stone), Hamstring's enemy pool,
+         *  and Wild Hunt's (gated on ultimateReady like every ultimate
+         *  list). Plus the public board truth both seats render: each
+         *  hunter's armed trap tile, the tile their wolf guards, and every
+         *  frozen stone's remaining victim-turns. */
+        snareTiles?: number[];
+        /** At most ONE id — the arrow's path picks the victim, so this is a
+         *  castability signal plus a highlight, not a choice. */
+        piercingShotTargets?: number[];
+        wildHuntTargets?: number[];
+        traps?: Record<PlayerId, number | null>;
+        wolfGuard?: Record<PlayerId, number | null>;
+        hamstrung?: Record<number, number>;
+        /** Barbarian (2026-07-27): Reckless Swing / Whirlwind / Bloodbath
+         *  pools, plus each player's live Rage bonus (derived from visible
+         *  reserve counts, so public to both seats). */
+        recklessSwingTargets?: number[];
+        whirlwindTargets?: number[];
+        bloodbathTargets?: number[];
+        rage?: Record<PlayerId, number>;
+        /** Bard (2026-07-27): Inspire's own-stone pool and the two payoff
+         *  pools, plus every lit stone's remaining bard-turns. */
+        inspireTargets?: number[];
+        songOfHasteTargets?: number[];
+        crescendoTargets?: number[];
+        inspired?: Record<number, number>;
       };
       /** Master Killer mode only: Push doesn't produce a Move-shaped object
        *  (no token of the pusher's own moves), so it gets its own "how did
@@ -351,6 +389,57 @@ export type ServerMessage =
        *  broadcast — same shape/lifecycle as lastBulwark, since it IS
        *  Bulwark's mechanic under a Rogue cast. */
       lastVanish?: { tokenId: number } | null;
+      /** Master Killer mode only: Warlock's Curse of Chains just resolved
+       *  — same turn-continues lifecycle as lastReflip/lastBless. */
+      lastCurse?: { targetTokenId: number } | null;
+      /** Master Killer mode only: a curse ran out at the start of this
+       *  broadcast's turn (lastThrallExpired's lifecycle). */
+      lastCurseExpired?: { tokenId: number } | null;
+      /** Master Killer mode only: Warlock's Sacrifice resolved — the enemy
+       *  killed and the mover's OWN stone given for it (server-selected,
+       *  never re-derived client-side). */
+      lastSacrifice?: { sacrificedTokenId: number; targetTokenId: number } | null;
+      /** Master Killer mode only: Warlock's Fel Storm ultimate resolved —
+       *  who it dragged, and the rare thrall-only crumble deaths. */
+      lastFelStorm?: { struckTokenIds: number[]; sentHomeIds: number[] } | null;
+      /** Master Killer mode only: Hunter's Snare was ARMED this broadcast
+       *  (turn-keeping, lastCurse's lifecycle). */
+      lastSnare?: { tile: number } | null;
+      /** A trap SPRUNG on this broadcast's landing, and/or the Wolf
+       *  Companion bit the mover — both resolved inside resolveTurn and
+       *  server-computed, never re-derived client-side. */
+      lastTrapSprung?: { tile: number; tokenId: number; sentHome: boolean } | null;
+      lastWolfBite?: { tokenId: number; sentHome: boolean } | null;
+      /** Hunter's Piercing Shot resolved this broadcast — the arrow's own
+       *  path picked the victim, so the result is reported rather than
+       *  echoed back from a client-named target. A Blessing absorbs it
+       *  (mortal weapon), hence the kill/wound split. */
+      lastPiercingShot?: { killedTokenId: number | null; woundedTokenId: number | null } | null;
+      /** Freezes that ran out at the start of this broadcast's turn. */
+      lastThaw?: { tokenIds: number[] } | null;
+      /** Hunter's Wild Hunt ultimate — who froze, and what the wolf took. */
+      lastWildHunt?: { frozenTokenIds: number[]; killedTokenId: number | null } | null;
+      /** Master Killer mode only: Barbarian's Reckless Swing resolved —
+       *  the whole trade, including whether the recoil sent the swinger
+       *  home as well. */
+      lastRecklessSwing?: {
+        swingerTokenId: number;
+        killedTokenId: number | null;
+        woundedTokenId: number | null;
+        swingerSentHome: boolean;
+      } | null;
+      /** Barbarian's Whirlwind — captured vs merely shoved. */
+      lastWhirlwind?: { capturedTokenIds: number[]; knockedTokenIds: number[]; sentHomeIds: number[] } | null;
+      /** Barbarian's Bloodbath ultimate — everything the charge ran down
+       *  and the tile it finished on. */
+      lastBloodbath?: { killedTokenIds: number[]; endedOn: number } | null;
+      /** Master Killer mode only: the bard's slots. Inspire is
+       *  turn-keeping (lastCurse's lifecycle); the two payoffs report which
+       *  stones marched and anything they ran over. */
+      lastInspire?: { tokenId: number } | null;
+      lastInspireFaded?: { tokenIds: number[] } | null;
+      lastSongOfHaste?: { movedIds: number[]; capturedIds: number[] } | null;
+      lastCrescendo?: { inspiredIds: number[]; movedIds: number[]; capturedIds: number[] } | null;
     }
   | {
       type: "gameOver";
@@ -444,7 +533,43 @@ export type ClientMessage =
          *  power.vanishTargets; the server re-validates against the same
          *  shared oracle. */
         | { kind: "vanish"; tokenId: number }
-        | { kind: "grandHeist"; targetTokenId: number };
+        | { kind: "grandHeist"; targetTokenId: number }
+        /** Warlock's Curse of Chains / Sacrifice: both target an enemy in
+         *  shared water — the client gates on power.curseTargets /
+         *  power.sacrificeTargets; the server re-validates against the
+         *  same shared oracles. Sacrifice's OWN cost (the mover's
+         *  MOST-advanced stone) is server-selected, never client-named. */
+        | { kind: "curse"; targetTokenId: number }
+        | { kind: "sacrifice"; targetTokenId: number }
+        /** Warlock's Fel Storm: no payload — the whole shared row is the
+         *  target; the client gates on power.felStormTargets being
+         *  non-empty. */
+        | { kind: "felStorm" }
+        /** Hunter's Snare: the ONLY action carrying a tile index rather
+         *  than a token id — the client gates on power.snareTiles; the
+         *  server re-validates against the same shared oracle. */
+        | { kind: "snare"; tile: number }
+        /** Hunter's Piercing Shot: no payload — the arrow's path picks the
+         *  victim; the client gates on power.piercingShotTargets being
+         *  non-empty and the server re-derives the victim itself. */
+        | { kind: "piercingShot" }
+        /** Hunter's Wild Hunt: no payload — the whole row is the target
+         *  and the wolf picks its own quarry. */
+        | { kind: "wildHunt" }
+        /** Barbarian's Reckless Swing: names the enemy only — the striker
+         *  is whichever of the caster's stones stands directly behind it,
+         *  determined by the board and never client-supplied. */
+        | { kind: "recklessSwing"; targetTokenId: number }
+        /** Whirlwind / Bloodbath: no payload — everything in reach is the
+         *  target; the client gates on the matching pool being non-empty. */
+        | { kind: "whirlwind" }
+        | { kind: "bloodbath" }
+        /** Bard's Inspire: targets one of the caster's OWN stones. */
+        | { kind: "inspire"; targetTokenId: number }
+        /** Song of Haste / Crescendo: no payload — every lit stone (or the
+         *  whole army) marches; the client gates on the matching pool. */
+        | { kind: "songOfHaste" }
+        | { kind: "crescendo" };
     }
   | {
       /** Resume a seat after a dropped connection (page reload, hosted

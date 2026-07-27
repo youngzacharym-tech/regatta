@@ -28,6 +28,7 @@ import {
   fromWirePower,
   publicPower,
   EVENT_WINDOW,
+  MK_CLASSES,
   type RoomDoc,
   type RoomActionInput,
   type WirePowerState,
@@ -200,6 +201,11 @@ runMatchup("warrior mirror", "masterKiller", "warrior", "warrior");
 // the lastRaise/lastExhume/lastSoulHarvest announcements.
 runMatchup("necromancer mirror", "masterKiller", "necromancer", "necromancer");
 runMatchup("necro vs warrior", "masterKiller", "necromancer", "warrior");
+// Warlock (2026-07-26): the mirror exercises Blood Pact on both sides and
+// double-curse bookkeeping; vs cleric pits Sacrifice's Ward/Blessing pierce
+// against the one class built to survive being hit.
+runMatchup("warlock mirror", "masterKiller", "warlock", "warlock");
+runMatchup("warlock vs cleric", "masterKiller", "warlock", "cleric");
 // Difficulty smoke: small runs at easy and hard so the transport invariants
 // (seq monotonic, JSON round-trip — difficulty is a plain string, Redis-safe;
 // termination under MAX_STEPS, which also bounds hard-tier think time) cover
@@ -248,6 +254,42 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
   // The activity-log debug fields mirror the raw lifecycle numbers.
   assert(pp.bulwarkTurns?.[2] === 3 && pp.bulwarkSavesLeft?.[2] === 2, "bulwark lifecycle numbers ride the broadcast");
   assert(pp.shieldStreak?.p2 === 1, "shield streak rides the broadcast");
+}
+
+// ---------------------------------------------------------------------------
+// pickClass is the one action where a client sends a class NAME rather than an
+// index into a server-computed list, so it gets re-validated against
+// MK_CLASSES like everything else. This is what lets a class's PORTRAIT ship
+// ahead of its kit (see master-killer.ts's PlayerClass doc): the four
+// unreleased classes exist in the type union and in the client's markup, and
+// the server must refuse to seat anyone in one.
+// ---------------------------------------------------------------------------
+{
+  const base = createRoomDoc("PICKTEST", true, "masterKiller", "tok", 0, false);
+  assert(base.phase === "classPick", "a Master Killer room opens in class pick");
+
+  const shipped = applyAction(base, "p1", { op: "pickClass", class: "rogue" }, 0);
+  assert(!shipped.error, "a shipped class is accepted");
+  assert(shipped.doc.mk?.classes.p1 === "rogue", "the accepted pick is recorded");
+
+  // The 2026-07-26 expansion classes, minus whichever have shipped — so
+  // this assertion keeps testing the guard as each kit lands, instead of
+  // failing the day a class goes live. Empty once all four are in, at
+  // which point the MK_CLASSES loop below is the whole check.
+  const unreleased = (["warlock", "hunter", "barbarian", "bard"] as const).filter(
+    (c) => !MK_CLASSES.includes(c),
+  );
+  for (const cls of unreleased) {
+    const r = applyAction(base, "p1", { op: "pickClass", class: cls }, 0);
+    assert(!!r.error, `${cls} is rejected while its kit is unbuilt`);
+    assert(!r.doc.classesPicked.p1, `a rejected ${cls} pick does not seat the player`);
+  }
+
+  // Every name the picker actually offers must survive the guard — a typo in
+  // MK_CLASSES would otherwise lock players out of a live class silently.
+  for (const cls of MK_CLASSES) {
+    assert(!applyAction(base, "p1", { op: "pickClass", class: cls }, 0).error, `${cls} is pickable`);
+  }
 }
 
 if (failures > 0) {
