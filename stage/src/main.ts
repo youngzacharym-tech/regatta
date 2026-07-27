@@ -29,10 +29,32 @@ import {
   CHARGE_CAP,
   BLESS_COST,
   BLESSING_CAP,
+  BLOOD_PACT_CHARGES,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   CORPSE_EXPLOSION_COST,
+  CURSE_COST,
+  CURSE_SLOW,
+  CURSE_TURNS,
   EXHUME_RETURN_POSITION,
+  BARD_CHARGE_CAP,
+  CRESCENDO_TILES,
+  ENCORE_ZERO_FLIP_CHARGES,
+  HASTE_COST,
+  HASTE_TILES,
+  INSPIRE_BONUS,
+  INSPIRE_CAP,
+  INSPIRE_COST,
+  INSPIRE_TURNS,
+  PIERCING_SHOT_COST,
+  RAGE_MAX,
+  RECKLESS_SELF_KNOCKBACK,
+  RECKLESS_SWING_COST,
+  SNARE_COST,
+  TRAP_BOUNTY,
+  TRAP_KNOCKBACK,
+  WHIRLWIND_CAP,
+  WHIRLWIND_COST,
   HEAL_COST,
   isWarded,
   NECRO_CHARGE_CAP,
@@ -40,6 +62,7 @@ import {
   PICKPOCKET_STEAL,
   REFLIPS_PER_TURN,
   REVIVE_COST,
+  SACRIFICE_COST,
   THRALL_TURNS,
   VANISH_COST,
   type PlayerClass,
@@ -1229,6 +1252,11 @@ function ensureMkPieces() {
       // (applyTokenGeometries' own fallback) instead of dragging every
       // OTHER class down with it — the seam that lets a new class's rules
       // ship ahead of (or without) its Blender relief.
+      // Deliberately the SHIPPED classes only, not the full PlayerClass union:
+      // the four kitless classes have no relief in the glb, and listing them
+      // here would warn four times on every Master Killer load for no visual
+      // difference (a missing entry and a warned-then-skipped entry both fall
+      // back to the classic blossom/star). Add each name alongside its sculpt.
       for (const cls of ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"] as const) {
         const red = geoOf(`token_${cls}_red`);
         const blue = geoOf(`token_${cls}_blue`);
@@ -1413,7 +1441,9 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
 // the tiled wood textures, not these).
 // ---------------------------------------------------------------------------
-type StatusKind = "ward" | "bulwark" | "vanish" | "shieldTile" | "thrall" | "soulClaim" | "blessed" | "wounded";
+type StatusKind =
+  | "ward" | "bulwark" | "vanish" | "shieldTile" | "thrall" | "soulClaim"
+  | "blessed" | "wounded" | "cursed" | "frozen" | "inspired";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
@@ -1433,6 +1463,18 @@ const STATUS_TINTS: Record<StatusKind, number> = {
   // gold ashed down, so the pair reads as one story at a glance.
   blessed: 0xe0b341,
   wounded: 0x8a7448,
+  // Curse of Chains wears the warlock's acid lime (DOCK_RING_TINTS.warlock).
+  // Unlike every other entry here this marks an AFFLICTION, not a
+  // protection — it sits last in the ring priority chain so a stone that is
+  // both shielded and shackled still shows the shield (the thing that
+  // decides whether it can be hit) rather than the tax on its stride.
+  cursed: 0xa4e034,
+  // The hunter's glacial teal (DOCK_RING_TINTS.hunter) — a frozen stone
+  // wears the mark of whatever stopped it.
+  frozen: 0x2fd6d0,
+  // The bard's footlight magenta (DOCK_RING_TINTS.bard) — the one entry
+  // here that marks a boon rather than armour or an affliction.
+  inspired: 0xff3d8b,
 };
 /** Dashed rune-ring, drawn white so the material color carries the class —
  *  deliberately a different visual language from the solid "movable" ring. */
@@ -1639,7 +1681,15 @@ function updateCorpseDecals() {
  *  rooms (currentPower === null) always take the clear-everything branch —
  *  a no-op against the materials' own black-emissive default, so classic
  *  visuals are untouched. */
+/** The most recent GameState the client rendered. Needed by the Snare
+ *  targeting flow, which has to turn a tapped STONE into the tile in front
+ *  of it — the one place a dock action needs board positions rather than
+ *  just token ids. Set here because every path that shows a board
+ *  (broadcast, replay, resync) funnels through updateTokenTints. */
+let lastRenderedState: GameState | null = null;
+
 function updateTokenTints(state: GameState) {
+  lastRenderedState = state;
   const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
   const fakePower: PowerState | null = currentPower
     ? {
@@ -1657,6 +1707,11 @@ function updateTokenTints(state: GameState) {
         corpse: currentPower.corpse ?? { p1: null, p2: null },
         thrall: currentPower.thrall ?? { p1: null, p2: null },
         vitality: currentPower.vitality ?? {},
+        // Curse plays no part in isWarded, and the cursed ring below reads
+        // the broadcast's flat `cursed` map directly — but PowerState
+        // requires the field, and a stub null pair is the honest value for
+        // a structure this function only uses as an isWarded argument.
+        curse: { p1: null, p2: null },
       }
     : null;
   // Which token (if any) is currently a thrall — possession outranks every
@@ -1718,6 +1773,26 @@ function updateTokenTints(state: GameState) {
       kind = "wounded";
       mat.emissive.setHex(0x8a7448); // ashed gold — the blessing broke, the scar shows
       mat.emissiveIntensity = 0.3;
+    } else if (currentPower?.inspired?.[token.id] !== undefined && token.position >= 0) {
+      // A BOON, unlike the two afflictions below it — but still after every
+      // protection, since what can hit a stone matters more than how fast
+      // it moves.
+      kind = "inspired";
+      mat.emissive.setHex(0xff3d8b); // footlight magenta — the song is lit
+      mat.emissiveIntensity = 0.5;
+    } else if (currentPower?.hamstrung?.[token.id] !== undefined && token.position >= 0) {
+      // Ahead of `cursed` only because a freeze is the stronger statement
+      // (no movement at all vs a shortened stride) — both sit after every
+      // protection, being afflictions rather than armour.
+      kind = "frozen";
+      mat.emissive.setHex(0x2fd6d0); // glacial teal — the hunter's mark
+      mat.emissiveIntensity = 0.5;
+    } else if (currentPower?.cursed?.[token.id] !== undefined && token.position >= 0) {
+      // Last in the chain on purpose (see STATUS_TINTS.cursed): an
+      // affliction, not a protection — a shielded stone shows its shield.
+      kind = "cursed";
+      mat.emissive.setHex(0xa4e034); // fel green — the chains glow
+      mat.emissiveIntensity = 0.45;
     } else {
       if (
         currentPower &&
@@ -1763,8 +1838,16 @@ const plateNameThem = document.getElementById("plate-name-them") as HTMLDivEleme
 // a kill can light (see NECRO_CHARGE_CAP's doc in master-killer.ts). Built
 // on demand whenever a plate's class changes; starts as the common two.
 function rebuildGemSockets(container: HTMLDivElement, cls: PlayerClass | null) {
-  const cap = cls === "necromancer" ? NECRO_CHARGE_CAP : CHARGE_CAP;
-  if (container.childElementCount === cap && (cap === CHARGE_CAP || container.querySelector(".soul"))) return;
+  // The bard's purse is deeper than everyone's too (BARD_CHARGE_CAP) —
+  // unlike the necromancer's soul gem, its extra pips are ordinary mana, so
+  // they get ordinary sockets.
+  const cap =
+    cls === "necromancer" ? NECRO_CHARGE_CAP : cls === "bard" ? BARD_CHARGE_CAP : CHARGE_CAP;
+  // Rebuild whenever the socket COUNT is wrong, or when the count matches
+  // but the soul-gem decoration doesn't (necromancer <-> bard both sit
+  // above CHARGE_CAP, so count alone no longer distinguishes them).
+  const wantsSoul = cls === "necromancer";
+  if (container.childElementCount === cap && wantsSoul === !!container.querySelector(".soul")) return;
   container.innerHTML = "";
   for (let i = 0; i < cap; i++) {
     const gem = document.createElement("span");
@@ -1894,6 +1977,30 @@ let currentPower: {
   pickpocketTargets?: number[];
   vanishTargets?: number[];
   grandHeistTargets?: number[];
+  curseTargets?: number[];
+  sacrificeTargets?: number[];
+  felStormTargets?: number[];
+  /** Live curses: token id -> the VICTIM's turn-starts remaining. */
+  cursed?: Record<number, number>;
+  /** Hunter: Snare's legal TILE pool, Piercing Shot's at-most-one victim,
+   *  Wild Hunt's pool, plus the public board truth both seats render. */
+  snareTiles?: number[];
+  piercingShotTargets?: number[];
+  wildHuntTargets?: number[];
+  traps?: Record<PlayerId, number | null>;
+  wolfGuard?: Record<PlayerId, number | null>;
+  hamstrung?: Record<number, number>;
+  /** Barbarian: the three ability pools plus each side's live Rage. */
+  recklessSwingTargets?: number[];
+  whirlwindTargets?: number[];
+  bloodbathTargets?: number[];
+  rage?: Record<PlayerId, number>;
+  /** Bard: Inspire's own-stone pool, the two payoff pools, and every lit
+   *  stone's remaining bard-turns. */
+  inspireTargets?: number[];
+  songOfHasteTargets?: number[];
+  crescendoTargets?: number[];
+  inspired?: Record<number, number>;
 } | null = null;
 /** The current player's power-boosted move list (only populated on my own
  *  turn — same security rule as legalMoves). Kept alongside currentMoves
@@ -1919,7 +2026,14 @@ type ArmedKind =
   | "heal"
   | "pickpocket"
   | "vanish"
-  | "grandHeist";
+  | "grandHeist"
+  | "curse"
+  | "sacrifice"
+  /** Snare is the one armed mode whose targets are TILES, not tokens — the
+   *  board tap resolves against a tile index (see fireArmedTile). */
+  | "snare"
+  | "recklessSwing"
+  | "inspire";
 let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
  *  sweep-capable move of the current roll (rebuilt by updateDock). The
@@ -2154,6 +2268,102 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "rogue",
     desc: "Teleport your furthest-along stone onto any enemy in shared water and take it — straight through shields, Wards, and Bulwarks — then empty their ENTIRE bank on the spot. A capture and a robbery in the same breath.",
   },
+  bloodPact: {
+    name: "Blood Pact",
+    cost: "Passive · always on",
+    klass: "warlock",
+    desc: `Your dead pay you. Every stone of yours sent home banks ${BLOOD_PACT_CHARGES} mana — the only class that profits from losing. It pays for blood your enemies spill, never for the stone you spend yourself on a Sacrifice.`,
+  },
+  curse: {
+    name: "Curse of Chains",
+    cost: `${CURSE_COST} mana · keeps your turn`,
+    klass: "warlock",
+    desc: `Shackle one enemy stone in shared water: every move it makes is ${CURSE_SLOW} tile shorter, and a flip of ${CURSE_SLOW} leaves it unable to move at all. Lasts ${CURSE_TURNS} of their turns. No shield, Ward or Bulwark stops it — the chains bind the legs, not the armour. Your turn continues: hex first, then still make your move.`,
+  },
+  sacrifice: {
+    name: "Sacrifice",
+    cost: `${SACRIFICE_COST} mana`,
+    klass: "warlock",
+    desc: "Give your furthest-along stone to the dark and one enemy in shared water dies outright — straight through a Ward or a Blessing, with no wound and no second life. A Bulwark, a Vanish or a shield tile still turns it aside. The ritual demands your best, not your worst.",
+  },
+  felStorm: {
+    name: "Fel Storm",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "warlock",
+    desc: "Green fire sweeps the whole shared row: every enemy stone in open water is dragged back to the water's edge, through every protection there is. Nobody dies — they just have the whole gauntlet to run again.",
+  },
+  wolfCompanion: {
+    name: "Wolf Companion",
+    cost: "Passive · always on",
+    klass: "hunter",
+    desc: "Your wolf ranges ahead of your furthest-along stone, guarding the tile directly in front of it. Any enemy that lands there is taken — no mana, no action, no warning beyond the mark on the board. A shield tile, a Ward or a Bulwark walks past it safely.",
+  },
+  snare: {
+    name: "Snare",
+    cost: `${SNARE_COST} mana · keeps your turn`,
+    klass: "hunter",
+    desc: `Arm a trap on any empty tile in shared water — both sides can see it, so making them route around it is half the point. The first enemy to land on it is thrown ${TRAP_KNOCKBACK} tiles back and pays you ${TRAP_BOUNTY} mana for the trouble. One trap at a time; setting a new one lifts the old. Your turn continues.`,
+  },
+  piercingShot: {
+    name: "Piercing Shot",
+    cost: `${PIERCING_SHOT_COST} mana`,
+    klass: "hunter",
+    desc: "Loose an arrow down the shared row from your furthest-along stone: the first enemy in its path dies, at any range. The first body stops the arrow though — a shielded, Warded, Bulwarked or Vanished stone blocks the shot for everything behind it, and so does one of your own.",
+  },
+  wildHunt: {
+    name: "Wild Hunt",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "hunter",
+    desc: "Every trap snaps shut at once. Your wolf takes the nearest enemy in shared water through every protection there is, and every other enemy out there is frozen solid for one of their turns — they cannot move those stones at all.",
+  },
+  rage: {
+    name: "Rage",
+    cost: "Passive · always on",
+    klass: "barbarian",
+    desc: `The further behind you fall, the harder you run. For every stone you have lost more than your opponent has, your rearmost stone moves ${1} extra tile — up to ${RAGE_MAX}. Only that one stone; the rest of the army keeps its normal pace. Get ahead and the rage cools.`,
+  },
+  recklessSwing: {
+    name: "Reckless Swing",
+    cost: `${RECKLESS_SWING_COST} mana`,
+    klass: "barbarian",
+    desc: `Bring the axe down on an enemy standing directly in front of one of your stones — straight through a Bulwark or a Vanish, which nothing else you own can touch. The blow throws YOUR stone ${RECKLESS_SELF_KNOCKBACK} tiles back, and if there's nowhere to land it goes home. A Ward or a shield tile still turns it aside.`,
+  },
+  whirlwind: {
+    name: "Whirlwind",
+    cost: `${WHIRLWIND_COST} mana`,
+    klass: "barbarian",
+    desc: `Spin the axe: every unprotected enemy standing within a tile of ANY of your stones is caught. The furthest-along ${WHIRLWIND_CAP} of them dies; the rest are knocked back a tile. You don't move at all — the storm comes to them.`,
+  },
+  bloodbath: {
+    name: "Bloodbath",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "barbarian",
+    desc: "Your furthest-along stone charges the length of shared water and takes EVERY enemy in its path — no cap, no shield, no Ward, no Bulwark, nothing. It finishes standing at the far end of the row.",
+  },
+  encore: {
+    name: "Encore",
+    cost: "Passive · always on",
+    klass: "bard",
+    desc: `A dead flip is just a rest between verses: every zero pays you ${ENCORE_ZERO_FLIP_CHARGES} mana instead of one, and your purse runs ${BARD_CHARGE_CAP} deep where everyone else's holds ${CHARGE_CAP}. The song has to be paid for somehow.`,
+  },
+  inspire: {
+    name: "Inspire",
+    cost: `${INSPIRE_COST} mana · keeps your turn`,
+    klass: "bard",
+    desc: `Light one of your stones: every move it makes is ${INSPIRE_BONUS} tile longer, for ${INSPIRE_TURNS} of your turns. Up to ${INSPIRE_CAP} can burn at once. The song never carries a stone past the finish — it needs the exact step home like anyone else. Your turn continues: sing, then still move.`,
+  },
+  songOfHaste: {
+    name: "Song of Haste",
+    cost: `${HASTE_COST} mana`,
+    klass: "bard",
+    desc: `Every stone you have lit marches ${HASTE_TILES} tiles at once — no flip needed, capturing anything unprotected it lands on, and taking the exact step home if it lands there. The more of your army is singing, the more this is worth. The inspirations survive it.`,
+  },
+  crescendo: {
+    name: "Crescendo",
+    cost: "Ultimate · 3 shield landings in a row",
+    klass: "bard",
+    desc: `The whole company takes it up: every stone you have on the board is lit at once — past the usual limit of ${INSPIRE_CAP} — and every one of them marches ${CRESCENDO_TILES} tiles on the spot.`,
+  },
 };
 
 const abilityTip = document.getElementById("ability-tip") as HTMLDivElement;
@@ -2258,6 +2468,22 @@ const DOCK_COST: Record<string, number> = {
   pickpocket: PICKPOCKET_COST,
   vanish: VANISH_COST,
   grandHeist: 0,
+  bloodPact: 0,
+  curse: CURSE_COST,
+  sacrifice: SACRIFICE_COST,
+  felStorm: 0,
+  wolfCompanion: 0,
+  snare: SNARE_COST,
+  piercingShot: PIERCING_SHOT_COST,
+  wildHunt: 0,
+  rage: 0,
+  recklessSwing: RECKLESS_SWING_COST,
+  whirlwind: WHIRLWIND_COST,
+  bloodbath: 0,
+  encore: 0,
+  inspire: INSPIRE_COST,
+  songOfHaste: HASTE_COST,
+  crescendo: 0,
 };
 /** Short names for the 10px labels under the gems (cards carry full names). */
 const DOCK_NAMES: Record<string, string> = {
@@ -2285,6 +2511,22 @@ const DOCK_NAMES: Record<string, string> = {
   pickpocket: "Pickpocket",
   vanish: "Vanish",
   grandHeist: "Grand Heist",
+  bloodPact: "Blood Pact",
+  curse: "Curse",
+  sacrifice: "Sacrifice",
+  felStorm: "Fel Storm",
+  wolfCompanion: "Wolf",
+  snare: "Snare",
+  piercingShot: "Piercing Shot",
+  wildHunt: "Wild Hunt",
+  rage: "Rage",
+  recklessSwing: "Reckless",
+  whirlwind: "Whirlwind",
+  bloodbath: "Bloodbath",
+  encore: "Encore",
+  inspire: "Inspire",
+  songOfHaste: "Song of Haste",
+  crescendo: "Crescendo",
 };
 /** Slot order per class. Ult slots are ALWAYS built — dormant until ready,
  *  so the goal is visible from turn one. Archer's ult (Rain of Arrows) is
@@ -2332,6 +2574,30 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "vanish" },
     { ability: "grandHeist", ult: true },
   ],
+  warlock: [
+    { ability: "bloodPact", passive: true },
+    { ability: "curse" },
+    { ability: "sacrifice" },
+    { ability: "felStorm", ult: true },
+  ],
+  hunter: [
+    { ability: "wolfCompanion", passive: true },
+    { ability: "snare" },
+    { ability: "piercingShot" },
+    { ability: "wildHunt", ult: true },
+  ],
+  barbarian: [
+    { ability: "rage", passive: true },
+    { ability: "recklessSwing" },
+    { ability: "whirlwind" },
+    { ability: "bloodbath", ult: true },
+  ],
+  bard: [
+    { ability: "encore", passive: true },
+    { ability: "inspire" },
+    { ability: "songOfHaste" },
+    { ability: "crescendo", ult: true },
+  ],
 };
 /** Ground-ring tint while targeting — the caster's class color (the ring
  *  texture is drawn white so this is a plain material recolor, see tick()). */
@@ -2351,6 +2617,14 @@ const DOCK_RING_TINTS: Record<PlayerClass, number> = {
   // ability tip). Lockstep with index.html's data-class="rogue" blocks,
   // same rule as every other class's.
   rogue: 0x9fb4c9,
+  // The 2026-07-26 four. Required entries even though none of them is
+  // selectable yet — this Record is keyed by the full PlayerClass union, so
+  // it wouldn't compile without them. Same lockstep rule with index.html:
+  // acid lime, glacial teal, ember orange, footlight magenta.
+  warlock: 0xa4e034,
+  hunter: 0x2fd6d0,
+  barbarian: 0xff7a1a,
+  bard: 0xff3d8b,
 };
 /** What the ribbon asks the player to do, per armed ability. */
 const RIBBON_COPY: Record<ArmedKind, string> = {
@@ -2366,6 +2640,11 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   pickpocket: "tap a glowing enemy stone",
   vanish: "tap one of your stones to hide it",
   grandHeist: "tap an enemy to strike",
+  curse: "tap an enemy stone to shackle",
+  sacrifice: "tap the enemy to kill — your lead stone pays",
+  snare: "tap a glowing empty tile to set the trap",
+  recklessSwing: "tap the enemy to cut down — you'll be thrown back",
+  inspire: "tap one of your stones to light it",
 };
 
 /** Class the dock is currently built for — rebuild only on change. */
@@ -2503,6 +2782,69 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
       if ((p.grandHeistTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
+    case "curse": {
+      if ((p.curseTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < CURSE_COST) return { state: "noafford", reason: needCharges(CURSE_COST) };
+      return { state: "noafford", reason: "No one left to shackle" };
+    }
+    case "sacrifice": {
+      if ((p.sacrificeTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < SACRIFICE_COST) return { state: "noafford", reason: needCharges(SACRIFICE_COST) };
+      // The oracle folds two remaining refusals together (no stone of your
+      // own to give, no reachable enemy). Naming the commoner one is more
+      // use than a vaguer line that covers both.
+      return { state: "noafford", reason: "No enemy the ritual can reach" };
+    }
+    case "felStorm":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.felStormTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
+      return { state: "ready" };
+    case "snare": {
+      if ((p.snareTiles ?? []).length > 0) return { state: "ready" };
+      if (charges < SNARE_COST) return { state: "noafford", reason: needCharges(SNARE_COST) };
+      return { state: "noafford", reason: "No open water to trap" };
+    }
+    case "piercingShot": {
+      if ((p.piercingShotTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < PIERCING_SHOT_COST) return { state: "noafford", reason: needCharges(PIERCING_SHOT_COST) };
+      // The oracle's other refusal is the interesting one, and it is the
+      // ability's actual counterplay rather than a resource problem.
+      return { state: "noafford", reason: "No clear shot — something blocks the lane" };
+    }
+    case "wildHunt":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.wildHuntTargets ?? []).length === 0) return { state: "noafford", reason: "Nothing left to hunt" };
+      return { state: "ready" };
+    case "recklessSwing": {
+      if ((p.recklessSwingTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < RECKLESS_SWING_COST) return { state: "noafford", reason: needCharges(RECKLESS_SWING_COST) };
+      return { state: "noafford", reason: "Nothing standing in front of you" };
+    }
+    case "whirlwind": {
+      if ((p.whirlwindTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < WHIRLWIND_COST) return { state: "noafford", reason: needCharges(WHIRLWIND_COST) };
+      return { state: "noafford", reason: "Nothing within reach of your stones" };
+    }
+    case "bloodbath":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.bloodbathTargets ?? []).length === 0) return { state: "noafford", reason: "Nothing in the charge's path" };
+      return { state: "ready" };
+    case "inspire": {
+      if ((p.inspireTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < INSPIRE_COST) return { state: "noafford", reason: needCharges(INSPIRE_COST) };
+      // The other refusal is the CAP, which is the interesting one — it
+      // tells the player to spend the light they already have.
+      return { state: "noafford", reason: `Already ${INSPIRE_CAP} stones alight` };
+    }
+    case "songOfHaste": {
+      if ((p.songOfHasteTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < HASTE_COST) return { state: "noafford", reason: needCharges(HASTE_COST) };
+      return { state: "noafford", reason: "No lit stones to carry the song" };
+    }
+    case "crescendo":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.crescendoTargets ?? []).length === 0) return { state: "noafford", reason: "No one on the board to sing to" };
+      return { state: "ready" };
   }
   return { state: "noafford" };
 }
@@ -2605,6 +2947,33 @@ function updateDock(active?: boolean) {
   }
 }
 
+/** Snare targets a TILE, but the board has no tile picker yet (rings are
+ *  indexed by stone). Until it does, the client offers the placement by
+ *  proxy: tap one of your own stones and the trap is armed on the tile
+ *  directly in front of it. The SERVER contract is already the general one
+ *  (getSnareTiles accepts any legal empty contested square), so a real tile
+ *  picker can widen this later without touching a line of rules code — this
+ *  narrows what the UI offers, not what the game allows.
+ *
+ *  Returns the ids of the mover's own stones whose forward tile is actually
+ *  a legal trap site, so a stone with nowhere to set never lights up. */
+function snareStoneTargets(p: NonNullable<typeof currentPower>): number[] {
+  const legal = new Set(p.snareTiles ?? []);
+  const mySide: PlayerId = myRole ?? "p1";
+  const state = lastRenderedState;
+  if (!state || legal.size === 0) return [];
+  return state.tokens
+    .filter((t) => t.owner === mySide && t.position >= 0 && legal.has(t.position + 1))
+    .map((t) => t.id);
+}
+
+/** The tile a Snare tap actually arms — the square in front of the tapped
+ *  stone (see snareStoneTargets). */
+function snareTileForStone(tokenId: number): number | null {
+  const t = lastRenderedState?.tokens.find((tok) => tok.id === tokenId);
+  return t && t.position >= 0 ? t.position + 1 : null;
+}
+
 /** Enter targeting mode for `kind`: lock the gem, dim its siblings, raise
  *  the vignette + instruction ribbon, and re-point the ground rings at the
  *  target set in the caster's class color (see tick()). Arming over another
@@ -2634,7 +3003,17 @@ function armAbility(kind: ArmedKind) {
                       ? (p.vanishTargets ?? [])
                       : kind === "grandHeist"
                         ? (p.grandHeistTargets ?? [])
-                        : p.bulwarkTargets, // bulwark / bulwarkReinforced
+                        : kind === "curse"
+                          ? (p.curseTargets ?? [])
+                          : kind === "sacrifice"
+                            ? (p.sacrificeTargets ?? [])
+                            : kind === "snare"
+                              ? snareStoneTargets(p)
+                              : kind === "recklessSwing"
+                                ? (p.recklessSwingTargets ?? [])
+                                : kind === "inspire"
+                                  ? (p.inspireTargets ?? [])
+                                  : p.bulwarkTargets, // bulwark / bulwarkReinforced
   );
   if (ids.size === 0) return;
   armed = { kind, targetIds: ids };
@@ -2704,6 +3083,30 @@ function fireArmed(tokenId: number) {
     case "grandHeist":
       sendToServer({ type: "usePower", action: { kind: "grandHeist", targetTokenId: tokenId } });
       break;
+    case "curse":
+      sendToServer({ type: "usePower", action: { kind: "curse", targetTokenId: tokenId } });
+      break;
+    case "sacrifice":
+      // Only the VICTIM is named — the stone given is server-selected (the
+      // caster's most-advanced), never client-supplied.
+      sendToServer({ type: "usePower", action: { kind: "sacrifice", targetTokenId: tokenId } });
+      break;
+    case "inspire":
+      sendToServer({ type: "usePower", action: { kind: "inspire", targetTokenId: tokenId } });
+      break;
+    case "recklessSwing":
+      // Only the VICTIM is named — the swinger is whichever stone stands
+      // directly behind it, decided by the board, never client-supplied.
+      sendToServer({ type: "usePower", action: { kind: "recklessSwing", targetTokenId: tokenId } });
+      break;
+    case "snare": {
+      // The tap named a stone; the wire carries the TILE in front of it
+      // (see snareStoneTargets) — the server re-validates that tile against
+      // its own oracle, so this proxy can never widen what's legal.
+      const tile = snareTileForStone(tokenId);
+      if (tile !== null) sendToServer({ type: "usePower", action: { kind: "snare", tile } });
+      break;
+    }
   }
   flashDockButton(kind, "fired");
 }
@@ -2825,6 +3228,53 @@ dockEl.addEventListener("click", (e) => {
     // on-board army" — a board tap would be a choice carrying no
     // information. The server re-validates against the shared oracle.
     sendToServer({ type: "usePower", action: { kind: "benediction" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "felStorm") {
+    // Instant, Benediction's precedent: the pool is "every enemy in shared
+    // water" — the whole row is the target, so a board tap would be a
+    // choice carrying no information. Server re-validates the same oracle.
+    sendToServer({ type: "usePower", action: { kind: "felStorm" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "piercingShot") {
+    // Instant: the arrow's own path picks the victim server-side, so a
+    // board tap would be a choice carrying no information (Revive's
+    // precedent). The dock gate already confirmed a clear shot exists.
+    sendToServer({ type: "usePower", action: { kind: "piercingShot" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "wildHunt") {
+    // Instant, Fel Storm's precedent: the whole row is the target and the
+    // wolf picks its own quarry.
+    sendToServer({ type: "usePower", action: { kind: "wildHunt" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "whirlwind") {
+    // Instant: everything in reach is caught, so there is nothing to aim.
+    sendToServer({ type: "usePower", action: { kind: "whirlwind" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "bloodbath") {
+    // Instant, Fel Storm's precedent: the lead stone runs the whole row.
+    sendToServer({ type: "usePower", action: { kind: "bloodbath" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "songOfHaste") {
+    // Instant: every lit stone marches, so there is nothing to aim.
+    sendToServer({ type: "usePower", action: { kind: "songOfHaste" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "crescendo") {
+    // Instant, Benediction's precedent: the whole army is the subject.
+    sendToServer({ type: "usePower", action: { kind: "crescendo" } });
     flashDockButton(ability, "fired");
     return;
   }
@@ -3014,6 +3464,38 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         klass: "cleric",
         desc: "This stone's blessing broke absorbing a killing blow. It fights on with one life like any mortal stone — until the Cleric spends a turn to Heal it, mends it by landing on a shield tile, or blesses the army anew with Benediction.",
       };
+    case "inspired": {
+      const turns = currentPower.inspired?.[tokenId];
+      const mine = (tokenId < 4 ? "p1" : "p2") === (myRole ?? "p1");
+      return {
+        name: "Inspired",
+        cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left`,
+        klass: "bard",
+        desc: `The Bard's song carries ${mine ? "this stone of yours" : "this stone"}: every move it makes is ${INSPIRE_BONUS} tile longer. It still needs the exact step to come home — the song never overshoots the finish. A Song of Haste marches every lit stone at once.`,
+      };
+    }
+    case "frozen": {
+      const turns = currentPower.hamstrung?.[tokenId];
+      const mine = (tokenId < 4 ? "p1" : "p2") === (myRole ?? "p1");
+      return {
+        name: "Frozen",
+        cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left`,
+        klass: "hunter",
+        desc: `The Wild Hunt has run ${mine ? "your" : "this"} stone to ground: it cannot move at all until the freeze lifts. Every other stone in the army moves normally, and nothing else about this one changes — it can still be captured, and it still blocks its tile.`,
+      };
+    }
+    case "cursed": {
+      const turns = currentPower.cursed?.[tokenId];
+      // Token ids are array-ordered 0-7 by construction (0-3 p1, 4-7 p2) —
+      // the same assumption `const tokenId = idx` above already rests on.
+      const mine = (tokenId < 4 ? "p1" : "p2") === (myRole ?? "p1");
+      return {
+        name: "Chained",
+        cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left`,
+        klass: "warlock",
+        desc: `A Warlock's chains drag on ${mine ? "your" : "this"} stone: every move it makes is ${CURSE_SLOW} tile shorter, and a flip of ${CURSE_SLOW} leaves it unable to move at all. Only this stone is slowed — the rest of the army runs free. No shield or Ward lifts it; it wears off on its own.`,
+      };
+    }
   }
   return null;
 }
@@ -3837,6 +4319,178 @@ function announceFromState(msg: {
     showAnnouncement(
       `${subject} slipped ${target} token into the shadows${chargeFor(msg.lastMovePlayer)}`,
       "shield",
+    );
+    return;
+  }
+
+  if (msg.lastCurse && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const target = isMe ? "an enemy" : "one of your";
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Cursed!", "curse");
+    showAnnouncement(
+      `${subject} bound ${target} ${isMe ? "stone" : "stones"} in chains${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastSacrifice && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Sacrifice!", "sacrifice");
+    showAnnouncement(
+      `${subject} gave ${isMe ? "your" : "their"} lead stone to the dark — ${isMe ? "an enemy" : "one of yours"} died with it${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastFelStorm && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const n = msg.lastFelStorm.struckTokenIds.length;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Fel Storm!", "felStorm");
+    showAnnouncement(
+      `${subject} called a Fel Storm — ${n} ${n === 1 ? "stone" : "stones"} dragged back to open water`,
+      "capture",
+    );
+    return;
+  }
+
+  // The Hunter's reactive layer belongs to the DEFENDER, not the mover —
+  // both of these fire on the opponent's landing, so the subject is the
+  // player who did NOT just move.
+  if (msg.lastWolfBite && msg.lastMovePlayer) {
+    const hunter = msg.lastMovePlayer === "p1" ? "p2" : "p1";
+    const isMine = hunter === myRole;
+    const k = classOf(hunter);
+    if (k) showProc(k, "Wolf!", "wolfCompanion");
+    showAnnouncement(
+      isMine
+        ? "Your wolf took a stone that strayed too close"
+        : "Their wolf took your stone — it strayed onto the guarded tile",
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastTrapSprung && msg.lastMovePlayer) {
+    const hunter = msg.lastMovePlayer === "p1" ? "p2" : "p1";
+    const isMine = hunter === myRole;
+    const k = classOf(hunter);
+    if (k) showProc(k, "Snared!", "snare");
+    showAnnouncement(
+      isMine
+        ? `Your snare caught one — ${msg.lastTrapSprung.sentHome ? "sent home" : "thrown back"}`
+        : `You stepped in a snare — ${msg.lastTrapSprung.sentHome ? "sent home" : "thrown back"}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastPiercingShot && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Piercing Shot!", "piercingShot");
+    const hit = msg.lastPiercingShot.woundedTokenId !== null ? "the arrow broke a blessing" : "the arrow found its mark";
+    showAnnouncement(`${subject} loosed a Piercing Shot — ${hit}${chargeFor(msg.lastMovePlayer)}`, "capture");
+    return;
+  }
+
+  if (msg.lastWildHunt && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const n = msg.lastWildHunt.frozenTokenIds.length;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Wild Hunt!", "wildHunt");
+    const froze = n > 0 ? `, ${n} more frozen where they stand` : "";
+    showAnnouncement(
+      `${subject} called the Wild Hunt — the wolf took its quarry${froze}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastInspire && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Inspired!", "inspire");
+    showAnnouncement(
+      `${subject} lit ${isMe ? "one of your" : "one of their"} stones with the song${chargeFor(msg.lastMovePlayer)}`,
+      "shield",
+    );
+    return;
+  }
+
+  if (msg.lastSongOfHaste && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const n = msg.lastSongOfHaste.movedIds.length;
+    const took = msg.lastSongOfHaste.capturedIds.length;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Haste!", "songOfHaste");
+    const tail = took > 0 ? `, running down ${took}` : "";
+    showAnnouncement(
+      `${subject} struck up the Song of Haste — ${n} ${n === 1 ? "stone" : "stones"} marched${tail}${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastCrescendo && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const n = msg.lastCrescendo.inspiredIds.length;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Crescendo!", "crescendo");
+    showAnnouncement(
+      `${subject} brought the whole company in — ${n} ${n === 1 ? "stone" : "stones"} lit and marching`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastRecklessSwing && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Reckless!", "recklessSwing");
+    const hit = msg.lastRecklessSwing.woundedTokenId !== null ? "broke a blessing" : "cut one down";
+    const cost = msg.lastRecklessSwing.swingerSentHome ? " — and the swing sent them home too" : "";
+    showAnnouncement(`${subject} ${hit}${cost}${chargeFor(msg.lastMovePlayer)}`, "capture");
+    return;
+  }
+
+  if (msg.lastWhirlwind && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const took = msg.lastWhirlwind.capturedTokenIds.length;
+    const shoved = msg.lastWhirlwind.knockedTokenIds.length;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Whirlwind!", "whirlwind");
+    const tail = shoved > 0 ? `, ${shoved} more scattered` : "";
+    showAnnouncement(
+      `${subject} spun the axe — ${took} taken${tail}${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastBloodbath && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const n = msg.lastBloodbath.killedTokenIds.length;
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Bloodbath!", "bloodbath");
+    showAnnouncement(
+      `${subject} charged the whole row — ${n} ${n === 1 ? "stone" : "stones"} run down`,
+      "capture",
     );
     return;
   }
@@ -4947,7 +5601,12 @@ function renderClassPick(msg: { classes: Record<PlayerId, PlayerClass | null>; r
   for (const btn of classButtons) {
     const cls = btn.dataset.class as PlayerClass;
     btn.classList.toggle("picked", cls === mine);
-    btn.disabled = mine !== null;
+    // data-unreleased tiles (portrait shipped, kit not yet — see the markup's
+    // own note) stay disabled through every render, including the initial one
+    // where nothing is picked and every other tile is live. The authoritative
+    // check is room-engine's pickClass validation against MK_CLASSES; this
+    // just keeps the button from looking clickable.
+    btn.disabled = mine !== null || btn.dataset.unreleased !== undefined;
   }
   classpickStatus.textContent =
     mine === null ? "Pick your class" : msg.ready ? "Both crews ready…" : "Waiting for opponent to pick…";
@@ -6097,7 +6756,14 @@ setInterval(() => {
 const dockDemoParam =
   location.hostname === "localhost" ? new URLSearchParams(location.search).get("dockdemo") : null;
 if (dockDemoParam !== null) {
-  const cls: PlayerClass = ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"].includes(dockDemoParam)
+  // Includes the still-kitless classes on purpose: they have no ability
+  // rail to demo yet, but this is the only way to see a new class's
+  // gem/ring/tint palette without a live game, which is what the colour
+  // pass needs.
+  const cls: PlayerClass = [
+    "archer", "mage", "warrior", "necromancer", "cleric", "rogue",
+    "warlock", "hunter", "barbarian", "bard",
+  ].includes(dockDemoParam)
     ? (dockDemoParam as PlayerClass)
     : "warrior";
   menuEl.classList.remove("show");
@@ -6134,6 +6800,24 @@ if (dockDemoParam !== null) {
       pickpocketTargets: cls === "rogue" && d.charges >= PICKPOCKET_COST ? [4] : [],
       vanishTargets: cls === "rogue" && d.charges >= VANISH_COST ? [0, 1, 2] : [],
       grandHeistTargets: cls === "rogue" && d.ult ? [4] : [],
+      curseTargets: cls === "warlock" && d.charges >= CURSE_COST ? [4] : [],
+      sacrificeTargets: cls === "warlock" && d.charges >= SACRIFICE_COST ? [4] : [],
+      felStormTargets: cls === "warlock" && d.ult ? [4, 5] : [],
+      cursed: {},
+      snareTiles: cls === "hunter" && d.charges >= SNARE_COST ? [6, 8, 9] : [],
+      piercingShotTargets: cls === "hunter" && d.charges >= PIERCING_SHOT_COST ? [4] : [],
+      wildHuntTargets: cls === "hunter" && d.ult ? [4, 5] : [],
+      traps: { p1: null, p2: null },
+      wolfGuard: { p1: null, p2: null },
+      hamstrung: {},
+      recklessSwingTargets: cls === "barbarian" && d.charges >= RECKLESS_SWING_COST ? [4] : [],
+      whirlwindTargets: cls === "barbarian" && d.charges >= WHIRLWIND_COST ? [4, 5] : [],
+      bloodbathTargets: cls === "barbarian" && d.ult ? [4, 5] : [],
+      rage: { p1: 1, p2: 0 },
+      inspireTargets: cls === "bard" && d.charges >= INSPIRE_COST ? [0, 1] : [],
+      songOfHasteTargets: cls === "bard" && d.charges >= HASTE_COST ? [0] : [],
+      crescendoTargets: cls === "bard" && d.ult ? [0, 1, 2] : [],
+      inspired: {},
     };
     currentPowerMoves =
       cls === "warrior"

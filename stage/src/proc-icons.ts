@@ -50,7 +50,23 @@ export type ProcIconId =
   | "larceny"
   | "pickpocket"
   | "vanish"
-  | "grandHeist";
+  | "grandHeist"
+  | "bloodPact"
+  | "curse"
+  | "sacrifice"
+  | "felStorm"
+  | "wolfCompanion"
+  | "snare"
+  | "piercingShot"
+  | "wildHunt"
+  | "rage"
+  | "recklessSwing"
+  | "whirlwind"
+  | "bloodbath"
+  | "encore"
+  | "inspire"
+  | "songOfHaste"
+  | "crescendo";
 
 // Fixed frame gold — matches the plate/frame trim, constant across classes.
 const GOLD = "var(--gold-text, #e8c87e)";
@@ -95,6 +111,44 @@ const DAGGER =
   diamond(24, 40.5);
 const COIN = (cx: number, cy: number, r = 6): string =>
   `<circle cx="${cx}" cy="${cy}" r="${r}" ${MAIN} ${BODY}/>` + `<circle cx="${cx}" cy="${cy}" r="${r * 0.45}" ${DETAIL}/>`;
+
+// Warlock family: one chain LINK, reused so Blood Pact / Curse of Chains /
+// Sacrifice / Fel Storm stay siblings (the warrior shield rule) — the
+// avatar's chained souls made into a mark. A drop of blood carries the
+// pact half of the identity across the same four icons.
+const LINK = (cx: number, cy: number, rx = 5, ry = 3.4, rot = 0): string =>
+  `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" ${MAIN}` +
+  `${rot ? ` transform="rotate(${rot} ${cx} ${cy})"` : ""}/>`;
+// Hunter family: a fanged jaw and the guarded TILE beneath it, reused so
+// Wolf Companion / Snare / Wild Hunt stay siblings (the warrior shield
+// rule) — the arrow of Piercing Shot is the one deliberate departure, since
+// that ability is the bow rather than the beast.
+const FANGS = (cx: number, cy: number): string =>
+  `<path d="M${cx - 11} ${cy - 6} Q${cx} ${cy + 3} ${cx + 11} ${cy - 6}" ${MAIN} ${BODY}/>` +
+  `<path d="M${cx - 6} ${cy - 2} L${cx - 4} ${cy + 4} L${cx - 2} ${cy - 1}" ${DETAIL}/>` +
+  `<path d="M${cx + 2} ${cy - 1} L${cx + 4} ${cy + 4} L${cx + 6} ${cy - 2}" ${DETAIL}/>`;
+// Bard family: one quaver — filled bowl and a stem — reused so Encore /
+// Inspire / Song of Haste / Crescendo stay siblings (the warrior shield
+// rule). `s` scales it for the multi-note icons.
+const NOTE = (cx: number, cy: number, s = 1): string =>
+  `<ellipse cx="${cx}" cy="${cy}" rx="${6 * s}" ry="${4.4 * s}" ${MAIN} ${BODY} transform="rotate(-20 ${cx} ${cy})"/>` +
+  `<path d="M${cx + 5.4 * s} ${cy - 1.5 * s} L${cx + 5.4 * s} ${cy - 20 * s}" ${MAIN}/>` +
+  `<path d="M${cx + 5.4 * s} ${cy - 20 * s} Q${cx + 13 * s} ${cy - 17 * s} ${cx + 11 * s} ${cy - 9 * s}" ${MAIN}/>`;
+
+// Barbarian family: one broad axe head on a haft, reused so Rage /
+// Reckless Swing / Whirlwind / Bloodbath stay siblings (the warrior shield
+// rule). Drawn head-down so it reads as weight rather than a raised guard.
+const AXE = (cx: number, cy: number): string =>
+  `<path d="M${cx} ${cy - 14} L${cx} ${cy + 16}" ${MAIN}/>` +
+  `<path d="M${cx} ${cy - 12} Q${cx - 13} ${cy - 8} ${cx - 9} ${cy + 3} Q${cx - 4} ${cy - 1} ${cx} ${cy} Z" ${MAIN} ${BODY}/>` +
+  `<path d="M${cx} ${cy - 12} Q${cx + 13} ${cy - 8} ${cx + 9} ${cy + 3} Q${cx + 4} ${cy - 1} ${cx} ${cy} Z" ${MAIN} ${BODY}/>`;
+
+const TILE = (cx: number, cy: number, r = 8): string =>
+  `<path d="M${cx} ${cy - r} L${cx + r} ${cy} L${cx} ${cy + r} L${cx - r} ${cy} Z" ${GOLD_DETAIL}/>`;
+
+const DROP = (cx: number, cy: number, r = 4.2, fill = "currentColor"): string =>
+  `<path d="M${cx} ${cy - r * 1.6} C${cx + r} ${cy - r * 0.2} ${cx + r} ${cy + r} ${cx} ${cy + r} ` +
+  `C${cx - r} ${cy + r} ${cx - r} ${cy - r * 0.2} ${cx} ${cy - r * 1.6} Z" ${MAIN} fill="${fill}" fill-opacity="0.18"/>`;
 
 export const PROC_ICONS: Record<ProcIconId, string> = {
   // Archer active: a token shoved sideways by force — a solid wedge of it
@@ -444,5 +498,156 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       COIN(7, 27, 4) +
       `<path d="M19 22 A24 24 0 0 0 4 8" ${GOLD_DETAIL}/>` +
       `<path d="M29 22 A24 24 0 0 1 44 8" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Warlock passive: a drop of the warlock's own blood falling THROUGH the
+  // link — the pact paying out. The link is open at the bottom because
+  // this is the one warlock icon where the chain gives rather than binds.
+  bloodPact: wrap(
+    LINK(24, 15, 6, 4) +
+      DROP(24, 30, 5) +
+      `<path d="M24 19 L24 24" ${GOLD_DETAIL}/>` +
+      diamond(24, 37, 2, GOLD),
+  ),
+
+  // Warlock active: three links closed around a stone — the chains that
+  // shorten its stride. The stone is drawn small and hemmed in.
+  curse: wrap(
+    `<circle cx="24" cy="24" r="5.5" ${MAIN} ${BODY}/>` +
+      LINK(24, 12, 5.5, 3.6) +
+      LINK(24, 36, 5.5, 3.6) +
+      `<path d="M24 15.5 L24 18.5" ${DETAIL}/>` +
+      `<path d="M24 29.5 L24 32.5" ${DETAIL}/>` +
+      LINK(11, 24, 5.5, 3.6, 90) +
+      LINK(37, 24, 5.5, 3.6, 90),
+  ),
+
+  // Warlock active: the link BREAKING — one of the warlock's own stones
+  // spent, the blood of it feeding the strike. The upper half is severed
+  // and the drop falls from the break.
+  sacrifice: wrap(
+    `<path d="M17 12 A6 4 0 0 1 24 10" ${MAIN}/>` +
+      `<path d="M31 12 A6 4 0 0 0 24 10" ${MAIN}/>` +
+      `<path d="M16 15 L20 19" ${MAIN}/>` +
+      `<path d="M32 15 L28 19" ${MAIN}/>` +
+      DROP(24, 28, 5.5) +
+      diamond(24, 38, 2.4, GOLD),
+  ),
+
+  // Bard passive: a coin caught inside the note's bowl — the dead flip
+  // paying for the next verse. NOTE is the family motif (see below), reused
+  // so Encore / Inspire / Haste / Crescendo read as one kit.
+  encore: wrap(NOTE(20, 30) + COIN(33, 16, 5)),
+
+  // Bard active: one note, raised and haloed — a single stone lit.
+  inspire: wrap(
+    NOTE(24, 30) +
+      `<path d="M24 6 A9 9 0 0 1 33 15" ${GOLD_DETAIL}/>` +
+      `<path d="M24 6 A9 9 0 0 0 15 15" ${GOLD_DETAIL}/>` +
+      diamond(24, 4, 2, GOLD),
+  ),
+
+  // Bard active: three notes running rightward along a stave — the march.
+  songOfHaste: wrap(
+    `<path d="M4 40 L44 40" ${GOLD_DETAIL}/>` +
+      NOTE(11, 34, 0.62) +
+      NOTE(24, 30, 0.62) +
+      NOTE(37, 26, 0.62) +
+      `<path d="M13 22 L26 18" ${DETAIL}/>` +
+      `<path d="M26 18 L39 14" ${DETAIL}/>`,
+  ),
+
+  // Bard ultimate: the full chord — four notes rising together off one bar.
+  crescendo: wrap(
+    NOTE(9, 38, 0.5) +
+      NOTE(20, 33, 0.5) +
+      NOTE(31, 28, 0.5) +
+      NOTE(42, 23, 0.5) +
+      `<path d="M6 44 L44 44" ${GOLD_DETAIL}/>` +
+      `<path d="M6 44 L44 16" ${DETAIL}/>`,
+  ),
+
+  // Barbarian passive: the axe head alone, wreathed — rage is the weapon
+  // itself, not a swing of it. AXE is the family motif (see below), reused
+  // so Rage / Reckless / Whirlwind / Bloodbath read as one kit.
+  rage: wrap(
+    AXE(24, 26) +
+      `<path d="M12 12 Q15 7 18 12" ${GOLD_DETAIL}/>` +
+      `<path d="M30 12 Q33 7 36 12" ${GOLD_DETAIL}/>` +
+      `<path d="M21 9 Q24 4 27 9" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Barbarian active: the axe mid-swing, and the recoil arrow that is the
+  // ability's whole price — the one icon here that shows a cost.
+  recklessSwing: wrap(
+    AXE(27, 24) +
+      `<path d="M14 34 A14 14 0 0 1 20 18" ${GOLD_DETAIL}/>` +
+      `<path d="M11 30 L14 35 L18 32" fill="${GOLD}"/>`,
+  ),
+
+  // Barbarian active: the axe spun full circle — the head repeated round a
+  // ring rather than one strike.
+  whirlwind: wrap(
+    `<circle cx="24" cy="24" r="13" ${DETAIL}/>` +
+      `<path d="M24 8 L28 14 L24 17 L20 14 Z" ${MAIN} ${BODY}/>` +
+      `<path d="M40 24 L34 28 L31 24 L34 20 Z" ${MAIN} ${BODY}/>` +
+      `<path d="M24 40 L20 34 L24 31 L28 34 Z" ${MAIN} ${BODY}/>` +
+      `<path d="M8 24 L14 20 L17 24 L14 28 Z" ${MAIN} ${BODY}/>`,
+  ),
+
+  // Barbarian ultimate: the axe driven the length of the row, a trail of
+  // fallen behind it.
+  bloodbath: wrap(
+    AXE(32, 22) +
+      `<path d="M6 24 L22 24" ${MAIN}/>` +
+      `<path d="M6 24 L11 20 M6 24 L11 28" ${MAIN}/>` +
+      `<path d="M9 34 L15 34 M18 34 L24 34 M27 34 L33 34" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Hunter passive: the wolf's mark — a fanged jaw over the guarded tile.
+  // The tile square underneath is the family motif (see FANGS/TILE below),
+  // reused so Wolf / Snare / Wild Hunt read as one kit.
+  wolfCompanion: wrap(TILE(24, 33) + FANGS(24, 18) + diamond(24, 8, 2, GOLD)),
+
+  // Hunter active: the trap — the same jaw, but closed on the tile and
+  // sprung shut, with the trigger plate showing.
+  snare: wrap(
+    TILE(24, 30) +
+      `<path d="M13 26 L18 17 L24 21 L30 17 L35 26" ${MAIN} ${BODY}/>` +
+      `<path d="M17 26 L20 22" ${DETAIL}/>` +
+      `<path d="M31 26 L28 22" ${DETAIL}/>` +
+      `<circle cx="24" cy="30" r="2.2" fill="${GOLD}"/>`,
+  ),
+
+  // Hunter active: the arrow, drawn long down the lane — a single shaft
+  // with a barbed head, the one icon in the family that leaves the tile.
+  piercingShot: wrap(
+    `<path d="M24 42 L24 12" ${MAIN}/>` +
+      `<path d="M24 6 L29 17 L24 14 L19 17 Z" ${MAIN} ${BODY}/>` +
+      `<path d="M19 38 L24 33 L29 38" ${DETAIL}/>` +
+      `<path d="M19 32 L24 27 L29 32" ${DETAIL}/>` +
+      diamond(24, 45, 2, GOLD),
+  ),
+
+  // Hunter ultimate: the jaw at the centre with the whole row locked around
+  // it — four frost pins marking the frozen stones.
+  wildHunt: wrap(
+    FANGS(24, 22) +
+      `<path d="M8 34 L8 40 M5 37 L11 37" ${GOLD_DETAIL}/>` +
+      `<path d="M18 36 L18 42 M15 39 L21 39" ${GOLD_DETAIL}/>` +
+      `<path d="M30 36 L30 42 M27 39 L33 39" ${GOLD_DETAIL}/>` +
+      `<path d="M40 34 L40 40 M37 37 L43 37" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Warlock ultimate: the links flung outward — the whole row swept back.
+  // Four links on the diagonals, a spent core, arcs driving them out.
+  felStorm: wrap(
+    `<circle cx="24" cy="24" r="4" ${MAIN} ${BODY}/>` +
+      LINK(11, 11, 4.6, 3, 45) +
+      LINK(37, 11, 4.6, 3, -45) +
+      LINK(11, 37, 4.6, 3, -45) +
+      LINK(37, 37, 4.6, 3, 45) +
+      `<path d="M18 24 A10 10 0 0 1 24 18" ${GOLD_DETAIL}/>` +
+      `<path d="M30 24 A10 10 0 0 1 24 30" ${GOLD_DETAIL}/>`,
   ),
 };

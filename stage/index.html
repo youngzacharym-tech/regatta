@@ -134,6 +134,10 @@
       #ability-tip[data-class="necromancer"] { --tip-color: #eab4ae; }
       #ability-tip[data-class="cleric"] { --tip-color: #f2d38c; }
       #ability-tip[data-class="rogue"] { --tip-color: #9fb4c9; }
+      #ability-tip[data-class="warlock"] { --tip-color: #cbef7f; }
+      #ability-tip[data-class="hunter"] { --tip-color: #85e9e5; }
+      #ability-tip[data-class="barbarian"] { --tip-color: #ffb277; }
+      #ability-tip[data-class="bard"] { --tip-color: #ff92be; }
       #ability-tip .tip-name {
         font-size: 15px; font-weight: 700; color: var(--tip-color);
         letter-spacing: 0.03em; margin-bottom: 2px;
@@ -337,6 +341,16 @@
       .plate[data-class="cleric"] { --gem-color: #e0b341; --gem-glow: rgba(224, 179, 65, 0.7); }
       /* Rogue: moonlit steel — lockstep with main.ts DOCK_RING_TINTS. */
       .plate[data-class="rogue"] { --gem-color: #9fb4c9; --gem-glow: rgba(159, 180, 201, 0.7); }
+      /* The 2026-07-26 four. Ten classes is about all one colour wheel holds,
+         so these were picked for maximum distance from the six above rather
+         than purely for flavour — warlock's acid lime against the archer's
+         grass green is the tightest pair on the board, and the two are kept
+         apart by saturation and yellow-shift, not hue alone. Lockstep with
+         main.ts DOCK_RING_TINTS, same rule as every class here. */
+      .plate[data-class="warlock"] { --gem-color: #a4e034; --gem-glow: rgba(164, 224, 52, 0.7); }
+      .plate[data-class="hunter"] { --gem-color: #2fd6d0; --gem-glow: rgba(47, 214, 208, 0.7); }
+      .plate[data-class="barbarian"] { --gem-color: #ff7a1a; --gem-glow: rgba(255, 122, 26, 0.7); }
+      .plate[data-class="bard"] { --gem-color: #ff3d8b; --gem-glow: rgba(255, 61, 139, 0.7); }
       .plate-gems {
         position: absolute; bottom: -9px; left: 50%; transform: translateX(-50%);
         display: flex; gap: 12px; z-index: 2;
@@ -420,6 +434,10 @@
       #dock[data-class="necromancer"] { --gem-color: #d94a45; --gem-glow: rgba(217, 74, 69, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #94413c, #331416 75%); }
       #dock[data-class="cleric"] { --gem-color: #e0b341; --gem-glow: rgba(224, 179, 65, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #9a7a2c, #3a2d10 75%); }
       #dock[data-class="rogue"] { --gem-color: #9fb4c9; --gem-glow: rgba(159, 180, 201, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #5c6f82, #1c2530 75%); }
+      #dock[data-class="warlock"] { --gem-color: #a4e034; --gem-glow: rgba(164, 224, 52, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #6d952a, #26330d 75%); }
+      #dock[data-class="hunter"] { --gem-color: #2fd6d0; --gem-glow: rgba(47, 214, 208, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #229590, #0c3230 75%); }
+      #dock[data-class="barbarian"] { --gem-color: #ff7a1a; --gem-glow: rgba(255, 122, 26, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #b05213, #3d1c06 75%); }
+      #dock[data-class="bard"] { --gem-color: #ff3d8b; --gem-glow: rgba(255, 61, 139, 0.7); --gem-grad: radial-gradient(circle at 35% 28%, #b02a60, #3d0e21 75%); }
       .dock-btn {
         position: relative; padding: 0; border: none; background: transparent;
         pointer-events: auto;
@@ -573,6 +591,10 @@
       #target-ribbon[data-class="necromancer"] { --ribbon-color: #eab4ae; }
       #target-ribbon[data-class="cleric"] { --ribbon-color: #f2d38c; }
       #target-ribbon[data-class="rogue"] { --ribbon-color: #9fb4c9; }
+      #target-ribbon[data-class="warlock"] { --ribbon-color: #cbef7f; }
+      #target-ribbon[data-class="hunter"] { --ribbon-color: #85e9e5; }
+      #target-ribbon[data-class="barbarian"] { --ribbon-color: #ffb277; }
+      #target-ribbon[data-class="bard"] { --ribbon-color: #ff92be; }
       #target-ribbon .ribbon-icon {
         width: 20px; height: 20px; color: var(--ribbon-color);
         filter: drop-shadow(0 0 6px var(--ribbon-color));
@@ -993,6 +1015,10 @@
       #proc[data-class="necromancer"] { --proc-color: #f0c3bd; --proc-glow: rgba(217, 74, 69, 0.8); }
       #proc[data-class="cleric"] { --proc-color: #f2d38c; --proc-glow: rgba(224, 179, 65, 0.8); }
       #proc[data-class="rogue"] { --proc-color: #9fb4c9; --proc-glow: rgba(159, 180, 201, 0.8); }
+      #proc[data-class="warlock"] { --proc-color: #cbef7f; --proc-glow: rgba(164, 224, 52, 0.8); }
+      #proc[data-class="hunter"] { --proc-color: #85e9e5; --proc-glow: rgba(47, 214, 208, 0.8); }
+      #proc[data-class="barbarian"] { --proc-color: #ffb277; --proc-glow: rgba(255, 122, 26, 0.8); }
+      #proc[data-class="bard"] { --proc-color: #ff92be; --proc-glow: rgba(255, 61, 139, 0.8); }
       #proc .proc-text {
         font-size: clamp(34px, 7.5vw, 64px);
         line-height: 1.08;
@@ -1351,22 +1377,35 @@
       #classpick .card {
         padding: 38px 48px;
         min-width: 300px;
+        /* Sized for five tiles a row — ten classes in two clean rows. At
+           four-per-row it needs three rows and the list clips mid-sentence.
+           The budget is 5*190 + 4*18 = 1022 of tiles, plus 48px side padding
+           each side, plus the list's own 4px padding and the ~15px scrollbar
+           gutter it reserves; 1160 leaves a little slack over that so a
+           rounding difference between browsers can't drop a tile to row two. */
+        max-width: min(96vw, 1160px);
         text-align: center;
       }
       #classpick h1 { font-size: 36px; margin-bottom: 6px; }
       #classpick .tagline { font-size: 14px; color: #b8a888; margin-bottom: 26px; min-height: 18px; }
-      /* Four cards outgrow one row on narrow landscape screens — wrap
-         rather than overflow (the portrait breakpoint stacks them anyway). */
-      #classpick .classes { display: flex; flex-wrap: wrap; gap: 28px; justify-content: center; }
+      /* The roster went 6 -> 10 on 2026-07-26, which is what the scroll is
+         for: the grid stays a centred wrap, but tiles shrank (210 -> 168) so
+         five fit a row on a normal desktop, and the whole list scrolls inside
+         the card rather than growing it past the viewport. */
+      #classpick .classes {
+        display: flex; flex-wrap: wrap; gap: 18px; justify-content: center;
+        max-height: min(70vh, 720px); overflow-y: auto; scrollbar-gutter: stable;
+        padding: 2px 4px;
+      }
       #classpick button.class {
-        width: 210px;
+        width: 190px;
         background: transparent; color: var(--parchment); border: none;
         padding: 8px 6px 14px; border-radius: 14px;
-        font-size: 20px; font-weight: 600; cursor: pointer;
+        font-size: 18px; font-weight: 600; cursor: pointer;
         text-align: center;
       }
       #classpick button.class img {
-        display: block; width: 160px; height: 160px; margin: 0 auto 12px;
+        display: block; width: 128px; height: 128px; margin: 0 auto 10px;
         border-radius: 50%; border: 3px solid #7a5c2e;
         box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.55);
         transition: transform 0.15s ease-out, box-shadow 0.15s ease-out, border-color 0.15s;
@@ -1379,6 +1418,19 @@
       }
       #classpick button.class:disabled { opacity: 0.45; cursor: default; }
       #classpick button.class:disabled:hover img { transform: none; }
+      /* Portrait-only classes (kit not built yet). Distinct from the plain
+         :disabled dimming above, which also fires on every OTHER tile once
+         you've locked your pick — this one has to stay legible as "not yet"
+         rather than "not now", so it keeps its own ribbon and a heavier
+         desaturation. */
+      #classpick button.class[data-unreleased] { opacity: 0.6; }
+      #classpick button.class[data-unreleased] img { filter: grayscale(0.55); }
+      #classpick button.class[data-unreleased] b::after {
+        content: "Coming soon";
+        display: block; margin-top: 3px;
+        font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+        color: #d8bf86; opacity: 0.85;
+      }
       #classpick button.class.picked { opacity: 1; }
       #classpick button.class.picked img {
         border-color: #ffd370;
@@ -1387,30 +1439,45 @@
       #classpick button.class .class-desc {
         display: block; font-size: 13px; font-weight: 400; opacity: 0.75; margin-top: 6px; line-height: 1.45;
       }
-      /* Portrait phones: row of three fixed-width buttons can't fit, so stack
-         them — avatar left, name + description right — and keep avatars big. */
+      /* Portrait phones: a row of fixed-width buttons can't fit, so stack
+         them — avatar left, name + description right. Avatars came down from
+         104 to 84 with the 6 -> 10 roster: ten stacked rows is a long scroll,
+         and the list carries its own max-height above so the card itself
+         never grows past the viewport. */
       @media (max-width: 740px) and (min-height: 481px) {
         #classpick .card { padding: 22px 20px; min-width: 0; max-width: min(92vw, 440px); }
         #classpick h1 { font-size: 30px; }
         #classpick .tagline { margin-bottom: 18px; }
-        #classpick .classes { flex-direction: column; gap: 14px; align-items: stretch; }
+        /* justify-content MUST be reset here. The base rule centres on the
+           main axis, which is horizontal for the desktop wrap but VERTICAL
+           once this breakpoint flips to a column — and a centred flex column
+           that overflows is clipped at BOTH ends, so the first three classes
+           became unreachable rather than merely scrolled off (the scroll
+           container sits at scrollTop 0 and still cannot show them). */
+        #classpick .classes {
+          flex-direction: column; flex-wrap: nowrap; gap: 12px;
+          align-items: stretch; justify-content: flex-start;
+        }
         #classpick button.class {
           width: 100%;
-          display: grid; grid-template-columns: 104px 1fr; grid-template-rows: auto auto;
-          column-gap: 16px; align-items: center;
-          padding: 8px 12px; text-align: left; font-size: 19px;
+          display: grid; grid-template-columns: 84px 1fr; grid-template-rows: auto auto;
+          column-gap: 14px; align-items: center;
+          padding: 6px 10px; text-align: left; font-size: 18px;
         }
-        #classpick button.class img { grid-row: 1 / 3; width: 104px; height: 104px; margin: 0; }
+        #classpick button.class img { grid-row: 1 / 3; width: 84px; height: 84px; margin: 0; }
         #classpick button.class b { align-self: end; }
-        #classpick button.class .class-desc { align-self: start; margin-top: 2px; }
+        #classpick button.class .class-desc { align-self: start; margin-top: 2px; font-size: 12px; }
       }
+      /* Landscape phones: almost no vertical room, so the list leans on its
+         scroll and the tiles get as small as they can while staying tappable. */
       @media (max-height: 480px) {
         #classpick .card { padding: 16px 22px; }
         #classpick h1 { font-size: 22px; }
         #classpick .tagline { margin-bottom: 12px; }
-        #classpick button.class { width: 158px; font-size: 17px; }
-        #classpick button.class img { width: 96px; height: 96px; margin-bottom: 8px; }
-        #classpick button.class .class-desc { font-size: 11px; }
+        #classpick .classes { max-height: 58vh; gap: 14px; }
+        #classpick button.class { width: 128px; font-size: 15px; }
+        #classpick button.class img { width: 84px; height: 84px; margin-bottom: 6px; }
+        #classpick button.class .class-desc { font-size: 10px; line-height: 1.35; }
       }
 
       /* --- Room invite banner (shown while waiting for a friend) --- */
@@ -1643,7 +1710,36 @@
           <button class="class" data-class="rogue">
             <img src="/avatars/rogue.webp" alt="Rogue" draggable="false" />
             <b>Rogue</b>
-            <span class="class-desc">Larceny (passive): your kills drain the foe's mana too. Pickpocket (1⚡, keeps your turn). Backstab (2⚡): the only strike that can take the middle shield. Ult: Grand Heist.</span>
+            <span class="class-desc">Larceny (passive): your kills drain the foe's mana too. Pickpocket (1⚡, keeps your turn). Vanish (1⚡): hide a stone from everything but an ultimate. Ult: Grand Heist.</span>
+          </button>
+          <!-- The 2026-07-26 four: portraits and colours are live, kits are
+               being built one class at a time. `disabled` is the markup
+               default so the tile is dead before any script runs, and
+               data-unreleased is what makes renderClassPick KEEP it disabled
+               on the render where nothing is picked yet and every other tile
+               goes live. The real gate is server-side, in room-engine's
+               pickClass validation against MK_CLASSES. Drop both attributes —
+               and swap the placeholder blurb for the real kit — as each one
+               ships. -->
+          <button class="class" data-class="warlock">
+            <img src="/avatars/warlock.webp" alt="Warlock" draggable="false" />
+            <b>Warlock</b>
+            <span class="class-desc">Blood Pact (passive): every stone you lose pays you mana. Curse of Chains (1⚡, keeps your turn): shorten an enemy's every move. Sacrifice (2⚡): give your lead stone to kill through a Ward or Blessing. Ult: Fel Storm.</span>
+          </button>
+          <button class="class" data-class="hunter">
+            <img src="/avatars/hunter.webp" alt="Hunter" draggable="false" />
+            <b>Hunter</b>
+            <span class="class-desc">Your wolf takes anything that lands on the tile it guards. Snare (1⚡, keeps your turn): a trap that throws them back and pays you. Piercing Shot (2⚡): kill the first enemy down the lane. Ult: Wild Hunt.</span>
+          </button>
+          <button class="class" data-class="barbarian">
+            <img src="/avatars/barbarian.webp" alt="Barbarian" draggable="false" />
+            <b>Barbarian</b>
+            <span class="class-desc">Rage: fall behind and your rearmost stone runs faster. Reckless Swing (1⚡): kill through a Bulwark, but you're thrown back. Whirlwind (2⚡): catch everything near your stones. Ult: Bloodbath.</span>
+          </button>
+          <button class="class" data-class="bard">
+            <img src="/avatars/bard.webp" alt="Bard" draggable="false" />
+            <b>Bard</b>
+            <span class="class-desc">Encore: zero flips pay double, and your purse runs deep. Inspire (2⚡, keeps your turn): lit stones move further. Song of Haste (2⚡): every lit stone marches at once. Ult: Crescendo.</span>
           </button>
         </div>
       </div>
