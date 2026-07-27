@@ -30,43 +30,76 @@ import {
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
+  applyCurse,
   applyExhume,
+  applyFelStorm,
   applyGrandHeist,
+  applyBloodbath,
+  applyCrescendo,
+  applyInspire,
+  applySongOfHaste,
+  applyPiercingShot,
+  applyRecklessSwing,
+  applyWhirlwind,
   applyHeal,
   applyPickpocket,
   applyPowerMove,
   applyPush,
   applyReflip,
   applyRevive,
+  applySacrifice,
+  applySnare,
   applyVanish,
   applyWarpath,
+  applyWildHunt,
   canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
+  CURSE_COST,
+  CURSE_TURNS,
   effectiveOwner,
+  FEL_STORM_RETURN_POSITION,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
+  getCurseTargets,
   getExhumeTargets,
+  getFelStormTargets,
   getGrandHeistTargets,
+  getBloodbathTargets,
+  getCrescendoTargets,
+  getInspireTargets,
+  getSongOfHasteTargets,
+  getPiercingShotTargets,
+  getRecklessSwingTargets,
+  getWhirlwindTargets,
   getHealTargets,
   getLegalPowerMoves,
   getPickpocketTargets,
   getPushTargets,
   getReviveSpawnTile,
+  getSacrificeTargets,
+  getSnareTiles,
   getVanishTargets,
   getWarpathTargets,
+  getWildHuntTargets,
+  WILD_HUNT_FREEZE_TURNS,
   isBlessed,
   isBulwarked,
+  isCursed,
+  isHamstrung,
   isWarded,
   NECRO_CHARGE_CAP,
   possessorOf,
   PUSH_DISTANCE,
   PUSH_WARD_DISTANCE,
+  rageFor,
+  RECKLESS_SELF_KNOCKBACK,
+  SACRIFICE_COST,
   THRALL_TURNS,
   VANISH_COST,
   type PlayerClass,
@@ -576,6 +609,322 @@ function scorePickpocket(power: PowerState, foe: PlayerId, rand: () => number): 
 }
 
 
+// ---------------------------------------------------------------------------
+// WARLOCK STANDARD-TIER WEIGHTS (2026-07-26). Both casts needed the negative
+// floor this file has now learned three separate times (scoreBulwark's
+// history note, scorePickpocket's below-cap bias, and now these): a cheap
+// always-available cast with a small flat positive out-competes real board
+// progress every turn. The first balance run without them: curse/g 26-87,
+// sacrifice/g 14-95, warlock 76-89% off the whole field, mirror stalemating
+// 45-49% of games at the 1000-turn cap.
+// ---------------------------------------------------------------------------
+/** Below this tile a cursed stone hasn't invested enough for the chains to
+ *  be worth a mana — the row's gate, so only stones actually running the
+ *  gauntlet are worth hexing. */
+const MK_CURSE_MIN_TILE = 7;
+/** Base value of a curse AT that tile — negative, so a hex on a stone that
+ *  isn't a real runner loses to every plain move. */
+const MK_CURSE_FLOOR = -90;
+/** Per tile past MK_CURSE_MIN_TILE: the closer to escaping, the more a
+ *  stolen tile per turn is worth. Crosses zero around tile 10. */
+const MK_CURSE_PER_TILE = 30;
+/** A Warded target is the standout buy — nothing else in the kit below the
+ *  full-bank Sacrifice can touch it at all. */
+const MK_CURSE_WARDED_BONUS = 90;
+/** Sacrifice's base: a guaranteed pierce-kill is real, but it costs the
+ *  full bank AND a body, and the bank no longer refunds itself (see
+ *  applySacrifice's Blood Pact exclusion). Negative so the trade has to be
+ *  justified by the target, not merely available. */
+const MK_SACRIFICE_FLOOR = -120;
+/** Per tile of the victim's progress — killing a deep runner is the point. */
+const MK_SACRIFICE_PER_TILE = 34;
+/** Per tile of progress on the stone GIVEN (always the MOST-advanced, see
+ *  applySacrifice's doc for why that selection is load-bearing) — the real
+ *  price, and the term that makes the cast self-limiting: it outweighs the
+ *  victim's own per-tile value, so trading a deep runner for a shallow one
+ *  always loses. Only a genuinely valuable target justifies the ritual. */
+const MK_SACRIFICE_COST_PER_TILE = 40;
+/** Nothing else in the kit reaches a Warded stone; a Blessed one would only
+ *  be wounded by a mortal hit, paying the cleric's engine nothing. */
+const MK_SACRIFICE_WARDED_BONUS = 140;
+const MK_SACRIFICE_BLESSED_BONUS = 90;
+/** Giving up the warlock's LAST on-board stone hands the foe a free board. */
+const MK_SACRIFICE_LAST_STONE_PENALTY = 400;
+
+/** Score Warlock's Curse of Chains — a TURN-KEEPING hex (Bless's
+ *  contract), so like scoreBless this is "before the move", not "instead
+ *  of it", and the discipline is about MANA rather than tempo. Value is
+ *  the tempo the chains actually steal, which scales with how close the
+ *  victim is to escaping: shackling a stone on tile 11 costs the foe far
+ *  more than shackling one that just entered the row. A stone the warlock
+ *  could plausibly kill instead is worth less to curse (the kill is
+ *  strictly better), so the premium goes to the RUNNER the warlock can't
+ *  reach — which is also the flavor. Below a real capture by
+ *  construction, and it must stay there: Sacrifice and the plain move
+ *  both want the same bank. STARTING VALUES, not yet sim-tuned. */
+function scoreCurse(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  // NEGATIVE FLOOR, this file's thrice-learned discipline (see
+  // scoreBulwark's history note and scorePickpocket's below-cap bias): a
+  // cheap, always-available, turn-KEEPING cast with a small flat positive
+  // fires every single turn and crowds out the race. The first balance run
+  // proved it again here — curse/g hit 26-87 per game and the warlock took
+  // 76-89% off the field, with the mirror stalemating half its games.
+  // Only a genuine runner is worth the mana.
+  const urgency = target.position - MK_CURSE_MIN_TILE;
+  let score = MK_CURSE_FLOOR + MK_CURSE_PER_TILE * urgency;
+  // A curse on a Warded stone is the standout buy: Ward makes it otherwise
+  // untouchable to the warlock's whole kit EXCEPT Sacrifice's full-bank
+  // pierce, so slowing it is the cheap answer the class does have.
+  if (isWarded(state, power, target)) score += MK_CURSE_WARDED_BONUS;
+  return score + rand() * 20;
+}
+
+/** Score Warlock's Sacrifice — the full-bank, turn-ending trade: the
+ *  warlock's own LEAD RUNNER for a guaranteed kill through Ward and
+ *  Blessing. Priced as a capture MINUS the real cost of the stone given,
+ *  and that cost dominates by design (MK_SACRIFICE_COST_PER_TILE exceeds
+ *  MK_SACRIFICE_PER_TILE): applySacrifice always spends the MOST-advanced
+ *  on-board stone, so trading down is always a loss and the cast only
+ *  clears the bar when the target is worth more than the runner given —
+ *  which is what stopped it being an infinite attrition engine (see
+ *  applySacrifice's doc for the before/after numbers). The premium cases
+ *  are exactly the ones no other tool reaches: a Warded target (the whole
+ *  reason the pierce exists) and a Blessed one (a normal hit would only
+ *  wound it and pay the cleric's engine nothing). */
+function scoreSacrifice(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  const mover = state.currentPlayer;
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  const mine = state.tokens.filter(
+    (t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER,
+  );
+  if (mine.length === 0) return -Infinity; // no blood to pay with (oracle already refuses, belt-and-braces)
+  const cost = Math.max(...mine.map((t) => t.position));
+  // The kill's worth, scaled by how far along the victim was — scoreMove's
+  // own capture shape — minus the progress the ritual throws away.
+  let score =
+    MK_SACRIFICE_FLOOR + MK_SACRIFICE_PER_TILE * target.position - MK_SACRIFICE_COST_PER_TILE * cost;
+  if (isWarded(state, power, target)) score += MK_SACRIFICE_WARDED_BONUS; // nothing else in the kit touches it
+  if (isBlessed(power, targetId)) score += MK_SACRIFICE_BLESSED_BONUS; // a mortal hit would merely wound
+  // Giving up the warlock's LAST on-board stone hands the foe a free board
+  // — never worth a single kill.
+  if (mine.length === 1) score -= MK_SACRIFICE_LAST_STONE_PENALTY;
+  return score + rand() * 20;
+}
+
+/** Score Warlock's Fel Storm: spends only the banked ultimateReady flag
+ *  (scoreUltimateStrike's "a banked ultimate that never fires is pure
+ *  waste" reasoning), and its value IS its pool — every victim loses every
+ *  tile it had earned past the row's gate. Scored as the total distance
+ *  the storm actually undoes, so a storm catching one stone on tile 5
+ *  correctly reads as near-worthless while one catching three deep runners
+ *  outranks anything short of a win. Deliberately NOT flat like
+ *  scoreExhume: unlike escaped tokens, contested stones are highly
+ *  unequal. STARTING VALUES, not yet sim-tuned. */
+function scoreFelStorm(state: GameState, victims: number[], rand: () => number): number {
+  let dragged = 0;
+  for (const id of victims) {
+    const t = state.tokens.find((tok) => tok.id === id)!;
+    dragged += Math.max(0, t.position - FEL_STORM_RETURN_POSITION);
+  }
+  return 120 + 55 * dragged + rand() * 20;
+}
+
+// ---------------------------------------------------------------------------
+// HUNTER STANDARD-TIER WEIGHTS (2026-07-26). Same negative-floor discipline
+// the warlock's two casts needed (and scoreBulwark and scorePickpocket
+// before them) — Snare especially, being cheap, turn-keeping and always
+// available, is the exact shape that reflexively out-competes real board
+// progress every turn.
+// ---------------------------------------------------------------------------
+/** Snare's base value — negative, so a trap only beats a real move when
+ *  the placement is actually good. */
+const MK_SNARE_FLOOR = -70;
+/** Per enemy stone that could REACH the trapped tile on its next flip
+ *  (1-4 tiles behind it). A trap nobody can step on is worthless; a trap
+ *  in front of the enemy's whole pack is the play. */
+const MK_SNARE_PER_THREATENED = 85;
+/** Bonus when the trap sits in front of a DEEP runner (the tile is far
+ *  along the row), since throwing that stone back costs the foe most. */
+const MK_SNARE_PER_TILE = 6;
+/** Piercing Shot's base — the full bank for a guaranteed kill at range.
+ *  POSITIVE, unlike every other full-bank floor in this file, and that is
+ *  deliberate: the shot is only ever OFFERED when the arrow already has a
+ *  clear line to an unprotected enemy (getPiercingShotTargets returns one
+ *  id or nothing), so there is no "affordable but bad" case for a negative
+ *  floor to suppress — the oracle does that job. Sized below a landing
+ *  capture's own scoreMove value so a capture that ALSO advances a stone
+ *  still wins; the shot is the answer when nothing can reach. */
+const MK_PIERCING_SHOT_FLOOR = 240;
+/** Per tile of the victim's progress — killing a deep runner is the point. */
+const MK_PIERCING_SHOT_PER_TILE = 22;
+
+/** Score Hunter's Snare — a TURN-KEEPING placement (Curse/Bless's
+ *  contract), so this is "before the move", not "instead of it", and the
+ *  discipline is about MANA. Value is entirely positional: a trap is worth
+ *  what it is likely to CATCH, which means enemy stones within one flip
+ *  (1-4 tiles) of the tile. Deliberately blind to the hunter's own stones —
+ *  a trap never hurts its setter, so proximity to friendlies is irrelevant. */
+function scoreSnare(state: GameState, power: PowerState, tile: number, rand: () => number): number {
+  const mover = state.currentPlayer;
+  let threatened = 0;
+  for (const t of state.tokens) {
+    if (effectiveOwner(power, t) === mover) continue;
+    if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
+    const gap = tile - t.position;
+    if (gap >= 1 && gap <= 4) threatened++;
+  }
+  return MK_SNARE_FLOOR + MK_SNARE_PER_THREATENED * threatened + MK_SNARE_PER_TILE * tile + rand() * 20;
+}
+
+/** Score Hunter's Piercing Shot — the full-bank, turn-ending kill at range.
+ *  No target choice to weigh (the arrow's path decides), so this prices the
+ *  one victim on offer. Discounted when a plain move could capture the same
+ *  stone this turn: that capture advances a stone too, so spending the
+ *  whole bank on the arrow instead would be strictly worse. */
+function scorePiercingShot(
+  state: GameState,
+  moves: PowerMove[],
+  targetId: number,
+  rand: () => number,
+): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  let score = MK_PIERCING_SHOT_FLOOR + MK_PIERCING_SHOT_PER_TILE * target.position;
+  const capturableNow = moves.some((m) => [...m.captures, ...m.bonusCaptures].includes(targetId));
+  if (capturableNow) score -= MK_PIERCING_SHOT_FLOOR; // a move that kills it AND advances is better
+  return score + rand() * 20;
+}
+
+/** Score Hunter's Wild Hunt: spends only the banked ultimateReady flag
+ *  (scoreUltimateStrike's "a banked ultimate that never fires is pure
+ *  waste"), and its value is a guaranteed kill PLUS a board-wide freeze.
+ *  Scored as the strike's own baseline against the quarry the wolf will
+ *  actually take (the least-advanced victim — see applyWildHunt), plus a
+ *  per-head bonus for everything else it pins. */
+function scoreWildHunt(state: GameState, pool: number[], rand: () => number): number {
+  const victims = pool
+    .map((id) => state.tokens.find((t) => t.id === id)!)
+    .sort((a, b) => a.position - b.position);
+  const quarry = victims[0];
+  if (!quarry) return -Infinity;
+  return scoreUltimateStrike(state, quarry.id, rand) + 45 * (victims.length - 1);
+}
+
+// ---------------------------------------------------------------------------
+// BARBARIAN STANDARD-TIER WEIGHTS (2026-07-27). Note the shape difference
+// from the warlock/hunter blocks above: every barbarian cast is an actual
+// CAPTURE, and every one is gated by an oracle that only offers it when a
+// real victim is in reach — so none of them is the "cheap, always
+// available, quietly worthless" pattern that needed negative floors. They
+// are priced positive and compared against a capture instead.
+// ---------------------------------------------------------------------------
+/** Reckless Swing's base: a kill through Bulwark/Vanish for 1 mana, minus
+ *  the recoil. Below a landing capture's own value because that capture
+ *  also ADVANCES a stone, where this one throws yours backwards. */
+const MK_RECKLESS_FLOOR = 150;
+/** Per tile of the victim's progress — killing a deep runner is the point. */
+const MK_RECKLESS_PER_TILE = 26;
+/** Per tile the swinger is thrown back: the actual cost of the trade, and
+ *  the term that stops the bot swinging with a stone it cannot afford to
+ *  lose ground with. */
+const MK_RECKLESS_RECOIL_PER_TILE = 18;
+/** Recoiling all the way home is a whole stone's progress gone — priced as
+ *  its own event rather than extrapolating the per-tile term. */
+const MK_RECKLESS_SELF_HOME_PENALTY = 260;
+/** The premium case: nothing else the barbarian owns can touch a Bulwarked
+ *  or Vanished stone, so those are exactly what this is for. */
+const MK_RECKLESS_PIERCE_BONUS = 120;
+/** Whirlwind's base — the full bank for a capture plus scatter. */
+const MK_WHIRLWIND_FLOOR = 120;
+/** Per stone the spin actually catches (captured or shoved). */
+const MK_WHIRLWIND_PER_VICTIM = 95;
+
+/** Score Barbarian's Reckless Swing — a kill that costs position. The two
+ *  halves are priced explicitly against each other so the bot takes the
+ *  trade when the target is worth more than the ground, and declines when
+ *  it isn't (notably: swinging with a deep runner to kill a shallow stone
+ *  is a losing trade, and the recoil term says so). */
+function scoreRecklessSwing(
+  state: GameState,
+  power: PowerState,
+  targetId: number,
+  rand: () => number,
+): number {
+  const mover = state.currentPlayer;
+  const victim = state.tokens.find((t) => t.id === targetId)!;
+  const swinger = state.tokens.find(
+    (t) => effectiveOwner(power, t) === mover && t.position === victim.position - 1,
+  );
+  if (!swinger) return -Infinity; // oracle already refuses; belt-and-braces
+  let score = MK_RECKLESS_FLOOR + MK_RECKLESS_PER_TILE * victim.position;
+  score -= MK_RECKLESS_RECOIL_PER_TILE * Math.min(swinger.position, RECKLESS_SELF_KNOCKBACK);
+  if (swinger.position - RECKLESS_SELF_KNOCKBACK < 0) score -= MK_RECKLESS_SELF_HOME_PENALTY;
+  if (isBulwarked(power, victim)) score += MK_RECKLESS_PIERCE_BONUS; // the one tool that reaches it
+  return score + rand() * 20;
+}
+
+/** Score Barbarian's Whirlwind: the full-bank spin, valued by its whole
+ *  catch — the capture plus every stone it shoves off its line. */
+function scoreWhirlwind(victims: number[], rand: () => number): number {
+  return MK_WHIRLWIND_FLOOR + MK_WHIRLWIND_PER_VICTIM * victims.length + rand() * 20;
+}
+
+/** Score Barbarian's Bloodbath: spends only the banked ultimateReady flag
+ *  (scoreUltimateStrike's "never sit on it"), and its value is the whole
+ *  uncapped path — every stone the charge runs down, weighted by how far
+ *  each had come. */
+function scoreBloodbath(state: GameState, victims: number[], rand: () => number): number {
+  let worth = 0;
+  for (const id of victims) worth += 60 + 12 * (state.tokens.find((t) => t.id === id)?.position ?? 0);
+  return 200 + worth + rand() * 20;
+}
+
+// ---------------------------------------------------------------------------
+// BARD STANDARD-TIER WEIGHTS (2026-07-27). Inspire is the file's canonical
+// danger shape — cheap, turn-KEEPING, always available — so it gets the
+// negative floor the warlock's Curse and the hunter's Snare needed before
+// it. The difference is that a lit stone's value is REAL and immediate
+// (every future move it makes is longer), so the floor is shallower and the
+// per-tile term steeper: the bot should light a runner eagerly and a stone
+// sitting at home almost never.
+// ---------------------------------------------------------------------------
+/** Inspire's base — negative, so lighting a stone that isn't going anywhere
+ *  loses to a real move. */
+const MK_INSPIRE_FLOOR = -60;
+/** Per tile of the stone's progress: the further along it is, the more each
+ *  extra tile per move is worth, and the sooner it converts to an escape. */
+const MK_INSPIRE_PER_TILE = 26;
+/** Song of Haste's base, plus its per-marcher term — the payoff scales with
+ *  how wide the board was lit, which is the whole reason to spread. */
+const MK_HASTE_FLOOR = -40;
+const MK_HASTE_PER_STONE = 130;
+/** Crescendo: army-wide light AND march. Valued per stone it touches, the
+ *  way scoreBenediction values its own pool. */
+const MK_CRESCENDO_PER_STONE = 150;
+
+/** Score Bard's Inspire — a TURN-KEEPING buff (Bless/Curse's contract), so
+ *  this is "before the move", not "instead of it", and the discipline is
+ *  about MANA. Value tracks the stone's progress, and dips when it is
+ *  already lit-adjacent to nothing useful. */
+function scoreInspire(state: GameState, targetId: number, rand: () => number): number {
+  const t = state.tokens.find((tok) => tok.id === targetId)!;
+  return MK_INSPIRE_FLOOR + MK_INSPIRE_PER_TILE * t.position + rand() * 20;
+}
+
+/** Score Bard's Song of Haste: the full-bank payoff, worth what it actually
+ *  marches. A one-stone song is a poor use of the whole bank; a four-stone
+ *  one is the class working as designed. */
+function scoreSongOfHaste(pool: number[], rand: () => number): number {
+  return MK_HASTE_FLOOR + MK_HASTE_PER_STONE * pool.length + rand() * 20;
+}
+
+/** Score Bard's Crescendo: spends only the banked ultimateReady flag
+ *  (scoreUltimateStrike's "never sit on it"), valued by the army it lights
+ *  and moves at once. */
+function scoreCrescendo(pool: number[], rand: () => number): number {
+  return MK_CRESCENDO_PER_STONE * pool.length + rand() * 20;
+}
+
 /** Score Rogue's Grand Heist: scoreUltimateStrike's guaranteed-capture
  *  baseline, plus a bonus scaled by the bank it would ALSO drain on the
  *  kill — the fuller the foe's bank, the more this ultimate is "a capture
@@ -846,6 +1195,124 @@ function pickStandardPowerAction(
     }
   }
 
+  if (cls === "warlock") {
+    // The oracles are the whole gate (affordability baked in) — mirror
+    // validateUsePower exactly, same as every class above.
+    for (const targetId of getCurseTargets(state, power, mover)) {
+      const score = scoreCurse(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "curse", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getSacrificeTargets(state, power, mover)) {
+      const score = scoreSacrifice(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "sacrifice", targetTokenId: targetId };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      const victims = getFelStormTargets(state, power, mover);
+      if (victims.length > 0) {
+        const score = scoreFelStorm(state, victims, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "felStorm" };
+        }
+      }
+    }
+  }
+
+  if (cls === "hunter") {
+    // The oracles are the whole gate (affordability baked in) — mirror
+    // validateUsePower exactly, same as every class above.
+    for (const tile of getSnareTiles(state, power, mover)) {
+      const score = scoreSnare(state, power, tile, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "snare", tile };
+      }
+    }
+    for (const targetId of getPiercingShotTargets(state, power, mover)) {
+      const score = scorePiercingShot(state, moves, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "piercingShot" };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      const pool = getWildHuntTargets(state, power, mover);
+      if (pool.length > 0) {
+        const score = scoreWildHunt(state, pool, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "wildHunt" };
+        }
+      }
+    }
+  }
+
+  if (cls === "barbarian") {
+    // The oracles are the whole gate (affordability baked in) — mirror
+    // validateUsePower exactly, same as every class above.
+    for (const targetId of getRecklessSwingTargets(state, power, mover)) {
+      const score = scoreRecklessSwing(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "recklessSwing", targetTokenId: targetId };
+      }
+    }
+    const spin = getWhirlwindTargets(state, power, mover);
+    if (spin.length > 0) {
+      const score = scoreWhirlwind(spin, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "whirlwind" };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      const path = getBloodbathTargets(state, power, mover);
+      if (path.length > 0) {
+        const score = scoreBloodbath(state, path, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "bloodbath" };
+        }
+      }
+    }
+  }
+
+  if (cls === "bard") {
+    // The oracles are the whole gate (affordability baked in) — mirror
+    // validateUsePower exactly, same as every class above.
+    for (const targetId of getInspireTargets(state, power, mover)) {
+      const score = scoreInspire(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "inspire", targetTokenId: targetId };
+      }
+    }
+    const song = getSongOfHasteTargets(state, power, mover);
+    if (song.length > 0) {
+      const score = scoreSongOfHaste(song, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "songOfHaste" };
+      }
+    }
+    if (power.ultimateReady[mover]) {
+      const army = getCrescendoTargets(state, power, mover);
+      if (army.length > 0) {
+        const score = scoreCrescendo(army, rand);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { kind: "crescendo" };
+        }
+      }
+    }
+  }
+
   return best;
 }
 
@@ -924,6 +1391,38 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
     }
     if (power.ultimateReady[mover]) {
       for (const id of getGrandHeistTargets(state, power, mover)) out.push({ kind: "grandHeist", targetTokenId: id });
+    }
+  }
+  if (cls === "warlock") {
+    for (const id of getCurseTargets(state, power, mover)) out.push({ kind: "curse", targetTokenId: id });
+    for (const id of getSacrificeTargets(state, power, mover)) out.push({ kind: "sacrifice", targetTokenId: id });
+    // One candidate, no payload — the whole row is the target.
+    if (power.ultimateReady[mover] && getFelStormTargets(state, power, mover).length > 0) {
+      out.push({ kind: "felStorm" });
+    }
+  }
+  if (cls === "hunter") {
+    for (const tile of getSnareTiles(state, power, mover)) out.push({ kind: "snare", tile });
+    // One candidate, no payload — the arrow's path picks the victim.
+    if (getPiercingShotTargets(state, power, mover).length > 0) out.push({ kind: "piercingShot" });
+    if (power.ultimateReady[mover] && getWildHuntTargets(state, power, mover).length > 0) {
+      out.push({ kind: "wildHunt" });
+    }
+  }
+  if (cls === "barbarian") {
+    for (const id of getRecklessSwingTargets(state, power, mover)) {
+      out.push({ kind: "recklessSwing", targetTokenId: id });
+    }
+    if (getWhirlwindTargets(state, power, mover).length > 0) out.push({ kind: "whirlwind" });
+    if (power.ultimateReady[mover] && getBloodbathTargets(state, power, mover).length > 0) {
+      out.push({ kind: "bloodbath" });
+    }
+  }
+  if (cls === "bard") {
+    for (const id of getInspireTargets(state, power, mover)) out.push({ kind: "inspire", targetTokenId: id });
+    if (getSongOfHasteTargets(state, power, mover).length > 0) out.push({ kind: "songOfHaste" });
+    if (power.ultimateReady[mover] && getCrescendoTargets(state, power, mover).length > 0) {
+      out.push({ kind: "crescendo" });
     }
   }
   return out;
@@ -1058,6 +1557,25 @@ const MK_EVAL_WOUNDED = 4;
  *  nothing). Not zero — a blessed stone deep in enemy reach still ties
  *  down the Heal budget. */
 const MK_EVAL_BLESSED_THREAT_SCALE = 0.4;
+/** Warlock (2026-07-26): a live Curse of Chains on an own on-board stone,
+ *  at full duration. CURSE_SLOW tiles stolen from every move that stone
+ *  makes for CURSE_TURNS — priced above MK_EVAL_BULWARK's insurance (this
+ *  is realized tempo loss, not a contingency) but below a blessing's
+ *  outright denied kill. Decays with the remaining turns, so hard sees the
+ *  chains loosening. */
+const MK_EVAL_CURSED = 16;
+/** Hunter (2026-07-26): a live freeze on an own on-board stone, at full
+ *  duration. Strictly worse than a curse — no progress at all rather than
+ *  reduced progress — and it cost the caster their full bank, so it is
+ *  priced well above MK_EVAL_CURSED. Decays with remaining turns. */
+const MK_EVAL_HAMSTRUNG = 34;
+/** Barbarian (2026-07-27): each tile of Rage the position currently grants.
+ *  Priced ABOVE a live blessing: a permanent-while-behind stride bonus on
+ *  the stone that most needs it compounds over every remaining turn, where
+ *  a blessing is one denied kill. Not so high that the eval starts throwing
+ *  stones away to farm it — the per-tile and threat terms it would give up
+ *  to do that are far larger. */
+const MK_EVAL_RAGE = 26;
 /** Live shield-streak progress toward that ultimate, per landing banked. */
 const MK_EVAL_STREAK = 12;
 /** An active Bulwark on an own token — insurance, real but modest (it
@@ -1140,6 +1658,22 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
     if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
     if (power.vitality[t.id] === "blessed") score += MK_EVAL_BLESSED;
     if (power.vitality[t.id] === "wounded") score += MK_EVAL_WOUNDED;
+    // Curse of Chains on one of MY stones is a real, ongoing tax — this is
+    // the term that lets hard's one-ply search see the hex at all (its
+    // payoff otherwise lands entirely past the horizon; see mkCurseValue).
+    // Scaled by turns remaining, the thrall's own decay shape.
+    if (isCursed(power, t.id)) {
+      const turnsLeft = power.curse.p1?.tokenId === t.id
+        ? power.curse.p1.turnsLeft
+        : (power.curse.p2?.turnsLeft ?? 0);
+      score -= (MK_EVAL_CURSED * turnsLeft) / CURSE_TURNS;
+    }
+    // A FROZEN stone of mine is strictly worse than a cursed one — it
+    // makes no progress at all rather than reduced progress — so the
+    // penalty is heavier, on the same decaying scale.
+    if (isHamstrung(power, t.id)) {
+      score -= (MK_EVAL_HAMSTRUNG * (power.hamstrung?.[t.id] ?? 0)) / WILD_HUNT_FREEZE_TURNS;
+    }
   }
   // A valid banked corpse is a Revive waiting on funding.
   const corpse = power.corpse[player];
@@ -1159,6 +1693,14 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
     score += necroWithExhumeTarget ? MK_EVAL_EXHUME_HELD : MK_EVAL_ULTIMATE;
   }
   score += MK_EVAL_STREAK * power.shieldStreak[player];
+  // Barbarian's Rage: the tiles-per-move the CURRENT position is granting.
+  // Without this term the expectimax tier is blind to the whole class —
+  // it prices losing a stone purely as loss, never seeing that a barbarian
+  // behind on stones moves faster for it, so it plays the kit like a
+  // fragile archer. Caught by the separation gate: the hard tier was
+  // LOSING its own mirror to standard (46.0%), an inversion no amount of
+  // sampling noise explains.
+  score += MK_EVAL_RAGE * rageFor(state, power, player);
   return score;
 }
 
@@ -1318,6 +1860,102 @@ function mkPickpocketValue(
   return best;
 }
 
+/** Value of Curse of Chains: a turn-keeping hex (applyCurse's contract —
+ *  the SAME flip stays live), mkPickpocketValue's exact shape. Note the
+ *  one-ply search can only see the mana spent and this turn's follow-up —
+ *  the chains' actual payoff lands on the VICTIM's next turns, which is
+ *  beyond the horizon. That undervaluation is deliberate and left alone:
+ *  the alternative is a hand-tuned bias constant (MK_EVAL_REVIVE_BIAS's
+ *  shape) and this file's history is emphatic that a flat positive on an
+ *  always-available cast out-competes real captures every turn. Hard will
+ *  therefore curse only when the board is otherwise quiet — a conservative
+ *  failure mode, and the standard tier's scoreCurse carries the class. */
+function mkCurseValue(
+  state: GameState,
+  power: PowerState,
+  c: Extract<PowerAction, { kind: "curse" }>,
+  flip: number,
+  me: PlayerId,
+): number {
+  const nextPower = applyCurse(power, c.targetTokenId, me);
+  if (flip === 0) return evaluateMK(state, nextPower, me);
+  const moves = getLegalPowerMoves(state, nextPower, flip);
+  if (moves.length === 0) return evaluateMK(state, nextPower, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin
+      ? MK_WIN_VALUE
+      : (() => {
+          const q = applyPowerMove(state, nextPower, m, me, SIM_RAND);
+          return mkValueAfterAction(q.state, q.power, me);
+        })();
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+/** Value of Snare: a turn-keeping placement (applySnare's contract),
+ *  mkCurseValue's exact shape — and it inherits the same horizon problem,
+ *  more acutely: a trap's whole payoff lands on a LATER enemy turn, which
+ *  one ply cannot see at all. Left deliberately un-biased for the reason
+ *  mkCurseValue documents (a flat positive on an always-available cast is
+ *  this file's most-repeated bug), so hard sets traps only when the board
+ *  is otherwise quiet and the standard tier's scoreSnare carries the
+ *  class's trap game. */
+function mkSnareValue(
+  state: GameState,
+  power: PowerState,
+  c: Extract<PowerAction, { kind: "snare" }>,
+  flip: number,
+  me: PlayerId,
+): number {
+  const nextPower = applySnare(power, c.tile, me);
+  if (flip === 0) return evaluateMK(state, nextPower, me);
+  const moves = getLegalPowerMoves(state, nextPower, flip);
+  if (moves.length === 0) return evaluateMK(state, nextPower, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin
+      ? MK_WIN_VALUE
+      : (() => {
+          const q = applyPowerMove(state, nextPower, m, me, SIM_RAND);
+          return mkValueAfterAction(q.state, q.power, me);
+        })();
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+/** Value of Inspire: a turn-keeping buff (applyInspire's contract),
+ *  mkCurseValue/mkSnareValue's exact shape — and unlike those two it is NOT
+ *  horizon-blind: the lit stone moves INSPIRE_BONUS further on this very
+ *  flip, so the same-flip follow-up search sees the buff's value directly.
+ *  That is why the bard needs no eval-side bias constant where the warlock
+ *  and hunter's turn-keepers were left deliberately undervalued. */
+function mkInspireValue(
+  state: GameState,
+  power: PowerState,
+  c: Extract<PowerAction, { kind: "inspire" }>,
+  flip: number,
+  me: PlayerId,
+): number {
+  const nextPower = applyInspire(power, c.targetTokenId, me);
+  if (flip === 0) return evaluateMK(state, nextPower, me);
+  const moves = getLegalPowerMoves(state, nextPower, flip);
+  if (moves.length === 0) return evaluateMK(state, nextPower, me);
+  let best = -Infinity;
+  for (const m of moves) {
+    const v = m.causesWin
+      ? MK_WIN_VALUE
+      : (() => {
+          const q = applyPowerMove(state, nextPower, m, me, SIM_RAND);
+          return mkValueAfterAction(q.state, q.power, me);
+        })();
+    if (v > best) best = v;
+  }
+  return best;
+}
+
 /** Simulate one non-reflip candidate through the same pure apply* functions
  *  the server executes with. */
 function mkSimulate(
@@ -1363,6 +2001,35 @@ function mkSimulate(
       // early intercept above) — kept for switch exhaustiveness, same
       // defensive completeness "bless" already has here.
       return { state, power: applyPickpocket(power, mover) };
+    case "sacrifice":
+      return applySacrifice(state, power, c.targetTokenId, mover);
+    case "felStorm":
+      return applyFelStorm(state, power, mover);
+    case "curse":
+      // Same story as "pickpocket"/"bless": intercepted early by
+      // mkCurseValue since it keeps the turn. Kept for exhaustiveness.
+      return { state, power: applyCurse(power, c.targetTokenId, mover) };
+    case "piercingShot":
+      return applyPiercingShot(state, power, mover);
+    case "wildHunt":
+      return applyWildHunt(state, power, mover);
+    case "snare":
+      // Turn-keeping — intercepted early by mkSnareValue, same as curse.
+      return { state, power: applySnare(power, c.tile, mover) };
+    case "recklessSwing":
+      return applyRecklessSwing(state, power, c.targetTokenId, mover);
+    case "whirlwind":
+      return applyWhirlwind(state, power, mover);
+    case "bloodbath":
+      return applyBloodbath(state, power, mover);
+    case "songOfHaste":
+      return applySongOfHaste(state, power, mover);
+    case "crescendo":
+      return applyCrescendo(state, power, mover);
+    case "inspire":
+      // Turn-keeping — intercepted early by mkInspireValue, same as curse
+      // and snare. Kept for switch exhaustiveness.
+      return { state, power: applyInspire(power, c.targetTokenId, mover) };
   }
 }
 
@@ -1436,6 +2103,15 @@ function pickHardPowerAction(
     } else if (c.kind === "pickpocket") {
       // Turn-keeping, same-flip follow-up valuation — see mkPickpocketValue.
       value = mkPickpocketValue(state, power, c, flip, mover);
+    } else if (c.kind === "curse") {
+      // Turn-keeping, same-flip follow-up valuation — see mkCurseValue.
+      value = mkCurseValue(state, power, c, flip, mover);
+    } else if (c.kind === "snare") {
+      // Turn-keeping, same-flip follow-up valuation — see mkSnareValue.
+      value = mkSnareValue(state, power, c, flip, mover);
+    } else if (c.kind === "inspire") {
+      // Turn-keeping, same-flip follow-up valuation — see mkInspireValue.
+      value = mkInspireValue(state, power, c, flip, mover);
     } else {
       const r = mkSimulate(state, power, c, mover);
       value = mkValueAfterAction(r.state, r.power, mover);
