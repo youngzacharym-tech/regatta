@@ -100,3 +100,16 @@ blank, name it `token_p1` / `token_p2`, and keep vertex colors as COLOR_0.
 The client re-seats the geometry vertically on load (`geo.translate(0,
 -0.08 - min.y, 0)`), but keeping the bbox above means everything else
 (raycasting, tile seats, animations) stays untouched.
+
+## Procedural class reliefs (Rogue, Warlock, Hunter, Barbarian, Bard)
+
+The five classes without a hand-sculpted Nomad relief get theirs from
+`tools/build_class_tokens.py` (headless Blender): each motif is a 2D
+signed-distance field raised into a smooth pillow that follows the fit
+envelope above, painted in the class's dock color and fused onto the blanks
+with the same warm/cool team tints as the sculpted five. It writes the
+`decoration-<class>*.glb` / `token-<class>-*.glb` files here and, with
+`REBUILD_PIECES_MK=1`, rebuilds `stage/public/pieces-mk.glb` from the five
+sculpted `token-*.glb` masters plus these five. Replace any of them with a
+real sculpt by dropping in a `token-<class>-red/blue.glb` pair that keeps the
+`token_<class>_<team>` object names and re-running the rebuild.

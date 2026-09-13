@@ -1252,12 +1252,15 @@ function ensureMkPieces() {
       // (applyTokenGeometries' own fallback) instead of dragging every
       // OTHER class down with it — the seam that lets a new class's rules
       // ship ahead of (or without) its Blender relief.
-      // Deliberately the SHIPPED classes only, not the full PlayerClass union:
-      // the four kitless classes have no relief in the glb, and listing them
-      // here would warn four times on every Master Killer load for no visual
-      // difference (a missing entry and a warned-then-skipped entry both fall
-      // back to the classic blossom/star). Add each name alongside its sculpt.
-      for (const cls of ["archer", "mage", "warrior", "necromancer", "cleric", "rogue"] as const) {
+      // Every class ships a relief now: five hand-sculpted by Kasen, five
+      // procedural (rogue/warlock/hunter/barbarian/bard — see
+      // tools/build_class_tokens.py). Keep this list in lockstep with the
+      // glb's contents: a name listed here but missing from the glb warns on
+      // every Master Killer load.
+      for (const cls of [
+        "archer", "mage", "warrior", "necromancer", "cleric",
+        "rogue", "warlock", "hunter", "barbarian", "bard",
+      ] as const) {
         const red = geoOf(`token_${cls}_red`);
         const blue = geoOf(`token_${cls}_blue`);
         if (!red || !blue) {
