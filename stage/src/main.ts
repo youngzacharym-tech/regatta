@@ -55,6 +55,11 @@ import {
   TRAP_KNOCKBACK,
   WHIRLWIND_CAP,
   WHIRLWIND_COST,
+  BLOODBATH_END_POSITION,
+  FEL_STORM_RETURN_POSITION,
+  ROGUE_STEAL_ON_CAPTURE,
+  SOUL_BOUNTY_CHARGES,
+  WILD_HUNT_FREEZE_TURNS,
   HEAL_COST,
   isWarded,
   NECRO_CHARGE_CAP,
@@ -2152,7 +2157,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bulwark",
     cost: "1 mana",
     klass: "warrior",
-    desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate still punches through. Fades after a few turns, or the moment it saves the stone.",
+    desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate or a Barbarian's Reckless Swing still punches through. Fades after a few turns, or the moment it saves the stone.",
   },
   bulwarkReinforced: {
     name: "Reinforced Bulwark",
@@ -2188,7 +2193,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Ward",
     cost: "Passive · while your mana is full",
     klass: "mage",
-    desc: "While your mana is full, your most-advanced stone is shielded: it cannot be captured or targeted. Spend any mana and the Ward falls until you refill. Warriors, thralls, and ultimates pierce it.",
+    desc: "While your mana is full, your most-advanced stone is shielded: it cannot be captured or targeted. Spend any mana and the Ward falls until you refill. Warriors, thralls, blessed Cleric stones, a Warlock's Sacrifice, and ultimates pierce it.",
   },
   wardBreaker: {
     name: "Ward Breaker",
@@ -2263,7 +2268,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Vanish",
     cost: `${VANISH_COST} mana`,
     klass: "rogue",
-    desc: "Slip one of your own stones into the shadows: it can't be captured, swept, or targeted by any ability — though an ultimate still finds it. Fades after a few turns, or the moment it saves the stone.",
+    desc: "Slip one of your own stones into the shadows: it can't be captured, swept, Pushed, Cursed, shot, or caught in a Whirlwind. A Charged Shot can still shove it (never home), a Barbarian's Reckless Swing cuts it down, and an ultimate always finds it. Fades after a few turns, or the moment it saves the stone.",
   },
   grandHeist: {
     name: "Grand Heist",
@@ -2281,7 +2286,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Curse of Chains",
     cost: `${CURSE_COST} mana · keeps your turn`,
     klass: "warlock",
-    desc: `Shackle one enemy stone in shared water: every move it makes is ${CURSE_SLOW} tile shorter, and a flip of ${CURSE_SLOW} leaves it unable to move at all. Lasts ${CURSE_TURNS} of their turns. No shield, Ward or Bulwark stops it — the chains bind the legs, not the armour. Your turn continues: hex first, then still make your move.`,
+    desc: `Shackle one enemy stone in shared water: every move it makes is ${CURSE_SLOW} tile shorter, and a flip of ${CURSE_SLOW} leaves it unable to move at all. Lasts ${CURSE_TURNS} of their turns. No shield, Ward or Bulwark stops it — the chains bind the legs, not the armour; only a Vanished stone slips them. Your turn continues: hex first, then still make your move.`,
   },
   sacrifice: {
     name: "Sacrifice",
@@ -2305,7 +2310,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Snare",
     cost: `${SNARE_COST} mana · keeps your turn`,
     klass: "hunter",
-    desc: `Arm a trap on any empty tile in shared water — both sides can see it, so making them route around it is half the point. The first enemy to land on it is thrown ${TRAP_KNOCKBACK} tiles back and pays you ${TRAP_BOUNTY} mana for the trouble. One trap at a time; setting a new one lifts the old. Your turn continues.`,
+    desc: `Arm a trap on any empty shared-water tile that isn't a shield tile — both sides can see it, so making them route around it is half the point. The first enemy to land on it is thrown ${TRAP_KNOCKBACK} tiles back and pays you ${TRAP_BOUNTY} mana for the trouble. One trap at a time; setting a new one lifts the old. Your turn continues.`,
   },
   piercingShot: {
     name: "Piercing Shot",
@@ -3411,7 +3416,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: "Warded",
         cost: "while the Mage holds full mana",
         klass: "mage",
-        desc: "The Mage's most-advanced stone is shielded: it cannot be captured or targeted — except by a Warrior's Ward Breaker, a thrall's blade, or an ultimate. The Ward falls the moment the Mage spends any mana.",
+        desc: "The Mage's most-advanced stone is shielded: it cannot be captured or targeted — except by a Warrior's Ward Breaker, a thrall's blade, a blessed Cleric stone, a Warlock's Sacrifice, or an ultimate. A Charged Shot can still knock it back. The Ward falls the moment the Mage spends any mana.",
       };
     case "bulwark": {
       const turns = currentPower.bulwarkTurns?.[tokenId];
@@ -3420,7 +3425,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: saves !== undefined ? "Reinforced Bulwark" : "Bulwark",
         cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left${saves !== undefined ? ` · ${saves} save${saves === 1 ? "" : "s"}` : ""}`,
         klass: "warrior",
-        desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
+        desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates and a Barbarian's Reckless Swing still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
       };
     }
     case "vanish": {
@@ -3429,7 +3434,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: "Vanished",
         cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left`,
         klass: "rogue",
-        desc: "The Rogue has slipped this stone into the shadows: it cannot be captured, swept, or targeted by any ability. Ultimates still punch through. It fades when its turns run out or the moment it blocks a capture.",
+        desc: "The Rogue has slipped this stone into the shadows: it cannot be captured, swept, Pushed, Cursed, or shot. A Charged Shot can still shove it (never home), a Barbarian's Reckless Swing cuts it down, and ultimates always find it. It fades when its turns run out or the moment it blocks a capture.",
       };
     }
     case "soulClaim": {
@@ -3458,7 +3463,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: "Blessed",
         cost: "a second life · until broken",
         klass: "cleric",
-        desc: "This stone carries the Cleric's blessing: the first blow that would kill it only WOUNDS it — the stone survives (staggering back if the attacker needs its tile), and the attacker earns just one mana for breaking the light. A blessed stone's own strikes carry the light through the Mage's Ward. Ultimates still kill it outright.",
+        desc: "This stone carries the Cleric's blessing: the first blow that would kill it only WOUNDS it — the stone survives (staggering back if the attacker needs its tile), and the attacker earns just one mana for breaking the light. A blessed stone's own strikes carry the light through the Mage's Ward. Ultimates and a Warlock's Sacrifice still kill it outright.",
       };
     case "wounded":
       return {
@@ -5852,6 +5857,10 @@ const GUIDE_SPREADS: [string, string][] = [
        <li data-goto="7"><span>The Necromancer</span><i></i><b>VII</b></li>
        <li data-goto="8"><span>The Cleric</span><i></i><b>VIII</b></li>
        <li data-goto="9"><span>The Rogue</span><i></i><b>IX</b></li>
+       <li data-goto="10"><span>The Warlock</span><i></i><b>X</b></li>
+       <li data-goto="11"><span>The Hunter</span><i></i><b>XI</b></li>
+       <li data-goto="12"><span>The Barbarian</span><i></i><b>XII</b></li>
+       <li data-goto="13"><span>The Bard</span><i></i><b>XIII</b></li>
      </ol>`,
     `<h2>How to Read This Book</h2>
      <p>Tap any entry in the contents to open its chapter directly.</p>
@@ -5918,27 +5927,29 @@ const GUIDE_SPREADS: [string, string][] = [
      picks a <span class="gold">class</span> before the flip-off and plays
      the whole match armed with its powers.</p>
      <p>Every capture, every zero you roll, and every shield tile you land on
-     fills your <span class="gold">mana</span> — up to two banked at once.
-     Spend mana to fire your class's active power, offered as a button
-     beside your coins whenever you can afford it.</p>`,
-    `<div class="runner">Master Killer &middot; the six classes</div>
-     <ul>
-       <li><b>The Archer</b> strikes from range — free Snipes on the water,
-       Pushes and the heavy Charged Shot to knock enemies home.</li>
-       <li><b>The Mage</b> bends fate — Wards its lead stone against capture
-       and Re-flips a bad roll, twice a turn with a full bank.</li>
-       <li><b>The Warrior</b> walks through wards — breaks them on contact,
-       sweeps the lane with Charge, shelters behind Bulwark.</li>
-       <li><b>The Necromancer</b> profits from every loss — banks a soul for
-       each stone sent home and raises the dead back onto the board.</li>
-       <li><b>The Cleric</b> refuses the trade — blesses stones with a
-       second life, so the first killing blow only wounds them.</li>
-       <li><b>The Rogue</b> robs the table — every kill drains the enemy's
-       mana too, and Pickpocket lifts it clean with no fight at all.</li>
-     </ul>
+     fills your <span class="gold">mana</span> — up to ${CHARGE_CAP} banked
+     at once for most crews. The Necromancer's kills fill a third gem no
+     other income can reach, and the Bard's purse runs ${BARD_CHARGE_CAP}
+     deep. Spend mana to fire your class's active powers, offered as buttons
+     beside your coins whenever you can afford them.</p>
      <p>Each class keeps its own chapter in this book — and each hides an
      <span class="gold">ultimate</span>, earned by landing on shield tiles
      three times in a row without your turn ever passing.</p>`,
+    `<div class="runner">Master Killer &middot; the ten classes</div>
+     <ul>
+       <li><b>Archer</b> — Snipe, Push, Charged Shot.</li>
+       <li><b>Mage</b> — Ward, Re-flip, Blink Strike.</li>
+       <li><b>Warrior</b> — Ward Breaker, Charge, Bulwark.</li>
+       <li><b>Necromancer</b> — Soul Harvest, Revive, Exhume.</li>
+       <li><b>Cleric</b> — Bless, Heal, Benediction.</li>
+       <li><b>Rogue</b> — Larceny, Pickpocket, Vanish.</li>
+       <li><b>Warlock</b> — Blood Pact, Curse, Sacrifice.</li>
+       <li><b>Hunter</b> — Wolf, Snare, Piercing Shot.</li>
+       <li><b>Barbarian</b> — Rage, Reckless Swing, Whirlwind.</li>
+       <li><b>Bard</b> — Encore, Inspire, Song of Haste.</li>
+     </ul>
+     <p>In a match, hold any ability gem to read its card, and tap any
+     marked stone to learn what the mark means.</p>`,
   ],
   [
     `<h2>The Archer</h2>
@@ -5952,8 +5963,9 @@ const GUIDE_SPREADS: [string, string][] = [
        charge comes right back, since that's really a capture.</li>
        <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
        Push entirely — the charge is spent, but the stone doesn't move. A
-       <span class="gold">Reinforced Bulwark</span> can't be Pushed at all —
-       only a Charged Shot still moves it.</li>
+       <span class="gold">Reinforced Bulwark</span> or a
+       <span class="gold">Vanished</span> Rogue stone can't be Pushed at
+       all — only a Charged Shot still shoves them, never home.</li>
      </ul>`,
     `<div class="runner">The Archer &middot; continued</div>
      <ul>
@@ -5975,12 +5987,15 @@ const GUIDE_SPREADS: [string, string][] = [
     `<h2>The Mage</h2>
      <ul>
        <li><b>Ward</b> (passive, free): the moment your bank holds a full
-       two charges, your furthest-along stone still on the water cannot be
-       captured — by anyone but a Warrior's Ward Breaker, and a Charged
-       Shot can still knock it home. A plain Push can't budge it at all.</li>
+       ${CHARGE_CAP} charges, your furthest-along stone still on the water
+       cannot be captured. A plain Push can't budge it at all, though a
+       Charged Shot can still knock it back.</li>
+       <li>What does break through: a Warrior's Ward Breaker, a
+       Necromancer's thrall, a blessed Cleric stone, a Warlock's
+       Sacrifice, and any ultimate. A Warlock's Curse binds a Warded stone
+       like any other.</li>
        <li>Ward always follows whichever of your stones is furthest along —
-       send that one all the way home and it passes to whichever stone
-       takes the lead.</li>
+       send that one home and it passes to the new leader.</li>
      </ul>`,
     `<div class="runner">The Mage &middot; continued</div>
      <ul>
@@ -6004,44 +6019,42 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Charge</b> (active, 1 mana): make your move a sweep — one
        enemy stone in shared water between where you started and where you
        land is captured too, Warded or not.</li>
-       <li>The Warrior is the one class no Ward can stop cold — everyone
-       else needs a Push or a lucky Re-flip instead.</li>
+       <li>The Warrior is the only class whose plain step walks through a
+       Ward — everyone else needs a thrall, a blessing, a Sacrifice, a
+       Push, or an ultimate.</li>
      </ul>`,
     `<div class="runner">The Warrior &middot; continued</div>
      <ul>
-       <li><b>Bulwark</b> (active, 1 mana): raise a shield over one of
-       YOUR OWN stones — it cannot be captured or swept by Charge, and a
-       Push can only shove it, never send it home. An enemy ultimate still
-       punches through. It fades after a few of your turns unused, or the
-       instant it saves the stone.</li>
-       <li><b>Reinforced Bulwark</b> (active, spends both mana): the
-       same shield with everything doubled — it lasts twice as many turns,
-       and it shrugs off the first save instead of fading. A plain Push
-       can't budge it at all; only a Charged Shot still moves it. Only the
-       second save, or time, brings it down.</li>
+       <li><b>Bulwark</b> (active, 1 mana): shield one of YOUR OWN stones
+       — it can't be captured or swept by Charge, and a Push can only
+       shove it, never send it home. An ultimate or a Barbarian's Reckless
+       Swing still punches through. Fades after a few of your turns, or
+       the instant it saves the stone.</li>
+       <li><b>Reinforced Bulwark</b> (active, spends both mana): the same
+       shield, everything doubled: twice the turns, and it survives its
+       first save. A plain Push can't budge it at all; only a Charged Shot
+       still shoves it.</li>
        <li><b>Warpath</b> (active, spends your ultimate): land on a shield
        tile three times running, then teleport your least-advanced stone
-       onto any enemy in shared water — capturing it plus every
-       enemy stone caught between where it started and where it lands,
-       through shields, Wards, and Bulwarks alike.</li>
+       onto any enemy in shared water, capturing it and every enemy in
+       between through every protection there is.</li>
      </ul>`,
   ],
   [
     `<h2>The Necromancer</h2>
      <ul>
-       <li><b>Soul Harvest</b> (passive, free): your kills feed you. Every
-       enemy stone you send home pays ${REVIVE_COST} mana — filling even
-       your third gem, the SOUL GEM, which no other income can touch — and
-       leaves its corpse marked on the tile where it fell. Only the
-       freshest corpse keeps its soul.</li>
-       <li><b>Soul Claim</b>: while your mana is full, the marked
-       body cannot re-enter from the enemy's hand — the soul is yours
-       until you spend it. Spend below full and they may reclaim it.</li>
+       <li><b>Soul Harvest</b> (passive, free): every enemy stone you send
+       home pays ${SOUL_BOUNTY_CHARGES} mana — filling even your third gem,
+       the SOUL GEM, which no other income can touch — and marks its corpse
+       where it fell. Only the freshest corpse keeps its soul.</li>
+       <li><b>Soul Claim</b>: while your mana is full, the marked body
+       cannot re-enter from the enemy's hand — the soul is yours until you
+       spend it.</li>
        <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} mana):
-       detonate the marked corpse instead of raising it — every unprotected
-       enemy stone beside the grave is blasted a tile back, all the way
-       home if nothing's free behind it. The blast desecrates the corpse:
-       no thrall, and its casualties yield no mana.</li>
+       detonate the marked corpse instead of raising it: every unprotected
+       enemy beside the grave is blasted a tile back — home if nothing's
+       free behind. It desecrates the corpse: no thrall, and its
+       casualties pay no mana.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
@@ -6067,15 +6080,15 @@ const GUIDE_SPREADS: [string, string][] = [
        quick prayer grants one of your stones a SECOND LIFE. The first
        blow that would kill it only <span class="gold">wounds</span> it —
        the stone survives, staggering back only if the attacker needs its
-       tile, and the attacker earns just one mana for breaking the light.
-       Bless, then still make your move.</li>
+       tile, and the attacker earns just one mana. Bless, then still
+       move.</li>
        <li>The light shelters <span class="gold">${BLESSING_CAP} at a
-       time</span> — one stone always stands outside it. Ultimates kill
-       straight through a blessing, and a blessed stone's own strikes
-       carry the light through the Mage's Ward.</li>
+       time</span> — one stone always stands outside it. Ultimates and a
+       Warlock's Sacrifice kill straight through it; a blessed stone's own
+       strikes carry the light through the Mage's Ward.</li>
        <li><b>Heal</b> (active, ${HEAL_COST} mana): lay hands on a wounded
-       stone and its blessing burns again. Mending takes your whole turn —
-       a broken blessing is a real setback, not a free bounce-back.</li>
+       stone and its blessing burns again. Mending takes your whole
+       turn.</li>
      </ul>`,
     `<div class="runner">The Cleric &middot; continued</div>
      <ul>
@@ -6097,21 +6110,23 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Larceny</b> (passive, free): every stone you send home for
        good pays twice — your own mana climbs as usual, and
-       ${PICKPOCKET_STEAL} mana drains straight out of the enemy's pocket
-       too. A wound doesn't count; only a real kill pays.</li>
+       ${ROGUE_STEAL_ON_CAPTURE} mana drains straight out of the enemy's
+       pocket too. A wound doesn't count; only a real kill pays.</li>
        <li><b>Pickpocket</b> (active, ${PICKPOCKET_COST} mana, keeps your
        turn): reach into an enemy stone's pocket in shared water and lift
        ${PICKPOCKET_STEAL} mana — no fight, and no protection stops you,
        since nothing is actually striking the stone. Pick the pocket, then
        still make your move.</li>
        <li><b>Vanish</b> (active, ${VANISH_COST} mana): slip one of your
-       own stones into the shadows — it can't be captured, swept, or
-       targeted by any ability (an ultimate still finds it). Fades after
-       a few turns, or the moment it saves the stone. The Rogue's own
-       answer to the Mage's Ward and the Warrior's Bulwark.</li>
+       own stones into the shadows — it can't be captured, swept, Pushed,
+       Cursed, shot, or caught in a Whirlwind. Fades after a few turns, or
+       the moment it saves the stone.</li>
      </ul>`,
     `<div class="runner">The Rogue &middot; continued</div>
      <ul>
+       <li>What still reaches a Vanished stone: a Charged Shot can shove it
+       (never home), a Barbarian's Reckless Swing cuts it down, and any
+       ultimate finds it.</li>
        <li><b>Grand Heist</b> (active, spends your ultimate): land on a
        shield tile three times running, then teleport your furthest-along
        stone onto any enemy in shared water and take it — straight through
@@ -6120,8 +6135,130 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>
      <p>The Rogue wins by making the enemy poor: every kill drains their
      purse as well as their stone, and a well-timed Pickpocket can drop a
-     Mage's Ward or starve a Cleric's next prayer without a fight at
-     all.</p>`,
+     Mage's Ward or starve a Cleric's next prayer without a fight.</p>`,
+  ],
+  [
+    `<h2>The Warlock</h2>
+     <ul>
+       <li><b>Blood Pact</b> (passive, free): your dead pay you. Every
+       stone of yours the enemy sends home banks ${BLOOD_PACT_CHARGES}
+       mana — the only class that profits from losing. It never pays for
+       the stone you spend yourself on a Sacrifice.</li>
+       <li><b>Curse of Chains</b> (active, ${CURSE_COST} mana, keeps your
+       turn): shackle one enemy stone in shared water. Every move it
+       makes is ${CURSE_SLOW} tile shorter — a flip of ${CURSE_SLOW}
+       leaves it unable to move at all — for ${CURSE_TURNS} of their
+       turns. No shield, Ward, or Bulwark stops it; only a Vanished stone
+       slips the chains. Hex first, then still make your move.</li>
+     </ul>`,
+    `<div class="runner">The Warlock &middot; continued</div>
+     <ul>
+       <li><b>Sacrifice</b> (active, ${SACRIFICE_COST} mana — your full
+       bank): give your furthest-along stone to the dark and one enemy in
+       shared water dies outright — straight through a Ward or a
+       Blessing, no wound, no second life. A Bulwark, a Vanish, or a
+       shield tile still turns it aside. The kill pays no mana, and the
+       Pact pays nothing for the stone you gave. Ends your turn.</li>
+       <li><b>Fel Storm</b> (active, spends your ultimate): land on a
+       shield tile three times running, then green fire sweeps the whole
+       shared row — every enemy stone in open water is dragged back to
+       tile ${FEL_STORM_RETURN_POSITION + 1}, the water's edge, and stacked
+       behind it, through every protection there is. Nobody dies; they
+       simply have the whole gauntlet to run again.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>The Hunter</h2>
+     <ul>
+       <li><b>Wolf Companion</b> (passive, free): your wolf ranges ahead
+       of your furthest-along stone, guarding the shared-water tile
+       directly in front of it. Any enemy that lands there is captured,
+       for free. A blessed stone is only wounded; a shielded, Warded, or
+       Bulwarked one walks past.</li>
+       <li><b>Snare</b> (active, ${SNARE_COST} mana, keeps your turn): arm
+       a trap on any empty shared-water tile that isn't a shield tile —
+       both sides see it, so making them route around it is half the
+       point. The first enemy to land on it is thrown ${TRAP_KNOCKBACK}
+       tiles back (home if nothing's free behind) and pays you
+       ${TRAP_BOUNTY} mana, even if its armour absorbs the throw. One trap
+       at a time; a new one lifts the old.</li>
+     </ul>`,
+    `<div class="runner">The Hunter &middot; continued</div>
+     <ul>
+       <li><b>Piercing Shot</b> (active, ${PIERCING_SHOT_COST} mana — your
+       full bank): loose an arrow down the shared row from your
+       furthest-along stone. The first enemy in its path dies, at any
+       range — but the first body stops the arrow: a shielded, Warded,
+       Bulwarked, or Vanished stone blocks the shot for everything behind
+       it, and so does one of your own. A blessed stone is wounded.</li>
+       <li><b>Wild Hunt</b> (active, spends your ultimate): land on a
+       shield tile three times running and every trap snaps shut at once.
+       Your wolf takes the nearest enemy in shared water through every
+       protection there is, and every other enemy out there is frozen
+       ${WILD_HUNT_FREEZE_TURNS === 1 ? "for their next turn" : `for ${WILD_HUNT_FREEZE_TURNS} of their turns`}
+       — they cannot move those stones at all.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>The Barbarian</h2>
+     <ul>
+       <li><b>Rage</b> (passive, free): the further behind you fall, the
+       harder you run. For every stone you have lost beyond your
+       opponent's losses, your rearmost stone moves 1 extra tile — up to
+       ${RAGE_MAX}. A stone still in hand counts as rearmost, so it's
+       usually the one just killed coming back angry. Only that stone; the
+       rest keep their pace.</li>
+       <li><b>Reckless Swing</b> (active, ${RECKLESS_SWING_COST} mana):
+       bring the axe down on an enemy directly in front of one of your
+       stones — straight through a Bulwark or a Vanish, which nothing else
+       short of an ultimate can touch. A Ward or a shield tile turns it
+       aside; a Blessing takes it as a wound. Your stone is thrown
+       ${RECKLESS_SELF_KNOCKBACK} tiles back — home, if there's nowhere to
+       land. Ends your turn.</li>
+     </ul>`,
+    `<div class="runner">The Barbarian &middot; continued</div>
+     <ul>
+       <li><b>Whirlwind</b> (active, ${WHIRLWIND_COST} mana — your full
+       bank): spin the axe. Every unprotected enemy within a tile of ANY
+       of your stones is caught: the furthest-along ${WHIRLWIND_CAP} dies,
+       the rest are knocked back a tile. You don't move at all — the
+       storm comes to them.</li>
+       <li><b>Bloodbath</b> (active, spends your ultimate): land on a
+       shield tile three times running, then your furthest-along stone
+       charges the length of shared water and takes EVERY enemy in its
+       path — no cap, no shield, no Ward, no Bulwark, nothing. It finishes
+       standing on tile ${BLOODBATH_END_POSITION + 1}, the far end of the
+       row.</li>
+     </ul>`,
+  ],
+  [
+    `<h2>The Bard</h2>
+     <ul>
+       <li><b>Encore</b> (passive, free): a dead flip is just a rest
+       between verses. Every zero pays you ${ENCORE_ZERO_FLIP_CHARGES}
+       mana instead of one, and your purse runs ${BARD_CHARGE_CAP} deep
+       where everyone else's holds ${CHARGE_CAP}.</li>
+       <li><b>Inspire</b> (active, ${INSPIRE_COST} mana, keeps your turn):
+       light one of your stones — every move it makes is ${INSPIRE_BONUS}
+       tile longer for ${INSPIRE_TURNS} of your turns. Up to
+       ${INSPIRE_CAP} may burn at once. The song never carries a stone
+       past the finish; it still needs the exact step home. Sing, then
+       still move. A lit stone that dies loses its light.</li>
+     </ul>`,
+    `<div class="runner">The Bard &middot; continued</div>
+     <ul>
+       <li><b>Song of Haste</b> (active, ${HASTE_COST} mana): every stone
+       you have lit marches ${HASTE_TILES} tiles at once, no flip needed —
+       ordinary movement rules, so each captures an unprotected enemy it
+       lands on, stops short of a protected one or one of your own, and
+       takes the exact step home if it lands there. The inspirations
+       survive the march. Ends your turn.</li>
+       <li><b>Crescendo</b> (active, spends your ultimate): land on a
+       shield tile three times running and the whole company takes it up —
+       every stone you have on the board is lit at once, past the usual
+       limit of ${INSPIRE_CAP}, and every one of them marches
+       ${CRESCENDO_TILES} tiles on the spot.</li>
+     </ul>`,
   ],
 ];
 

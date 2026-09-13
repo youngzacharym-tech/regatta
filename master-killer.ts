@@ -700,7 +700,8 @@ export const SACRIFICE_COST = 2;
 export const FEL_STORM_RETURN_POSITION = 4;
 
 /** Hunter's Wolf Companion (passive, free, added 2026-07-26): the hunter's
- *  LEAST-advanced on-board stone is the wolf, and it guards the contested
+ *  MOST-advanced on-board stone is the wolf (see wolfGuardTile — it shipped
+ *  least-advanced, this comment lagged), and it guards the contested
  *  tile directly ahead of itself — an enemy that LANDS there is knocked
  *  back this many tiles along its own path. Snipe's shape aimed the other
  *  way: Snipe is a free capture the archer takes on its OWN turn, this is a
@@ -954,7 +955,13 @@ export const INSPIRE_BONUS = 1;
 
 /** Whether an inspiration EXPIRES on its own.
  *
- *  It does not — a lit stone stays lit until it dies, the Cleric's blessing
+ *  CURRENT VALUE: false — inspirations DO expire, after INSPIRE_TURNS of the
+ *  bard's turn-starts (tickInspireForNewTurn runs), and the balance matrix
+ *  the roster ships on was run with that countdown ON. The trace below
+ *  records the permanent-until-death experiment this flag was added for.
+ *
+ *  The experiment's reasoning, kept for the next person who reaches for it:
+ *  a lit stone stays lit until it dies, the Cleric's blessing
  *  model rather than the curse/freeze countdown model. It shipped as a
  *  3-turn countdown and that was the class's second structural failure
  *  (after the exact-escape overshoot; see getLegalPowerMoves): buffs faded

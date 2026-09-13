@@ -906,17 +906,22 @@
       }
       #guide-book .page {
         /* NEVER scrolls: every section is written to fit its spread, and the
-           leftover blank space is the "end of chapter" signal, like paper. */
-        flex: 1; padding: 26px 30px; overflow: hidden;
-        font-size: 14px; line-height: 1.55;
+           leftover blank space is the "end of chapter" signal, like paper.
+           The bottom padding clears the dot row (#guide-dots: bottom 18px,
+           8px tall), so a page that fits never runs under it. Budget at the
+           full 480px book is ~18 lines per page INCLUDING the h2/runner —
+           anything longer is silently clipped, so measure (scrollHeight vs
+           clientHeight on #guide-left/#guide-right) after editing a chapter. */
+        flex: 1; padding: 22px 28px 32px; overflow: hidden;
+        font-size: 13.5px; line-height: 1.5;
       }
       #guide-book .page h2 {
-        font-size: 19px; margin-bottom: 10px; letter-spacing: 0.5px;
+        font-size: 19px; margin-bottom: 8px; letter-spacing: 0.5px;
         border-bottom: 1px solid rgba(90, 60, 20, 0.35); padding-bottom: 6px;
       }
       #guide-book .page p { margin-bottom: 9px; }
       #guide-book .page ul { margin: 0 0 9px 18px; }
-      #guide-book .page li { margin-bottom: 5px; }
+      #guide-book .page li { margin-bottom: 4px; }
       #guide-book .page .gold { color: #a06010; font-weight: bold; }
       /* Right-page continuation marker ("The Archer · continued") */
       #guide-book .page .runner {
@@ -927,7 +932,7 @@
       #guide-book .toc { list-style: none; margin: 4px 0 0; }
       #guide-book .toc li {
         display: flex; align-items: baseline; gap: 8px;
-        padding: 7px 4px; cursor: pointer; border-radius: 6px;
+        padding: 3px 4px; margin-bottom: 1px; cursor: pointer; border-radius: 6px;
       }
       #guide-book .toc li:hover { background: rgba(160, 96, 16, 0.12); }
       #guide-book .toc li span { white-space: nowrap; }
@@ -940,10 +945,20 @@
          two skinny side-by-side columns would clip or need scrolling. */
       #guide-book.compact { width: min(430px, 94vw); }
       #guide-book.compact .spine, #guide-book.compact #guide-right { display: none; }
+      /* The single page gets the width the spine and margins were using —
+         at 360px phones the text column is the whole budget. */
+      #guide-book.compact .page { padding: 20px 18px 32px; font-size: 13px; }
       @media (max-height: 520px) {
+        /* Landscape phones: ~360px of book. Same ~18-line budget as the full
+           book, bought with smaller type instead of a taller page. */
         #guide-book { height: 92vh; }
-        #guide-book .page { padding: 18px 22px; font-size: 12.5px; line-height: 1.5; }
-        #guide-book .page h2 { font-size: 16px; margin-bottom: 7px; }
+        #guide-book .page { padding: 14px 20px 26px; font-size: 12px; line-height: 1.42; }
+        #guide-book .page h2 { font-size: 15px; margin-bottom: 5px; padding-bottom: 4px; }
+        #guide-book .page p { margin-bottom: 6px; }
+        #guide-book .page ul { margin-bottom: 6px; }
+        #guide-book .page li { margin-bottom: 3px; }
+        #guide-book .page .runner { margin-bottom: 8px; }
+        #guide-book .toc li { padding: 1px 4px; margin-bottom: 0; }
       }
       #guide-book .spine {
         width: 3px; align-self: stretch;
