@@ -16,6 +16,8 @@ import {
   BULWARK_REINFORCED_TURNS,
   BULWARK_TURNS,
   CHARGE_CAP,
+  CHARGED_SHOT_COST,
+  BULWARK_REINFORCED_COST,
   CHARGE_SWEEP_CAP,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
@@ -47,6 +49,7 @@ import {
   HEAL_COST,
   NECRO_CHARGE_CAP,
   PICKPOCKET_COST,
+  PICKPOCKET_RETIRED,
   PICKPOCKET_STEAL,
   PUSH_DISTANCE,
   PUSH_WARD_COST,
@@ -86,6 +89,9 @@ import {
   applyReflip,
   applyRevive,
   applyVanish,
+  applyBackstab,
+  BACKSTAB_COST,
+  getBackstabTargets,
   applyWarpath,
   breakShieldStreak,
   canReflipAgain,
@@ -305,11 +311,10 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Re-flip: increments the per-turn use counter", after.reflipsUsedThisTurn === 1);
   check("Re-flip: does not touch the other player's charges", after.charges.p2 === pw.charges.p2);
 
-  // Second re-flip in the same turn: legal while a second charge is banked.
-  check("Re-flip: a SECOND re-flip is offered with a charge still banked", canReflipAgain(after, "p1"));
-  const afterSecond = applyReflip(after, "p1");
-  check("Re-flip: the second re-flip spends the second charge", afterSecond.charges.p1 === CHARGE_CAP - 2);
-  check("Re-flip: the second re-flip counts too", afterSecond.reflipsUsedThisTurn === 2);
+  // REFLIPS_PER_TURN is 1 (2026-09-13): no second re-flip, charges or not.
+  check("Re-flip: a SECOND re-flip is NOT offered (once a turn)", !canReflipAgain(after, "p1"));
+  const afterSecond = applyReflip(after, "p1"); // the pure fn still spends if forced; the gate above is what the engine honors
+  check("Re-flip: the pure apply still counts a forced second use", afterSecond.reflipsUsedThisTurn === 2);
 
   // Ward tension: spending below the full bank drops Ward that instant —
   // the whole built-in cost of double-re-flipping (isWarded gates on
@@ -338,7 +343,7 @@ function check(name: string, cond: boolean, detail?: string) {
   // unbounded re-flips in a single turn.
   const refunded: PowerState = { ...afterSecond, charges: { ...afterSecond.charges, p1: 1 } };
   check("Re-flip: denied a third use this turn even with a refunded charge banked", !canReflipAgain(refunded, "p1"));
-  check(`Re-flip: sanity — the cap under test is REFLIPS_PER_TURN (${REFLIPS_PER_TURN})`, REFLIPS_PER_TURN === 2);
+  check(`Re-flip: sanity — the cap under test is REFLIPS_PER_TURN (${REFLIPS_PER_TURN})`, REFLIPS_PER_TURN === 1);
 
   // A fresh turn resets the counter (resetTurnFlags is what every
   // turn-ending resolve calls).
@@ -1240,7 +1245,7 @@ function check(name: string, cond: boolean, detail?: string) {
     const s = state("p1", { 0: 5 });
     const pw = power({ p1: "warrior" }, { p1: CHARGE_CAP });
     const r = applyBulwark(s, pw, 0, "p1", true);
-    check("Reinforced Bulwark: spends the FULL bank (CHARGE_CAP charges)", r.power.charges.p1 === 0, `got ${r.power.charges.p1}`);
+    check("Reinforced Bulwark: spends BULWARK_REINFORCED_COST, not the whole bank", r.power.charges.p1 === CHARGE_CAP - BULWARK_REINFORCED_COST, `got ${r.power.charges.p1}`);
     check(
       "Reinforced Bulwark: flags the target with BULWARK_REINFORCED_TURNS remaining",
       r.power.bulwarked[0] === BULWARK_REINFORCED_TURNS,
@@ -1458,12 +1463,12 @@ function check(name: string, cond: boolean, detail?: string) {
 //     Ward block below for that coverage.
 // ---------------------------------------------------------------------------
 {
-  // --- Legality: gated on charges === CHARGE_CAP --------------------------
+  // --- Legality: gated on charges >= CHARGED_SHOT_COST -------------------
   {
     const s = state("p1", { 4: 8 }); // enemy alone on a contested tile
-    const pwBelow = power({ p1: "archer" }, { p1: CHARGE_CAP - 1 });
+    const pwBelow = power({ p1: "archer" }, { p1: CHARGED_SHOT_COST - 1 });
     check(
-      "Charged Shot: no targets offered below the full charge cap",
+      "Charged Shot: no targets offered below its cost",
       getChargedShotTargets(s, pwBelow, "p1").length === 0,
       JSON.stringify(getChargedShotTargets(s, pwBelow, "p1")),
     );
@@ -1603,8 +1608,8 @@ function check(name: string, cond: boolean, detail?: string) {
     const movedPartial = rPartial.state.tokens.find((t) => t.id === 4)!;
     check("Charged Shot refund: sanity — this shot does NOT send the target home", movedPartial.position !== -1);
     check(
-      "Charged Shot: spends exactly BOTH charges (CHARGE_CAP) when no refund applies",
-      rPartial.power.charges.p1 === 0,
+      "Charged Shot: spends exactly CHARGED_SHOT_COST when no refund applies",
+      rPartial.power.charges.p1 === CHARGE_CAP - CHARGED_SHOT_COST,
       `left with ${rPartial.power.charges.p1} charges`,
     );
   }
@@ -1764,7 +1769,7 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Bounty: landing-capture setup is legal", !!m && m.captures.includes(4), JSON.stringify(m));
     if (m) {
       const r = applyPowerMove(s, pw, m, "p1");
-      check("Bounty: a kill fills the whole soul bank", r.power.charges.p1 === NECRO_CHARGE_CAP, `p1=${r.power.charges.p1}`);
+      check("Bounty: a kill from an empty bank pays the full SOUL_BOUNTY_CHARGES", r.power.charges.p1 === SOUL_BOUNTY_CHARGES, `p1=${r.power.charges.p1}`);
       check("Bounty: corpse marker set on the death tile", r.power.corpse.p1?.tokenId === 4 && r.power.corpse.p1?.tile === 8, JSON.stringify(r.power.corpse.p1));
       check("Bounty: the victim banks nothing (death-income is gone)", r.power.charges.p2 === 0, `p2=${r.power.charges.p2}`);
       check("Bounty: the killed token goes home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
@@ -1789,10 +1794,10 @@ function check(name: string, cond: boolean, detail?: string) {
     }
   }
 
-  // --- Soul gem: generic income can never fill the third pip --------------
+  // --- Soul gem: generic income can never fill the pip above CHARGE_CAP ---
   {
-    const pwTwo = power({ p1: "necromancer" }, { p1: 2 });
-    check("Soul gem: a zero-flip charge stops at two", grantZeroFlipCharge(pwTwo, "p1").charges.p1 === 2);
+    const pwTwo = power({ p1: "necromancer" }, { p1: CHARGE_CAP });
+    check("Soul gem: a zero-flip charge stops at CHARGE_CAP", grantZeroFlipCharge(pwTwo, "p1").charges.p1 === CHARGE_CAP);
 
     // Non-capturing shield landing at two charges: still two.
     const s = state("p1", { 0: 4 });
@@ -1800,7 +1805,7 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Soul gem: shield-landing setup is legal", !!m && m.landsOnShield, JSON.stringify(m));
     if (m) {
       const r = applyPowerMove(s, pwTwo, m, "p1");
-      check("Soul gem: a shield landing cannot fill the third pip", r.power.charges.p1 === 2, `p1=${r.power.charges.p1}`);
+      check("Soul gem: a shield landing cannot fill the soul pip", r.power.charges.p1 === CHARGE_CAP, `p1=${r.power.charges.p1}`);
     }
     // Below the generic cap the same income still flows normally.
     const pwOne = power({ p1: "necromancer" }, { p1: 1 });
@@ -1974,24 +1979,24 @@ function check(name: string, cond: boolean, detail?: string) {
     const pwBul: PowerState = { ...ready, bulwarked: { 5: 2 } };
     check("Explosion: Bulwark turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 9 }), pwBul, "p1").includes(5));
 
-    // Apply: knockback, send-home on collision, flat cost, desecration.
-    const sApply = state("p1", { 5: 9, 6: 8 }); // 6 at the grave itself: 8->7 shield tile landing? 8-1=7 free -> lands ON the shield tile (legal landing, protection is for capture)
+    // Apply: lethal (2026-09-13) — every unprotected victim goes home, flat cost, desecration.
+    const sApply = state("p1", { 5: 9, 6: 8 }); // 6 stands on the grave itself, 5 one tile out: both in the radius
     const rA = applyCorpseExplosion(sApply, ready, "p1");
-    check("Explosion: victims knocked back one tile", rA.state.tokens.find((t) => t.id === 5)!.position === 8);
+    check("Explosion: every victim in the radius is sent home", rA.state.tokens.find((t) => t.id === 5)!.position === -1 && rA.state.tokens.find((t) => t.id === 6)!.position === -1);
+    check("Explosion: both kills reported", rA.sentHomeIds.length === 2 && rA.sentHomeIds.includes(5) && rA.sentHomeIds.includes(6));
     check("Explosion: spends its flat cost", rA.power.charges.p1 === 0, `p1=${rA.power.charges.p1}`);
     check("Explosion: consumes the corpse", rA.power.corpse.p1 === null);
     check("Explosion: ends the turn", rA.state.currentPlayer === "p2");
     check("Explosion: reports the epicenter", rA.tile === 8);
     check("Explosion: desecration — no corpse minted by the blast", rA.power.corpse.p1 === null);
-    // Collision send-home: enemy at 9 with its own stone at 8 -> 9-1=8 occupied -> home.
-    const sCollide = state("p1", { 5: 9, 6: 8 });
-    const rC = applyCorpseExplosion(sCollide, ready, "p1");
-    // (6 resolves first — nearest the grave — vacating 8 backward to 7, so 5 lands on 8.)
-    check("Explosion: nearest-first resolution lets outer victims fill vacated tiles", rC.state.tokens.find((t) => t.id === 5)!.position === 8);
-    const sWall = state("p1", { 0: 8, 5: 9 }); // MY stone holds 8: enemy at 9 has nowhere -> home
+    // Radius: an enemy two tiles out is untouched.
+    const sFar = state("p1", { 5: 10 });
+    const rF = applyCorpseExplosion(sFar, ready, "p1");
+    check("Explosion: a stone outside the radius is untouched", rF.state.tokens.find((t) => t.id === 5)!.position === 10 && rF.sentHomeIds.length === 0);
+    const sWall = state("p1", { 0: 8, 5: 9 }); // my own stone beside the grave is never a victim
     const rW = applyCorpseExplosion(sWall, ready, "p1");
-    check("Explosion: a blocked landing is a send-home", rW.state.tokens.find((t) => t.id === 5)!.position === -1);
-    check("Explosion: blast send-homes pay no bounty", rW.power.charges.p1 === 0, `p1=${rW.power.charges.p1}`);
+    check("Explosion: only enemies die", rW.state.tokens.find((t) => t.id === 5)!.position === -1 && rW.state.tokens.find((t) => t.id === 0)!.position === 8);
+    check("Explosion: blast kills pay no bounty", rW.power.charges.p1 === 0, `p1=${rW.power.charges.p1}`);
     check("Explosion: the blast breaks a live shield streak", applyCorpseExplosion(sApply, { ...ready, shieldStreak: { p1: 2, p2: 0 } }, "p1").power.shieldStreak.p1 === 0);
     // Mirror: the ENEMY's thrall (my own body) blasted home dies for real.
     const mirrorPw: PowerState = {
@@ -2017,7 +2022,7 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Thrall: captures like any stone", !!tm && tm.captures.includes(5), JSON.stringify(tm));
     if (tm) {
       const r = applyPowerMove(s, pw, tm, "p1");
-      check("Thrall: its kill pays the full bounty (chain necromancy)", r.power.charges.p1 === NECRO_CHARGE_CAP, `p1=${r.power.charges.p1}`);
+      check("Thrall: its kill pays the full bounty (chain necromancy)", r.power.charges.p1 === Math.min(NECRO_CHARGE_CAP, pw.charges.p1 + SOUL_BOUNTY_CHARGES), `p1=${r.power.charges.p1}`);
       check("Thrall: its kill leaves the next corpse", r.power.corpse.p1?.tokenId === 5 && r.power.corpse.p1?.tile === 10, JSON.stringify(r.power.corpse.p1));
       check("Thrall: moving doesn't cost duration", r.power.thrall.p1?.turnsLeft === 2);
     }
@@ -2418,7 +2423,7 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Absorb/Shot: blessed stone targetable", getChargedShotTargets(s4, pw4, "p1").includes(4));
   const r4 = applyChargedShot(s4, pw4, 4, "p1");
   check("Absorb/Shot: blessed target wounded in place", r4.state.tokens.find((t) => t.id === 4)!.position === 4 && r4.power.vitality[4] === "wounded");
-  check("Absorb/Shot: full bank spent, break refunds one", r4.power.charges.p1 === 1);
+  check("Absorb/Shot: cost spent, break refunds one", r4.power.charges.p1 === CHARGE_CAP - CHARGED_SHOT_COST + 1);
   check("Absorb/Shot: reported", r4.woundedTokenId === 4);
 
   // Corpse Explosion: a blessed victim whose knockback would send home is
@@ -2431,13 +2436,12 @@ function check(name: string, cond: boolean, detail?: string) {
     corpse: { p1: { tokenId: 6, tile: 6 }, p2: null },
     vitality: { 4: "blessed" },
   };
-  // Victims: p2's 4 at 6 (blessed, knockback 6->5 collides with its own 5
-  // -> absorbed wound) and p2's 5 at 5 (mortal, knockback 5->4... free? 4
-  // is empty numerically -> soft shove).
+  // Victims: p2's 4 at 6 (blessed -> absorbed as a wound, holds its tile)
+  // and p2's 5 at 5 (mortal -> killed outright by the lethal blast).
   const r6 = applyCorpseExplosion(s6, pw6, "p1");
   check("Absorb/Blast: blessed victim wounded in place", r6.state.tokens.find((t) => t.id === 4)!.position === 6 && r6.power.vitality[4] === "wounded");
   check("Absorb/Blast: reported in woundedTokenIds, not sentHomeIds", r6.woundedTokenIds.includes(4) && !r6.sentHomeIds.includes(4));
-  check("Absorb/Blast: mortal victim still shoved", r6.state.tokens.find((t) => t.id === 5)!.position === 4);
+  check("Absorb/Blast: mortal victim killed", r6.state.tokens.find((t) => t.id === 5)!.position === -1 && r6.sentHomeIds.includes(5));
 }
 
 // ---------------------------------------------------------------------------
@@ -2615,7 +2619,7 @@ function check(name: string, cond: boolean, detail?: string) {
   const s = state("p1", { 0: 4, 4: 6 });
   const pw = power({ p1: "rogue", p2: "mage" }, { p1: 1, p2: 2 });
   const targets = getPickpocketTargets(s, pw, "p1");
-  check("Pickpocket: an enemy in shared water with mana IS a legal target", targets.includes(4), JSON.stringify(targets));
+  check("Pickpocket: RETIRED — the oracle offers no targets even when everything lines up", targets.length === 0 && PICKPOCKET_RETIRED, JSON.stringify(targets));
 
   const pwBroke = power({ p1: "rogue", p2: "mage" }, { p1: 0, p2: 2 });
   check("Pickpocket: no targets when the mover can't afford it", getPickpocketTargets(s, pwBroke, "p1").length === 0);
@@ -2633,12 +2637,12 @@ function check(name: string, cond: boolean, detail?: string) {
   );
 
   const sShield = state("p1", { 0: 4, 4: 7 }); // tile 7 is a shield tile
-  check("Pickpocket: reaches an enemy standing on a shield tile", getPickpocketTargets(sShield, pw, "p1").includes(4));
+  check("Pickpocket: retired — still nothing offered on a shield tile", getPickpocketTargets(sShield, pw, "p1").length === 0);
 
   const pwWarded = power({ p1: "rogue", p2: "mage" }, { p1: 1, p2: CHARGE_CAP });
   check(
-    "Pickpocket: reaches a Warded enemy (Ward only protects against capture)",
-    getPickpocketTargets(s, pwWarded, "p1").includes(4),
+    "Pickpocket: retired — nothing offered against a Warded enemy",
+    getPickpocketTargets(s, pwWarded, "p1").length === 0,
   );
 
   const pwBulwarked: PowerState = {
@@ -2646,8 +2650,8 @@ function check(name: string, cond: boolean, detail?: string) {
     bulwarked: { 4: 3 },
   };
   check(
-    "Pickpocket: reaches a Bulwarked enemy (no capture happens, so Bulwark is irrelevant)",
-    getPickpocketTargets(s, pwBulwarked, "p1").includes(4),
+    "Pickpocket: retired — nothing offered against a Bulwarked enemy",
+    getPickpocketTargets(s, pwBulwarked, "p1").length === 0,
   );
 
   const r = applyPickpocket(pw, "p1");
@@ -2768,6 +2772,114 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Rogue: Backstab — a guaranteed hit that pierces Ward (by omission, same
+// idiom as Charged Shot) but respects Bulwark and the wound split — only
+// ultimates truly pierce Bulwark/Blessing, and Backstab deliberately isn't one
+// ---------------------------------------------------------------------------
+{
+  const s = state("p1", { 0: 4, 4: 6 });
+  const pw = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
+  const targets = getBackstabTargets(s, pw, "p1");
+  check("Backstab: reaches a Warded enemy (pierces Ward by omission)", targets.includes(4), JSON.stringify(targets));
+
+  const pwBelow = power({ p1: "rogue", p2: "mage" }, { p1: BACKSTAB_COST - 1 });
+  check("Backstab: no targets below its cost", getBackstabTargets(s, pwBelow, "p1").length === 0);
+
+  const sShield = state("p1", { 0: 4, 4: 7 });
+  check("Backstab: a target on a shield tile is not a legal target", !getBackstabTargets(sShield, pw, "p1").includes(4));
+
+  const pwBulwarked: PowerState = {
+    ...power({ p1: "rogue", p2: "warrior" }, { p1: CHARGE_CAP }),
+    bulwarked: { 4: 3 },
+  };
+  check(
+    "Backstab: a Bulwarked enemy is NOT a legal target (only ultimates pierce Bulwark)",
+    !getBackstabTargets(s, pwBulwarked, "p1").includes(4),
+  );
+  const pwVanished: PowerState = {
+    ...power({ p1: "rogue", p2: "rogue" }, { p1: CHARGE_CAP }),
+    bulwarked: { 4: 2 },
+  };
+  check("Backstab: a Vanished enemy (rogue mirror) is NOT a legal target", !getBackstabTargets(s, pwVanished, "p1").includes(4));
+
+  const sPrivate = state("p1", { 0: 4, 4: 1 });
+  check("Backstab: a target outside the contested zone is never legal", getBackstabTargets(sPrivate, pw, "p1").length === 0);
+
+  // --- Apply: a real kill (unwarded, unblessed target) ---
+  {
+    const sKill = state("p1", { 0: 4, 4: 6 });
+    const pwKill = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 1 });
+    const r = applyBackstab(sKill, pwKill, 4, "p1");
+    check("Backstab: kills the target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check(
+      "Backstab: does NOT refund on a real kill (unlike Push/Charged Shot's conditional send-home)",
+      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST,
+      `got ${r.power.charges.p1}`,
+    );
+    check(
+      `Backstab: Larceny drains ROGUE_STEAL_ON_CAPTURE (${ROGUE_STEAL_ON_CAPTURE}) from the victim on a real kill`,
+      r.power.charges.p2 === Math.max(0, 1 - ROGUE_STEAL_ON_CAPTURE),
+      `got ${r.power.charges.p2}`,
+    );
+    check("Backstab: reports no wound", r.woundedTokenId === null);
+    const sPact = state("p1", { 0: 4, 4: 6 });
+    const pwPact = power({ p1: "rogue", p2: "warlock" }, { p1: CHARGE_CAP, p2: 0 });
+    const rp = applyBackstab(sPact, pwPact, 4, "p1");
+    check("Backstab: Larceny drains first, then the victim's Blood Pact pays (warlock at 0 ends at 1)", rp.power.charges.p2 === 1, `got ${rp.power.charges.p2}`);
+    const pwLit: PowerState = { ...power({ p1: "rogue", p2: "bard" }, { p1: CHARGE_CAP, p2: 0 }), inspired: { 4: 3 } };
+    const rl = applyBackstab(sPact, pwLit, 4, "p1");
+    check("Backstab: a lit (inspired) victim loses the song on the reserve trip", rl.power.inspired[4] === undefined);
+    check("Backstab: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+  }
+
+  // --- Apply: pierces Ward for the real kill ---
+  {
+    const sWard = state("p1", { 0: 4, 4: 6 });
+    const pwWard = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
+    check(
+      "Backstab: sanity — the target really is warded",
+      isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!),
+    );
+    const r = applyBackstab(sWard, pwWard, 4, "p1");
+    check("Backstab: kills a Warded target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+  }
+
+  // --- Apply: a wound (blessed target) — survives, still refunds, but NO
+  //     Larceny drain (wounds pay the standard charge and nothing else) ---
+  {
+    const sWound = state("p1", { 0: 4, 4: 6 });
+    const pwWound: PowerState = {
+      ...power({ p1: "rogue", p2: "cleric" }, { p1: CHARGE_CAP, p2: 1 }),
+      vitality: { 4: "blessed" },
+    };
+    const r = applyBackstab(sWound, pwWound, 4, "p1");
+    check("Backstab: a Blessed target survives as a WOUND, not a kill", r.state.tokens.find((t) => t.id === 4)!.position === 6);
+    check("Backstab: the blessing breaks (vitality -> wounded)", r.power.vitality[4] === "wounded");
+    check(
+      "Backstab: still refunds 1 charge on a wound",
+      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST + 1,
+      `got ${r.power.charges.p1}`,
+    );
+    check("Backstab: Larceny does NOT fire on a wound", r.power.charges.p2 === 1, `got ${r.power.charges.p2}`);
+    check("Backstab: reports the wounded token id", r.woundedTokenId === 4);
+  }
+
+  // --- Breaks any live shield streak (no token of the mover's ever moves,
+  //     so it never lands on a shield itself) ---
+  {
+    const sStreak = state("p1", { 0: 4, 4: 6 });
+    const base = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 0 });
+    const pwStreak: PowerState = { ...base, shieldStreak: { ...base.shieldStreak, p1: 2 } };
+    const r = applyBackstab(sStreak, pwStreak, 4, "p1");
+    check("Backstab: breaks a live shield streak", r.power.shieldStreak.p1 === 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rogue: Grand Heist ultimate — teleport-capture like Blink Strike, pierces
 
 // ---------------------------------------------------------------------------
 // Rogue: Grand Heist ultimate — teleport-capture like Blink Strike, pierces

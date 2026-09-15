@@ -43,6 +43,10 @@ import {
   applyWhirlwind,
   applyHeal,
   applyPickpocket,
+  applyBackstab,
+  applyBlink,
+  getBlinkTiles,
+  blinkStone,
   applyPowerMove,
   applyPush,
   applyReflip,
@@ -54,6 +58,8 @@ import {
   applyWildHunt,
   canReflipAgain,
   CHARGE_CAP,
+  CHARGED_SHOT_COST,
+  BULWARK_REINFORCED_COST,
   CHARGED_SHOT_DISTANCE,
   CHARGED_SHOT_WARD_DISTANCE,
   CURSE_COST,
@@ -80,6 +86,7 @@ import {
   getHealTargets,
   getLegalPowerMoves,
   getPickpocketTargets,
+  getBackstabTargets,
   getPushTargets,
   getReviveSpawnTile,
   getSacrificeTargets,
@@ -480,6 +487,30 @@ function scoreVanish(state: GameState, targetId: number, rand: () => number): nu
 
 /** Score Re-flip: only worth it when the CURRENT flip is bad — zero, or a
  *  flip that produces no legal moves at all (about to be skipped anyway). */
+/** Score Mage's Blink (added 2026-09-13): a turn-ending reposition of the
+ *  rearmost on-board stone, priced on the same axis as scoreMove (a plain
+ *  advance is worth about its landing tile). Pays for tiles gained beyond
+ *  what a flip would have given, hates landing in front of an enemy's
+ *  reach (scoreMove's own -80 rule), likes landing behind one, and is the
+ *  turn's rescue when the flip left no move. Negative floor: the cast has
+ *  to buy real distance to beat simply moving, and it drops the Ward when
+ *  cast from a full bank. STARTING VALUES, not yet sim-tuned. */
+function scoreBlink(state: GameState, power: PowerState, moves: PowerMove[], tile: number, rand: () => number): number {
+  const mover = state.currentPlayer;
+  const stone = blinkStone(state, power, mover);
+  if (!stone) return -Infinity;
+  const gained = tile - Math.max(0, stone.position);
+  let score = MK_BLINK_FLOOR + MK_BLINK_PER_TILE * gained + tile;
+  const foes = state.tokens.filter((t) => effectiveOwner(power, t) !== mover && t.position >= 4 && t.position <= 11);
+  if (foes.some((t) => tile - t.position >= 1 && tile - t.position <= 4)) score -= 80;
+  if (foes.some((t) => t.position - tile >= 1 && t.position - tile <= 4)) score += 45;
+  if (moves.length === 0) score += 200;
+  if (power.charges[mover] >= CHARGE_CAP) score -= 60; // the Ward falls with the spend
+  return score + rand() * 20;
+}
+const MK_BLINK_FLOOR = -100; // first run at -70/14: 5 blinks/game and an 88.7% Mage — the cast must set something up, not just walk
+const MK_BLINK_PER_TILE = 16;
+
 function scoreReflip(currentMoveCount: number, flip: number, rand: () => number): number {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
   return -1; // never worth it over an already-legal move otherwise
@@ -499,16 +530,12 @@ function scoreCorpseExplosion(state: GameState, power: PowerState, victims: numb
   let score = 0;
   for (const id of victims) {
     const t = state.tokens.find((tok) => tok.id === id)!;
-    const landing = // mirror applyCorpseExplosion's per-victim physics for the estimate
-      t.position - 1 < 4 && possessorOf(power, t.id) !== null
-        ? -1
-        : state.tokens.some(
-            (o) => o.id !== t.id && o.position === t.position - 1 && (o.owner === t.owner || (t.position - 1 >= 4 && t.position - 1 <= 11)),
-          )
-          ? -1
-          : t.position - 1;
-    score += landing === -1 ? 380 + t.position * 8 : 90;
+    // Lethal blast (2026-09-13): every unprotected victim is a send-home; a
+    // blessed one is only wounded, worth roughly a Push's break.
+    score += isBlessed(power, t.id) ? 140 : 380 + t.position * 8;
   }
+  // Desecration forfeits the corpse Revive would have raised, so a single
+  // unblessed body has to clear the thrall's own value to be worth burning.
   return score + rand() * 20;
 }
 
@@ -599,6 +626,18 @@ function scoreBenediction(poolSize: number, rand: () => number): number {
  *  discipline (see scoreBulwark's history note) against a small flat
  *  positive reflexively out-competing a genuine capture chance every
  *  single turn. STARTING VALUES, not yet sim-tuned. */
+/** Score Rogue's Backstab (restored 2026-09-13): a guaranteed hit, scored
+ *  like Blink Strike/Warpath's guaranteed capture — EXCEPT a Cleric-blessed
+ *  target only wounds (a charge back and the shelter denied, but the stone
+ *  survives), priced closer to a soft push than a kill. Costs half the
+ *  4-bank, so it competes with Pickpocket + Vanish for the same mana; the
+ *  bar it clears is a real capture's. STARTING VALUES, not yet sim-tuned. */
+function scoreBackstab(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  const target = state.tokens.find((t) => t.id === targetId)!;
+  const wounds = isBlessed(power, targetId);
+  return (wounds ? 260 : 460) + target.position * 10 + rand() * 20;
+}
+
 function scorePickpocket(power: PowerState, foe: PlayerId, rand: () => number): number {
   const cap = power.classes[foe] === "necromancer" ? NECRO_CHARGE_CAP : CHARGE_CAP;
   const atCap = power.charges[foe] >= cap;
@@ -1031,12 +1070,22 @@ function pickStandardPowerAction(
     }
   }
 
-  if (cls === "archer" && charges === CHARGE_CAP) {
+  if (cls === "archer" && charges >= CHARGED_SHOT_COST) {
     for (const targetId of getChargedShotTargets(state, power, mover)) {
       const score = scoreChargedShot(state, power, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "chargedShot", targetTokenId: targetId };
+      }
+    }
+  }
+
+  if (cls === "mage") {
+    for (const tile of getBlinkTiles(state, power, mover)) {
+      const score = scoreBlink(state, power, moves, tile, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "blink", tile };
       }
     }
   }
@@ -1080,15 +1129,7 @@ function pickStandardPowerAction(
     }
     // Reinforced Bulwark: the full-bank cast, offered alongside the plain
     // one — same target pool, its own threat-gated scoring.
-    if (charges === CHARGE_CAP) {
-      for (const targetId of bulwarkTargets) {
-        const score = scoreReinforcedBulwark(state, targetId, rand);
-        if (score > bestScore) {
-          bestScore = score;
-          best = { kind: "bulwark", tokenId: targetId, reinforced: true };
-        }
-      }
-    }
+    // Reinforced Bulwark retired 2026-09-13 (BULWARK_REINFORCED_RETIRED).
   }
 
   if (cls === "necromancer") {
@@ -1165,6 +1206,13 @@ function pickStandardPowerAction(
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "pickpocket", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getBackstabTargets(state, power, mover)) {
+      const score = scoreBackstab(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "backstab", targetTokenId: targetId };
       }
     }
     // Vanish IS Bulwark's mechanic under a Rogue cast (see VANISH_COST's
@@ -1344,7 +1392,7 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   if (cls === "archer" && charges >= 1) {
     for (const id of getPushTargets(state, power, mover)) out.push({ kind: "push", targetTokenId: id });
   }
-  if (cls === "archer" && charges === CHARGE_CAP) {
+  if (cls === "archer" && charges >= CHARGED_SHOT_COST) {
     for (const id of getChargedShotTargets(state, power, mover)) {
       out.push({ kind: "chargedShot", targetTokenId: id });
     }
@@ -1361,9 +1409,7 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   if (cls === "warrior" && charges >= 1) {
     const bulwarkTargets = getBulwarkTargets(state, power, mover);
     for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id });
-    if (charges === CHARGE_CAP) {
-      for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id, reinforced: true });
-    }
+    // Reinforced Bulwark retired 2026-09-13 (BULWARK_REINFORCED_RETIRED).
   }
   if (cls === "necromancer" && getReviveSpawnTile(state, power, mover) !== null) {
     // One candidate, no payload — the corpse determines everything.
@@ -1386,6 +1432,10 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   }
   if (cls === "rogue") {
     for (const id of getPickpocketTargets(state, power, mover)) out.push({ kind: "pickpocket", targetTokenId: id });
+    for (const id of getBackstabTargets(state, power, mover)) out.push({ kind: "backstab", targetTokenId: id });
+  }
+  if (cls === "mage") {
+    for (const tile of getBlinkTiles(state, power, mover)) out.push({ kind: "blink", tile });
     if (charges >= VANISH_COST) {
       for (const id of getVanishTargets(state, power, mover)) out.push({ kind: "vanish", tokenId: id });
     }
@@ -2003,6 +2053,10 @@ function mkSimulate(
       return { state, power: applyPickpocket(power, mover) };
     case "sacrifice":
       return applySacrifice(state, power, c.targetTokenId, mover);
+    case "backstab":
+      return applyBackstab(state, power, c.targetTokenId, mover);
+    case "blink":
+      return applyBlink(state, power, c.tile, mover);
     case "felStorm":
       return applyFelStorm(state, power, mover);
     case "curse":

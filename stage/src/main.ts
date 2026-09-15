@@ -27,6 +27,8 @@ import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
 // branch that reads them is gated accordingly).
 import {
   CHARGE_CAP,
+  CHARGED_SHOT_COST,
+  BULWARK_REINFORCED_COST,
   BLESS_COST,
   BLESSING_CAP,
   BLOOD_PACT_CHARGES,
@@ -70,6 +72,8 @@ import {
   SACRIFICE_COST,
   THRALL_TURNS,
   VANISH_COST,
+  BACKSTAB_COST,
+  BLINK_COST,
   type PlayerClass,
   type PowerMove,
   type PowerState,
@@ -1146,6 +1150,35 @@ const ringMeshes: THREE.Mesh[] = markers.map(() => {
   scene.add(m);
   return m;
 });
+// Tile rings for TILE-targeted casts (Blink): one ring per contested tile,
+// laid out on arm from the viewer's own path, lit only while armed. Their
+// planes are the hit targets too — no separate hit geometry.
+const CONTESTED_TILES = [4, 5, 6, 7, 8, 9, 10, 11];
+const tileRingMeshes: THREE.Mesh[] = CONTESTED_TILES.map(() => {
+  const m = new THREE.Mesh(eligibleRingGeo, eligibleRingMat);
+  m.rotation.x = -Math.PI / 2;
+  m.renderOrder = 1;
+  m.visible = false;
+  scene.add(m);
+  return m;
+});
+function layoutTileRings() {
+  const side = viewSide(myRole ?? "p1");
+  CONTESTED_TILES.forEach((tile, i) => {
+    const p = tileWorldPos(side, tile);
+    tileRingMeshes[i].position.set(p.x, p.y + ELIGIBLE_RING_Y_OFFSET, p.z);
+  });
+}
+function findTileUnderPointer(tiles: Set<number>, clientX: number, clientY: number): number | null {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const idx = CONTESTED_TILES.map((t, i) => (tiles.has(t) ? i : -1)).filter((i) => i >= 0);
+  const meshes = idx.map((i) => tileRingMeshes[i]);
+  const hits = raycaster.intersectObjects(meshes, false);
+  return hits.length ? CONTESTED_TILES[idx[meshes.indexOf(hits[0].object as THREE.Mesh)]] : null;
+}
 // The confirm pulse animates opacity alone, so it needs its own material.
 const confirmRing = new THREE.Mesh(eligibleRingGeo, eligibleRingMat.clone());
 confirmRing.rotation.x = -Math.PI / 2;
@@ -1984,7 +2017,9 @@ let currentPower: {
    *  Grand Heist's ultimate pool (ultimateReady-gated). */
   pickpocketTargets?: number[];
   vanishTargets?: number[];
+  backstabTargets?: number[];
   grandHeistTargets?: number[];
+  blinkTiles?: number[];
   curseTargets?: number[];
   sacrificeTargets?: number[];
   felStormTargets?: number[];
@@ -2034,15 +2069,19 @@ type ArmedKind =
   | "heal"
   | "pickpocket"
   | "vanish"
+  | "backstab"
   | "grandHeist"
   | "curse"
   | "sacrifice"
   /** Snare is the one armed mode whose targets are TILES, not tokens — the
    *  board tap resolves against a tile index (see fireArmedTile). */
   | "snare"
+  /** Blink is the other TILE-targeted mode — a real tile picker (the
+   *  contested tiles' ground rings double as hit targets, see armedTiles). */
+  | "blink"
   | "recklessSwing"
   | "inspire";
-let armed: { kind: ArmedKind; targetIds: Set<number> } | null = null;
+let armed: { kind: ArmedKind; targetIds: Set<number>; tiles: Set<number> | null } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
  *  sweep-capable move of the current roll (rebuilt by updateDock). The
  *  server emits at most one PowerMove per token, so the map is
@@ -2129,11 +2168,17 @@ const moveIndexByToken = new Map<number, number>();
 // above the gem that says what the ability actually does — cost, effect,
 // edge cases — like any game's tooltip. A quick tap still fires/arms.
 const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; klass: PlayerClass }> = {
+  blink: {
+    name: "Blink",
+    cost: `${BLINK_COST} mana`,
+    klass: "mage",
+    desc: "Teleport your rearmost stone on the board to any empty tile in shared water ahead of it — never a shield tile, never onto a trap or a wolf's watch, never home. Nothing is captured; this is position, not a strike. Blink Strike is the same jump with a blade at the end. Ends your turn, and spending drops the Ward until you refill.",
+  },
   reflip: {
     name: "Re-flip",
     cost: "1 mana each · keeps your turn",
     klass: "mage",
-    desc: `Don't like your roll? Flip all four coins again instead of moving — up to ${REFLIPS_PER_TURN} times a turn, one mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it — unless the new flip is a zero, which pays the mana right back.`,
+    desc: `Don't like your roll? Flip all four coins again instead of moving — ${REFLIPS_PER_TURN === 1 ? "once a turn" : `up to ${REFLIPS_PER_TURN} times a turn`}, one mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it — unless the new flip is a zero, which pays the mana right back.`,
   },
   push: {
     name: "Push",
@@ -2143,7 +2188,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   chargedShot: {
     name: "Charged Shot",
-    cost: `${CHARGE_CAP} mana`,
+    cost: `${CHARGED_SHOT_COST} mana`,
     klass: "archer",
     desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces — ${CHARGED_SHOT_WARD_DISTANCE} if Warded, the one shot that can reach a Warded stone. Send it home and one mana comes back.`,
   },
@@ -2161,7 +2206,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   bulwarkReinforced: {
     name: "Reinforced Bulwark",
-    cost: `${CHARGE_CAP} mana`,
+    cost: `${BULWARK_REINFORCED_COST} mana`,
     klass: "warrior",
     desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down. A plain Push can't budge it; only a Charged Shot moves it.",
   },
@@ -2211,7 +2256,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Corpse Explosion",
     cost: `${CORPSE_EXPLOSION_COST} mana`,
     klass: "necromancer",
-    desc: "Detonate the marked corpse instead of raising it: every unprotected enemy stone beside the grave is blasted one tile back — a blocked landing sends it all the way home. The blast desecrates the corpse (no thrall, no mana from its kills), and shields, Wards, and Bulwarks all turn it. The same grave, two rites: burn it now, or raise it at full mana.",
+    desc: "Detonate the marked corpse instead of raising it: every unprotected enemy stone beside the grave is killed outright — sent home. A blessed stone is only wounded. The blast desecrates the corpse: no thrall, and its kills pay no mana and mark no corpse. Shields, Wards, and Bulwarks all turn it. The same grave, two rites: burn it now, or raise it as a thrall.",
   },
   exhume: {
     name: "Exhume",
@@ -2250,7 +2295,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Soul Harvest",
     cost: "Passive · always on",
     klass: "necromancer",
-    desc: `Your kills feed you: every enemy stone you send home pays ${REVIVE_COST} mana — filling even your third crystal, the Soul Gem, which no other income can touch — and leaves its corpse marked where it fell. While your mana is full, the marked body cannot rise on its own: the soul is yours until you spend it.`,
+    desc: `Your kills feed you: every enemy stone you send home pays ${REVIVE_COST} mana — three at once, where anyone else's kill pays one — and leaves its corpse marked where it fell. While your mana is full, the marked body cannot rise on its own: the soul is yours until you spend it.`,
   },
   larceny: {
     name: "Larceny",
@@ -2263,6 +2308,12 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     cost: `${PICKPOCKET_COST} mana · keeps your turn`,
     klass: "rogue",
     desc: `Reach into an enemy stone's pocket in shared water and lift ${PICKPOCKET_STEAL} mana — no fight, no protection stops you, since nothing is actually striking the stone. Your turn continues: pick the pocket, then still make your move.`,
+  },
+  backstab: {
+    name: "Backstab",
+    cost: `${BACKSTAB_COST} mana`,
+    klass: "rogue",
+    desc: "A guaranteed hit on any enemy stone in shared water: it dies and goes home, no roll, no aiming — straight through a Ward. A shield tile, a Bulwark, or a Vanish still turns it aside, and a blessed stone is only wounded. Larceny still drains the victim's purse on the kill. Ends your turn.",
   },
   vanish: {
     name: "Vanish",
@@ -2352,7 +2403,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Encore",
     cost: "Passive · always on",
     klass: "bard",
-    desc: `A dead flip is just a rest between verses: every zero pays you ${ENCORE_ZERO_FLIP_CHARGES} mana instead of one, and your purse runs ${BARD_CHARGE_CAP} deep where everyone else's holds ${CHARGE_CAP}. The song has to be paid for somehow.`,
+    desc: `A dead flip is just a rest between verses: every zero pays you ${ENCORE_ZERO_FLIP_CHARGES} mana instead of one, so a run of dead flips fills your purse twice as fast as anyone's. The song has to be paid for somehow.`,
   },
   inspire: {
     name: "Inspire",
@@ -2453,11 +2504,12 @@ const vignetteEl = document.getElementById("target-vignette") as HTMLDivElement;
  *  by the always-visible dormant slot), so they carry no pips. */
 const DOCK_COST: Record<string, number> = {
   reflip: 1,
+  blink: BLINK_COST,
   push: 1,
-  chargedShot: CHARGE_CAP,
+  chargedShot: CHARGED_SHOT_COST,
   charge: 1,
   bulwark: 1,
-  bulwarkReinforced: CHARGE_CAP,
+  bulwarkReinforced: BULWARK_REINFORCED_COST,
   blinkStrike: 0,
   warpath: 0,
   revive: REVIVE_COST,
@@ -2475,6 +2527,7 @@ const DOCK_COST: Record<string, number> = {
   larceny: 0,
   pickpocket: PICKPOCKET_COST,
   vanish: VANISH_COST,
+  backstab: BACKSTAB_COST,
   grandHeist: 0,
   bloodPact: 0,
   curse: CURSE_COST,
@@ -2496,6 +2549,7 @@ const DOCK_COST: Record<string, number> = {
 /** Short names for the 10px labels under the gems (cards carry full names). */
 const DOCK_NAMES: Record<string, string> = {
   reflip: "Re-flip",
+  blink: "Blink",
   push: "Push",
   chargedShot: "Charged Shot",
   charge: "Charge",
@@ -2518,6 +2572,7 @@ const DOCK_NAMES: Record<string, string> = {
   larceny: "Larceny",
   pickpocket: "Pickpocket",
   vanish: "Vanish",
+  backstab: "Backstab",
   grandHeist: "Grand Heist",
   bloodPact: "Blood Pact",
   curse: "Curse",
@@ -2555,13 +2610,13 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
   mage: [
     { ability: "ward", passive: true },
     { ability: "reflip" },
+    { ability: "blink" },
     { ability: "blinkStrike", ult: true },
   ],
   warrior: [
     { ability: "wardBreaker", passive: true },
     { ability: "charge" },
     { ability: "bulwark" },
-    { ability: "bulwarkReinforced" },
     { ability: "warpath", ult: true },
   ],
   necromancer: [
@@ -2578,7 +2633,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
   ],
   rogue: [
     { ability: "larceny", passive: true },
-    { ability: "pickpocket" },
+    { ability: "backstab" },
     { ability: "vanish" },
     { ability: "grandHeist", ult: true },
   ],
@@ -2647,10 +2702,12 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   heal: "tap a wounded stone to mend",
   pickpocket: "tap a glowing enemy stone",
   vanish: "tap one of your stones to hide it",
+  backstab: "tap a glowing enemy stone to kill it",
   grandHeist: "tap an enemy to strike",
   curse: "tap an enemy stone to shackle",
   sacrifice: "tap the enemy to kill — your lead stone pays",
   snare: "tap a glowing empty tile to set the trap",
+  blink: "tap a glowing tile to blink there",
   recklessSwing: "tap the enemy to cut down — you'll be thrown back",
   inspire: "tap one of your stones to light it",
 };
@@ -2790,6 +2847,11 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
       if ((p.grandHeistTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
+    case "backstab": {
+      if ((p.backstabTargets ?? []).length > 0) return { state: "ready" };
+      if (charges < BACKSTAB_COST) return { state: "noafford", reason: needCharges(BACKSTAB_COST) };
+      return { state: "noafford", reason: "No enemy the blade can reach" };
+    }
     case "curse": {
       if ((p.curseTargets ?? []).length > 0) return { state: "ready" };
       if (charges < CURSE_COST) return { state: "noafford", reason: needCharges(CURSE_COST) };
@@ -2807,6 +2869,11 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
       if ((p.felStormTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
+    case "blink": {
+      if ((p.blinkTiles ?? []).length > 0) return { state: "ready" };
+      if (charges < BLINK_COST) return { state: "noafford", reason: needCharges(BLINK_COST) };
+      return { state: "noafford", reason: "Nowhere ahead to blink to" };
+    }
     case "snare": {
       if ((p.snareTiles ?? []).length > 0) return { state: "ready" };
       if (charges < SNARE_COST) return { state: "noafford", reason: needCharges(SNARE_COST) };
@@ -3011,6 +3078,8 @@ function armAbility(kind: ArmedKind) {
                       ? (p.vanishTargets ?? [])
                       : kind === "grandHeist"
                         ? (p.grandHeistTargets ?? [])
+                        : kind === "backstab"
+                          ? (p.backstabTargets ?? [])
                         : kind === "curse"
                           ? (p.curseTargets ?? [])
                           : kind === "sacrifice"
@@ -3023,8 +3092,10 @@ function armAbility(kind: ArmedKind) {
                                   ? (p.inspireTargets ?? [])
                                   : p.bulwarkTargets, // bulwark / bulwarkReinforced
   );
-  if (ids.size === 0) return;
-  armed = { kind, targetIds: ids };
+  const tiles = kind === "blink" ? new Set<number>(p.blinkTiles ?? []) : null;
+  if (ids.size === 0 && !(tiles && tiles.size > 0)) return;
+  armed = { kind, targetIds: ids, tiles };
+  layoutTileRings();
   for (const btn of dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn")) {
     btn.classList.toggle("armed", btn.dataset.ability === kind);
     btn.classList.toggle("dim", btn.dataset.ability !== kind);
@@ -3049,6 +3120,12 @@ function disarm() {
 
 /** The ONLY place armed casts become wire messages — every shape is an id
  *  or an index into a server-sent list, per the trust model. */
+/** A tile-mode cast (Blink): the tap named a contested tile. */
+function fireArmedTile(kind: ArmedKind, tile: number) {
+  if (kind === "blink") sendToServer({ type: "usePower", action: { kind: "blink", tile } });
+  flashDockButton(kind, "fired");
+}
+
 function fireArmed(tokenId: number) {
   if (!armed) return;
   const kind = armed.kind;
@@ -3093,6 +3170,9 @@ function fireArmed(tokenId: number) {
       break;
     case "curse":
       sendToServer({ type: "usePower", action: { kind: "curse", targetTokenId: tokenId } });
+      break;
+    case "backstab":
+      sendToServer({ type: "usePower", action: { kind: "backstab", targetTokenId: tokenId } });
       break;
     case "sacrifice":
       // Only the VICTIM is named — the stone given is server-selected (the
@@ -3422,7 +3502,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
       const turns = currentPower.bulwarkTurns?.[tokenId];
       const saves = currentPower.bulwarkSavesLeft?.[tokenId];
       return {
-        name: saves !== undefined ? "Reinforced Bulwark" : "Bulwark",
+        name: "Bulwark",
         cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left${saves !== undefined ? ` · ${saves} save${saves === 1 ? "" : "s"}` : ""}`,
         klass: "warrior",
         desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates and a Barbarian's Reckless Swing still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
@@ -3528,6 +3608,12 @@ canvas.addEventListener("pointerdown", (e) => {
   // cancels. Either way it never falls through to sips/roll/move handling.
   // (Dock and ribbon taps land on their own DOM buttons, never here.)
   if (armed) {
+    if (armed.tiles) {
+      const tile = findTileUnderPointer(armed.tiles, e.clientX, e.clientY);
+      if (tile !== null) fireArmedTile(armed.kind, tile);
+      disarm();
+      return;
+    }
     const target = findTargetUnderPointer(armed.targetIds, e.clientX, e.clientY);
     if (target !== null) fireArmed(target);
     disarm(); // fired or missed — targeting mode ends (tap-outside cancels)
@@ -4312,6 +4398,30 @@ function announceFromState(msg: {
     if (k) showProc(k, "Charged Shot!", "chargedShot");
     showAnnouncement(
       `${subject} loosed a Charged Shot — ${target} token knocked ${where}${chargeFor(msg.lastMovePlayer)}`,
+      "capture",
+    );
+    return;
+  }
+
+  if (msg.lastBlink && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Blink!", "blink");
+    showAnnouncement(`${subject} blinked ${isMe ? "your" : "their"} rearmost stone up the water${chargeFor(msg.lastMovePlayer)}`, "move");
+    return;
+  }
+
+  if (msg.lastBackstab && msg.lastMovePlayer) {
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const k = classOf(msg.lastMovePlayer);
+    if (k) showProc(k, "Backstab!", "backstab");
+    const wounded = (msg.lastWound?.tokenIds ?? []).includes(msg.lastBackstab.targetTokenId);
+    showAnnouncement(
+      wounded
+        ? `${subject} backstabbed ${isMe ? "an enemy" : "one of your"} stone — its blessing broke${chargeFor(msg.lastMovePlayer)}`
+        : `${subject} backstabbed ${isMe ? "an enemy" : "one of your"} stone — sent home${chargeFor(msg.lastMovePlayer)}`,
       "capture",
     );
     return;
@@ -5928,21 +6038,20 @@ const GUIDE_SPREADS: [string, string][] = [
      the whole match armed with its powers.</p>
      <p>Every capture, every zero you roll, and every shield tile you land on
      fills your <span class="gold">mana</span> — up to ${CHARGE_CAP} banked
-     at once for most crews. The Necromancer's kills fill a third gem no
-     other income can reach, and the Bard's purse runs ${BARD_CHARGE_CAP}
-     deep. Spend mana to fire your class's active powers, offered as buttons
-     beside your coins whenever you can afford them.</p>
+     at once, the same purse for every class. Spend mana to fire your
+     class's active powers, offered as buttons beside your coins whenever
+     you can afford them.</p>
      <p>Each class keeps its own chapter in this book — and each hides an
      <span class="gold">ultimate</span>, earned by landing on shield tiles
      three times in a row without your turn ever passing.</p>`,
     `<div class="runner">Master Killer &middot; the ten classes</div>
      <ul>
        <li><b>Archer</b> — Snipe, Push, Charged Shot.</li>
-       <li><b>Mage</b> — Ward, Re-flip, Blink Strike.</li>
+       <li><b>Mage</b> — Ward, Re-flip, Blink, Blink Strike.</li>
        <li><b>Warrior</b> — Ward Breaker, Charge, Bulwark.</li>
        <li><b>Necromancer</b> — Soul Harvest, Revive, Exhume.</li>
        <li><b>Cleric</b> — Bless, Heal, Benediction.</li>
-       <li><b>Rogue</b> — Larceny, Pickpocket, Vanish.</li>
+       <li><b>Rogue</b> — Larceny, Backstab, Vanish.</li>
        <li><b>Warlock</b> — Blood Pact, Curse, Sacrifice.</li>
        <li><b>Hunter</b> — Wolf, Snare, Piercing Shot.</li>
        <li><b>Barbarian</b> — Rage, Reckless Swing, Whirlwind.</li>
@@ -5963,13 +6072,12 @@ const GUIDE_SPREADS: [string, string][] = [
        charge comes right back, since that's really a capture.</li>
        <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
        Push entirely — the charge is spent, but the stone doesn't move. A
-       <span class="gold">Reinforced Bulwark</span> or a
        <span class="gold">Vanished</span> Rogue stone can't be Pushed at
-       all — only a Charged Shot still shoves them, never home.</li>
+       all — only a Charged Shot still shoves it, never home.</li>
      </ul>`,
     `<div class="runner">The Archer &middot; continued</div>
      <ul>
-       <li><b>Charged Shot</b> (active, spends both charges): a heavier shot
+       <li><b>Charged Shot</b> (active, ${CHARGED_SHOT_COST} charges): a heavier shot
        at an enemy stone in shared water, knocking it back
        ${CHARGED_SHOT_DISTANCE} paces — or ${CHARGED_SHOT_WARD_DISTANCE}
        against a <span class="gold">Warded</span> stone, the one shot that
@@ -5996,12 +6104,16 @@ const GUIDE_SPREADS: [string, string][] = [
        like any other.</li>
        <li>Ward always follows whichever of your stones is furthest along —
        send that one home and it passes to the new leader.</li>
+       <li><b>Blink</b> (active, ${BLINK_COST} mana): teleport your rearmost
+       stone on the board to any empty tile in shared water ahead of it —
+       never a shield tile, a trap, or a wolf's watch. Nothing is captured.
+       Ends your turn.</li>
      </ul>`,
     `<div class="runner">The Mage &middot; continued</div>
      <ul>
        <li><b>Re-flip</b> (active, 1 charge each): dislike your roll? Spend
        a charge to flip again instead of moving — it does not end your turn,
-       and with both charges banked you may re-flip TWICE in the same turn.
+       and you may re-flip up to ${REFLIPS_PER_TURN} time${REFLIPS_PER_TURN === 1 ? "" : "s"} a turn.
        Mind the price: Ward only holds at a full bank, so the moment you
        spend below it your lead stone stands unwarded.</li>
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
@@ -6030,10 +6142,6 @@ const GUIDE_SPREADS: [string, string][] = [
        shove it, never send it home. An ultimate or a Barbarian's Reckless
        Swing still punches through. Fades after a few of your turns, or
        the instant it saves the stone.</li>
-       <li><b>Reinforced Bulwark</b> (active, spends both mana): the same
-       shield, everything doubled: twice the turns, and it survives its
-       first save. A plain Push can't budge it at all; only a Charged Shot
-       still shoves it.</li>
        <li><b>Warpath</b> (active, spends your ultimate): land on a shield
        tile three times running, then teleport your least-advanced stone
        onto any enemy in shared water, capturing it and every enemy in
@@ -6044,21 +6152,21 @@ const GUIDE_SPREADS: [string, string][] = [
     `<h2>The Necromancer</h2>
      <ul>
        <li><b>Soul Harvest</b> (passive, free): every enemy stone you send
-       home pays ${SOUL_BOUNTY_CHARGES} mana — filling even your third gem,
-       the SOUL GEM, which no other income can touch — and marks its corpse
-       where it fell. Only the freshest corpse keeps its soul.</li>
+       home pays ${SOUL_BOUNTY_CHARGES} mana at once, where anyone else's
+       kill pays one — and marks its corpse where it fell. Only the freshest
+       corpse keeps its soul.</li>
        <li><b>Soul Claim</b>: while your mana is full, the marked body
        cannot re-enter from the enemy's hand — the soul is yours until you
        spend it.</li>
        <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} mana):
        detonate the marked corpse instead of raising it: every unprotected
-       enemy beside the grave is blasted a tile back — home if nothing's
-       free behind. It desecrates the corpse: no thrall, and its
-       casualties pay no mana.</li>
+       enemy beside the grave is killed outright — sent home; a blessed one
+       is only wounded. It desecrates the corpse: no thrall, and its kills
+       pay no mana.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
-       <li><b>Revive</b> (active, spends all ${REVIVE_COST} mana): raise
+       <li><b>Revive</b> (active, ${REVIVE_COST} mana, keeps your turn): raise
        the marked corpse as your THRALL, on the very tile it died. For
        ${THRALL_TURNS} of your turns it fights for you — it moves on your
        flips, kills like any stone (its kills pay full mana and mark new
@@ -6112,11 +6220,6 @@ const GUIDE_SPREADS: [string, string][] = [
        good pays twice — your own mana climbs as usual, and
        ${ROGUE_STEAL_ON_CAPTURE} mana drains straight out of the enemy's
        pocket too. A wound doesn't count; only a real kill pays.</li>
-       <li><b>Pickpocket</b> (active, ${PICKPOCKET_COST} mana, keeps your
-       turn): reach into an enemy stone's pocket in shared water and lift
-       ${PICKPOCKET_STEAL} mana — no fight, and no protection stops you,
-       since nothing is actually striking the stone. Pick the pocket, then
-       still make your move.</li>
        <li><b>Vanish</b> (active, ${VANISH_COST} mana): slip one of your
        own stones into the shadows — it can't be captured, swept, Pushed,
        Cursed, shot, or caught in a Whirlwind. Fades after a few turns, or
@@ -6127,6 +6230,11 @@ const GUIDE_SPREADS: [string, string][] = [
        <li>What still reaches a Vanished stone: a Charged Shot can shove it
        (never home), a Barbarian's Reckless Swing cuts it down, and any
        ultimate finds it.</li>
+       <li><b>Backstab</b> (active, ${BACKSTAB_COST} mana): a guaranteed
+       kill on any enemy in shared water — no roll, straight through a
+       Ward. A shield tile, a Bulwark, or a Vanish turns it aside; a
+       blessed stone is only wounded. Larceny still drains the purse.
+       Ends your turn.</li>
        <li><b>Grand Heist</b> (active, spends your ultimate): land on a
        shield tile three times running, then teleport your furthest-along
        stone onto any enemy in shared water and take it — straight through
@@ -6134,8 +6242,7 @@ const GUIDE_SPREADS: [string, string][] = [
        spot. A capture and a robbery in the same breath.</li>
      </ul>
      <p>The Rogue wins by making the enemy poor: every kill drains their
-     purse as well as their stone, and a well-timed Pickpocket can drop a
-     Mage's Ward or starve a Cleric's next prayer without a fight.</p>`,
+     purse as well as their stone.</p>`,
   ],
   [
     `<h2>The Warlock</h2>
@@ -6153,8 +6260,7 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
     `<div class="runner">The Warlock &middot; continued</div>
      <ul>
-       <li><b>Sacrifice</b> (active, ${SACRIFICE_COST} mana — your full
-       bank): give your furthest-along stone to the dark and one enemy in
+       <li><b>Sacrifice</b> (active, ${SACRIFICE_COST} mana): give your furthest-along stone to the dark and one enemy in
        shared water dies outright — straight through a Ward or a
        Blessing, no wound, no second life. A Bulwark, a Vanish, or a
        shield tile still turns it aside. The kill pays no mana, and the
@@ -6185,8 +6291,7 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
     `<div class="runner">The Hunter &middot; continued</div>
      <ul>
-       <li><b>Piercing Shot</b> (active, ${PIERCING_SHOT_COST} mana — your
-       full bank): loose an arrow down the shared row from your
+       <li><b>Piercing Shot</b> (active, ${PIERCING_SHOT_COST} mana): loose an arrow down the shared row from your
        furthest-along stone. The first enemy in its path dies, at any
        range — but the first body stops the arrow: a shielded, Warded,
        Bulwarked, or Vanished stone blocks the shot for everything behind
@@ -6218,8 +6323,7 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
     `<div class="runner">The Barbarian &middot; continued</div>
      <ul>
-       <li><b>Whirlwind</b> (active, ${WHIRLWIND_COST} mana — your full
-       bank): spin the axe. Every unprotected enemy within a tile of ANY
+       <li><b>Whirlwind</b> (active, ${WHIRLWIND_COST} mana): spin the axe. Every unprotected enemy within a tile of ANY
        of your stones is caught: the furthest-along ${WHIRLWIND_CAP} dies,
        the rest are knocked back a tile. You don't move at all — the
        storm comes to them.</li>
@@ -6236,8 +6340,8 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Encore</b> (passive, free): a dead flip is just a rest
        between verses. Every zero pays you ${ENCORE_ZERO_FLIP_CHARGES}
-       mana instead of one, and your purse runs ${BARD_CHARGE_CAP} deep
-       where everyone else's holds ${CHARGE_CAP}.</li>
+       mana instead of one — a run of dead flips fills your purse twice as
+       fast as anyone's.</li>
        <li><b>Inspire</b> (active, ${INSPIRE_COST} mana, keeps your turn):
        light one of your stones — every move it makes is ${INSPIRE_BONUS}
        tile longer for ${INSPIRE_TURNS} of your turns. Up to
@@ -6655,6 +6759,12 @@ function tick() {
   // stand down and the rings re-point at the armed target set, tinted the
   // caster's class color (the ring texture is drawn white for exactly this).
   const ringIds = armed ? armed.targetIds : eligibleTokenIds;
+  const armedTiles = armed?.tiles ?? null;
+  CONTESTED_TILES.forEach((tile, i) => {
+    const ring = tileRingMeshes[i];
+    ring.visible = armedTiles !== null && armedTiles.has(tile);
+    if (ring.visible) ring.scale.setScalar(ringScale);
+  });
   eligibleRingMat.color.setHex(armed ? DOCK_RING_TINTS[dockClass ?? "archer"] : 0xffc36a);
   for (let i = 0; i < markers.length; i++) {
     const marker = markers[i];
@@ -6913,8 +7023,8 @@ if (dockDemoParam !== null) {
     { label: "off-turn", charges: 1, ult: false, active: false, reflips: 0 },
     { label: "broke", charges: 0, ult: false, active: true, reflips: 0 },
     { label: "one charge", charges: 1, ult: false, active: true, reflips: 0 },
-    { label: "full bank", charges: 2, ult: false, active: true, reflips: 0 },
-    { label: "ultimate up", charges: 2, ult: true, active: true, reflips: 1 },
+    { label: "full bank", charges: CHARGE_CAP, ult: false, active: true, reflips: 0 },
+    { label: "ultimate up", charges: CHARGE_CAP, ult: true, active: true, reflips: 1 },
     { label: "spent", charges: 1, ult: true, active: true, reflips: 2 },
   ];
   let demoStep = 0;
@@ -6937,8 +7047,9 @@ if (dockDemoParam !== null) {
       thrall: { p1: null, p2: null },
       reviveSpawnTile: cls === "necromancer" && d.charges >= REVIVE_COST ? 8 : null,
       exhumeTargets: cls === "necromancer" && d.ult ? [4] : [],
-      pickpocketTargets: cls === "rogue" && d.charges >= PICKPOCKET_COST ? [4] : [],
       vanishTargets: cls === "rogue" && d.charges >= VANISH_COST ? [0, 1, 2] : [],
+      backstabTargets: cls === "rogue" && d.charges >= BACKSTAB_COST ? [4] : [],
+      blinkTiles: cls === "mage" && d.charges >= BLINK_COST ? [5, 6, 8] : [],
       grandHeistTargets: cls === "rogue" && d.ult ? [4] : [],
       curseTargets: cls === "warlock" && d.charges >= CURSE_COST ? [4] : [],
       sacrificeTargets: cls === "warlock" && d.charges >= SACRIFICE_COST ? [4] : [],

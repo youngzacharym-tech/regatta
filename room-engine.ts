@@ -70,6 +70,11 @@ import {
   applyReflip as mkApplyReflip,
   applyRevive,
   applySacrifice,
+  applyBackstab,
+  applyBlink,
+  getBlinkTiles,
+  BACKSTAB_COST,
+  getBackstabTargets,
   applySnare,
   applyVanish,
   applyWarpath,
@@ -78,6 +83,9 @@ import {
   breakShieldStreak,
   canReflipAgain,
   CHARGE_CAP,
+  CHARGED_SHOT_COST,
+  BULWARK_REINFORCED_COST,
+  BULWARK_REINFORCED_RETIRED,
   CURSE_COST,
   getBenedictionTargets,
   getBlessTargets,
@@ -312,7 +320,9 @@ export interface PublicPower {
    *  here like every ultimate's list). ADDITIVE. */
   pickpocketTargets?: number[];
   vanishTargets?: number[];
+  backstabTargets?: number[];
   grandHeistTargets?: number[];
+  blinkTiles?: number[];
   /** Warlock (2026-07-26): Curse / Sacrifice pools for the CURRENT player
    *  (affordability baked into both oracles — empty = not castable) and
    *  Fel Storm's victim pool (gated on ultimateReady here like every
@@ -478,6 +488,10 @@ export type RoomEvent =
       /** Warlock's Sacrifice just resolved: the mover's own stone that was
        *  given (server-selected, most-advanced) and the enemy it killed. */
       lastSacrifice?: { sacrificedTokenId: number; targetTokenId: number } | null;
+      /** Rogue's Backstab just resolved — a guaranteed hit on this token. */
+      lastBackstab?: { targetTokenId: number } | null;
+      /** Mage's Blink just resolved — the stone that jumped and its path. */
+      lastBlink?: { tokenId: number; from: number; to: number } | null;
       /** Warlock's Fel Storm ultimate — who the storm dragged, and the
        *  (rare, thrall-only) crumble deaths. Positions are in `state`. */
       lastFelStorm?: { struckTokenIds: number[]; sentHomeIds: number[] } | null;
@@ -625,6 +639,8 @@ export interface RoomDoc {
   lastCurse?: { targetTokenId: number } | null;
   lastCurseExpired?: { tokenId: number } | null;
   lastSacrifice?: { sacrificedTokenId: number; targetTokenId: number } | null;
+  lastBackstab?: { targetTokenId: number } | null;
+  lastBlink?: { tokenId: number; from: number; to: number } | null;
   lastFelStorm?: { struckTokenIds: number[]; sentHomeIds: number[] } | null;
   /** See RoomEvent's docs — the hunter's announcement slots (2026-07-26).
    *  Docs persisted before these fields existed read as undefined ≙ null. */
@@ -836,6 +852,8 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
         : [],
     curseTargets: doc.mk.classes[mover] === "warlock" ? getCurseTargets(doc.state, p, mover) : [],
     sacrificeTargets: doc.mk.classes[mover] === "warlock" ? getSacrificeTargets(doc.state, p, mover) : [],
+    backstabTargets: doc.mk.classes[mover] === "rogue" ? getBackstabTargets(doc.state, p, mover) : [],
+    blinkTiles: doc.mk.classes[mover] === "mage" ? getBlinkTiles(doc.state, p, mover) : [],
     felStormTargets:
       doc.mk.classes[mover] === "warlock" && doc.mk.ultimateReady[mover]
         ? getFelStormTargets(doc.state, p, mover)
@@ -944,6 +962,8 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastCurse: doc.lastCurse ?? null,
     lastCurseExpired: doc.lastCurseExpired ?? null,
     lastSacrifice: doc.lastSacrifice ?? null,
+    lastBackstab: doc.lastBackstab ?? null,
+    lastBlink: doc.lastBlink ?? null,
     lastFelStorm: doc.lastFelStorm ?? null,
     lastSnare: doc.lastSnare ?? null,
     lastTrapSprung: doc.lastTrapSprung ?? null,
@@ -984,7 +1004,7 @@ export function freshMatchFields(
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
   | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
   | "lastBless" | "lastHeal" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
-  | "lastPickpocket" | "lastVanish"
+  | "lastPickpocket" | "lastVanish" | "lastBackstab" | "lastBlink"
   | "lastCurse" | "lastCurseExpired" | "lastSacrifice" | "lastFelStorm"
   | "lastSnare" | "lastTrapSprung" | "lastWolfBite" | "lastPiercingShot" | "lastThaw" | "lastWildHunt"
   | "lastRecklessSwing" | "lastWhirlwind" | "lastBloodbath"
@@ -1029,6 +1049,8 @@ export function freshMatchFields(
     lastCurse: null,
     lastCurseExpired: null,
     lastSacrifice: null,
+    lastBackstab: null,
+    lastBlink: null,
     lastFelStorm: null,
     lastSnare: null,
     lastTrapSprung: null,
@@ -1193,6 +1215,8 @@ export function applyAction(
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
       if (a.kind === "curse") return { doc: applyMkCurse(doc, seat, a.targetTokenId, now) };
       if (a.kind === "sacrifice") return { doc: applyMkSacrifice(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "backstab") return { doc: applyMkBackstab(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "blink") return { doc: applyMkBlink(doc, seat, a.tile, now) };
       if (a.kind === "felStorm") return { doc: applyMkFelStorm(doc, seat, now) };
       if (a.kind === "snare") return { doc: applyMkSnare(doc, seat, a.tile, now) };
       if (a.kind === "piercingShot") return { doc: applyMkPiercingShot(doc, seat, now) };
@@ -1243,7 +1267,7 @@ function validateUsePower(
       return null;
     case "chargedShot":
       if (cls !== "archer") return "Only an Archer can Charged Shot";
-      if (doc.mk.charges[seat] !== CHARGE_CAP) return "Charged Shot needs a full charge bank";
+      if (doc.mk.charges[seat] < CHARGED_SHOT_COST) return `Charged Shot costs ${CHARGED_SHOT_COST} charges`;
       if (!getChargedShotTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Charged Shot target";
       return null;
     case "blinkStrike":
@@ -1261,10 +1285,11 @@ function validateUsePower(
       // `=== true`, matching the dispatch's coercion — a truthy non-boolean
       // must gate the same variant here that actually gets applied.
       if (a.reinforced === true) {
+        if (BULWARK_REINFORCED_RETIRED) return "Reinforced Bulwark is retired";
         // Mirrors Charged Shot's own full-bank gate: the reinforced cast is
         // a uniform "has the mover banked the whole cap" check, identical
         // for every target.
-        if (doc.mk.charges[seat] !== CHARGE_CAP) return "Reinforced Bulwark needs a full charge bank";
+        if (doc.mk.charges[seat] < BULWARK_REINFORCED_COST) return `Reinforced Bulwark costs ${BULWARK_REINFORCED_COST} charges`;
       } else if (doc.mk.charges[seat] < 1) {
         return "No charge available";
       }
@@ -1342,6 +1367,17 @@ function validateUsePower(
       // Turn-ending (Push's shape) — no flip guard needed.
       if (cls !== "warlock") return "Only a Warlock can Sacrifice";
       if (!getSacrificeTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Sacrifice target";
+      return null;
+    case "blink":
+      // Turn-ending (Push's shape) — no flip guard needed.
+      if (cls !== "mage") return "Only a Mage can Blink";
+      if (!getBlinkTiles(doc.state, p(), seat).includes(a.tile)) return "Invalid Blink tile";
+      return null;
+    case "backstab":
+      // Turn-ending (Push's shape) — no flip guard needed.
+      if (cls !== "rogue") return "Only a Rogue can Backstab";
+      if (doc.mk.charges[seat] < BACKSTAB_COST) return `Backstab costs ${BACKSTAB_COST} charges`;
+      if (!getBackstabTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Backstab target";
       return null;
     case "felStorm":
       if (cls !== "warlock") return "Only a Warlock can call a Fel Storm";
@@ -1436,6 +1472,8 @@ const CLEAR_SLOTS = {
   lastCurse: null,
   lastCurseExpired: null,
   lastSacrifice: null,
+  lastBackstab: null,
+  lastBlink: null,
   lastFelStorm: null,
   lastSnare: null,
   lastTrapSprung: null,
@@ -1852,6 +1890,48 @@ function applyMkSacrifice(doc: RoomDoc, seat: PlayerId, tokenId: number, now: nu
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Blink ends the turn (Push's shape): a repositioning, no capture credit. */
+function applyMkBlink(doc: RoomDoc, seat: PlayerId, tile: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyBlink(doc.state, fromWirePower(doc.mk!), tile, seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  const next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBlink: { tokenId: r.tokenId, from: r.from, to: tile },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
+/** Backstab ends the turn (Push's shape). A wound is not a capture: the
+ *  scoreboard counts the kill only. */
+function applyMkBackstab(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyBackstab(doc.state, fromWirePower(doc.mk!), tokenId, seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  const killed = r.woundedTokenId === null;
+  const next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures: { ...doc.captures, [seat]: doc.captures[seat] + (killed ? 1 : 0) },
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBackstab: { targetTokenId: tokenId },
+    lastWound: r.woundedTokenId !== null ? { tokenIds: [r.woundedTokenId] } : null,
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 /** Fel Storm ends the turn (its ultimate siblings' shape) — its own commit
  *  fn only because the announce payload is the dragged/crumbled id lists,
  *  not a single token slot. No capture credit: the storm displaces, and
@@ -2171,8 +2251,11 @@ function autoSkipDelay(doc: RoomDoc): number {
   if (isBot) return AUTO_SKIP_DELAY_MS;
   if (doc.variant === "masterKiller" && doc.mk) {
     const p = fromWirePower(doc.mk);
-    if (doc.mk.classes[mover] === "mage" && canReflipAgain(p, mover)) {
-      return AUTO_SKIP_WITH_RESCUE_MS; // human Mage gets a real Re-flip window
+    if (
+      doc.mk.classes[mover] === "mage" &&
+      (canReflipAgain(p, mover) || (doc.currentFlip !== null && doc.currentFlip !== 0 && getBlinkTiles(doc.state, p, mover).length > 0))
+    ) {
+      return AUTO_SKIP_WITH_RESCUE_MS; // human Mage gets a real Re-flip / Blink window
     }
     // The Necromancer has the SAME dead-flip rescue as the Mage: Revive
     // keeps the flip and recomputes the move list against the risen board
@@ -2213,6 +2296,7 @@ function autoSkipDelay(doc: RoomDoc): number {
       doc.currentFlip !== null &&
       doc.currentFlip !== 0 &&
       (getPickpocketTargets(doc.state, p, mover).length > 0 ||
+        getBackstabTargets(doc.state, p, mover).length > 0 ||
         (doc.mk.charges[mover] >= VANISH_COST && getVanishTargets(doc.state, p, mover).length > 0) ||
         (doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0))
     ) {
@@ -2448,6 +2532,10 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkCurse(doc, seat, action.targetTokenId, now);
     case "sacrifice":
       return applyMkSacrifice(doc, seat, action.targetTokenId, now);
+    case "backstab":
+      return applyMkBackstab(doc, seat, action.targetTokenId, now);
+    case "blink":
+      return applyMkBlink(doc, seat, action.tile, now);
     case "felStorm":
       return applyMkFelStorm(doc, seat, now);
     case "snare":

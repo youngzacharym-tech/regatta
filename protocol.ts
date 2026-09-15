@@ -244,7 +244,12 @@ export type ServerMessage =
          *  ultimateReady like every ultimate list). */
         pickpocketTargets?: number[];
         vanishTargets?: number[];
+        /** Rogue's Backstab pool (restored 2026-09-13; affordability baked in). */
+        backstabTargets?: number[];
         grandHeistTargets?: number[];
+        /** Mage's Blink: legal destination TILES for the current player
+         *  (affordability baked in; the stone is server-selected). */
+        blinkTiles?: number[];
         /** Warlock (2026-07-26): Curse / Sacrifice pools for the CURRENT
          *  player (affordability baked into both oracles — empty = not
          *  castable) and Fel Storm's victim pool (gated on ultimateReady
@@ -385,6 +390,13 @@ export type ServerMessage =
        *  broadcast — bank-level, not board-level: no token moved, but the
        *  target owner's charges dropped by `stolen`. */
       lastPickpocket?: { targetTokenId: number; stolen: number } | null;
+      /** Master Killer mode only: Rogue's Backstab just resolved on this
+       *  broadcast — a guaranteed hit; the victim is either gone (`state`
+       *  shows it home) or wounded (`vitality`). */
+      lastBackstab?: { targetTokenId: number } | null;
+      /** Master Killer mode only: Mage's Blink just resolved — which stone
+       *  jumped, from where, to where (positions already in `state`). */
+      lastBlink?: { tokenId: number; from: number; to: number } | null;
       /** Master Killer mode only: Rogue's Vanish just resolved on this
        *  broadcast — same shape/lifecycle as lastBulwark, since it IS
        *  Bulwark's mechanic under a Rogue cast. */
@@ -528,6 +540,14 @@ export type ClientMessage =
          *  power.pickpocketTargets; the server re-validates against the
          *  same shared oracle. */
         | { kind: "pickpocket"; targetTokenId: number }
+        /** Rogue's Backstab: an enemy in shared water — the client gates on
+         *  power.backstabTargets; the server re-validates against the same
+         *  shared oracle. */
+        | { kind: "backstab"; targetTokenId: number }
+        /** Mage's Blink: a TILE (Snare's shape) — the client gates on
+         *  power.blinkTiles; the server re-validates against the same
+         *  shared oracle and picks the stone itself. */
+        | { kind: "blink"; tile: number }
         /** Rogue's Vanish: targets one of the caster's OWN stones, same
          *  shape as Bulwark's tokenId — the client gates on
          *  power.vanishTargets; the server re-validates against the same

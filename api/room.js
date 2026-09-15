@@ -329,8 +329,13 @@ function pickHard(state, moves, rand) {
 function otherPlayerId(p) {
   return p === "p1" ? "p2" : "p1";
 }
-var CHARGE_CAP = 2;
-var REFLIPS_PER_TURN = 2;
+var CHARGE_CAP = 4;
+var CHARGED_SHOT_COST = 2;
+var BULWARK_REINFORCED_COST = 2;
+var BULWARK_REINFORCED_RETIRED = true;
+var REFLIPS_PER_TURN = 1;
+var BLINK_COST = 1;
+var BLINK_RANGE = 4;
 var PUSH_DISTANCE = 1;
 var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
@@ -343,7 +348,7 @@ var BULWARK_TURNS = 2;
 var BULWARK_REINFORCED_TURNS = 4;
 var BULWARK_REINFORCED_SAVES = 2;
 var SOUL_BOUNTY_CHARGES = 3;
-var NECRO_CHARGE_CAP = 3;
+var NECRO_CHARGE_CAP = CHARGE_CAP;
 var THRALL_TURNS = 3;
 var REVIVE_COST = 3;
 var CORPSE_EXPLOSION_COST = 2;
@@ -354,9 +359,11 @@ var BLESSING_CAP = 3;
 var HEAL_COST = 2;
 var ROGUE_STEAL_ON_CAPTURE = 2;
 var PICKPOCKET_COST = 1;
+var PICKPOCKET_RETIRED = true;
 var PICKPOCKET_STEAL = 2;
 var VANISH_COST = 1;
 var VANISH_TURNS = BULWARK_TURNS;
+var BACKSTAB_COST = 3;
 var BLOOD_PACT_CHARGES = 1;
 var CURSE_COST = 1;
 var CURSE_TURNS = 3;
@@ -610,7 +617,7 @@ function getLegalPowerMoves(state, power, flip) {
     const to = from === -1 ? effFlip - 1 : from + effFlip;
     if (from === -1) {
       const foe = otherPlayerId(player);
-      if (power.classes[foe] === "necromancer" && power.corpse[foe]?.tokenId === token.id && power.charges[foe] === REVIVE_COST) {
+      if (power.classes[foe] === "necromancer" && power.corpse[foe]?.tokenId === token.id && power.charges[foe] >= REVIVE_COST) {
         continue;
       }
     }
@@ -760,6 +767,8 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
   nextPower = clearCurseOnCapture(nextPower, kills);
   if (to >= PATH_LENGTH_PER_PLAYER && isCursed(nextPower, tokenId)) {
     nextPower = clearCurseOnCapture(nextPower, [tokenId]);
+    nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+    nextPower = clearInspireOnCapture(nextPower, [tokenId]);
   }
   if (woundIds.length > 0) {
     const vitality = { ...nextPower.vitality };
@@ -803,6 +812,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
   }
   nextPower = grantBloodPact(nextPower, state.tokens, kills);
   nextPower = clearHamstringOnCapture(nextPower, kills);
+  nextPower = clearInspireOnCapture(nextPower, kills);
   let trapSprung = null;
   let wolfBite = null;
   if (!causesWin && to >= 0 && to < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[to].isContested) {
@@ -822,6 +832,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
         nextPower = clearVitality(nextPower, [tokenId]);
         nextPower = clearCurseOnCapture(nextPower, [tokenId]);
         nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+        nextPower = clearInspireOnCapture(nextPower, [tokenId]);
         nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
         nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
       }
@@ -849,6 +860,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
           nextPower = clearVitality(nextPower, [tokenId]);
           nextPower = clearCurseOnCapture(nextPower, [tokenId]);
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+          nextPower = clearInspireOnCapture(nextPower, [tokenId]);
           nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
           nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
           nextPower = addCharge(nextPower, foe);
@@ -952,6 +964,8 @@ function applyPush(state, power, targetTokenId, mover) {
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
     spentPower = clearVitality(spentPower, [targetTokenId]);
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
     spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover);
@@ -969,7 +983,7 @@ function applyPush(state, power, targetTokenId, mover) {
   };
 }
 function getChargedShotTargets(state, power, mover) {
-  if (power.charges[mover] !== CHARGE_CAP) return [];
+  if (power.charges[mover] < CHARGED_SHOT_COST) return [];
   const foe = otherPlayerId(mover);
   return state.tokens.filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !onShieldTile(t)).filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1).map((t) => t.id);
 }
@@ -981,7 +995,7 @@ function applyChargedShot(state, power, targetTokenId, mover) {
   const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let spentPower = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP }
+    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGED_SHOT_COST }
   };
   if (woundsInstead) {
     spentPower = addCharge(
@@ -994,6 +1008,8 @@ function applyChargedShot(state, power, targetTokenId, mover) {
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
     spentPower = clearVitality(spentPower, [targetTokenId]);
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
     spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover);
@@ -1053,6 +1069,8 @@ function applyBlinkStrike(state, power, targetTokenId, mover) {
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
   nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
   nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState = {
@@ -1097,6 +1115,8 @@ function applyWarpath(state, power, targetTokenId, mover) {
   nextPower = clearThrallIfCaptured(nextPower, allCaptures);
   nextPower = clearVitality(nextPower, allCaptures);
   nextPower = clearCurseOnCapture(nextPower, allCaptures);
+  nextPower = clearHamstringOnCapture(nextPower, allCaptures);
+  nextPower = clearInspireOnCapture(nextPower, allCaptures);
   nextPower = grantBloodPact(nextPower, state.tokens, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState = {
@@ -1116,7 +1136,7 @@ function applyBulwark(state, power, targetTokenId, mover, reinforced = false) {
   const bulwarkSaves = { ...power.bulwarkSaves };
   let cost = 1;
   if (reinforced) {
-    cost = CHARGE_CAP;
+    cost = BULWARK_REINFORCED_COST;
     bulwarked[targetTokenId] = BULWARK_REINFORCED_TURNS;
     bulwarkSaves[targetTokenId] = BULWARK_REINFORCED_SAVES;
   } else {
@@ -1198,7 +1218,7 @@ function tickBulwarkForReflip(state, power, flip) {
   return { power: blocked.length > 0 ? consumeBulwarkBlocks(power, blocked) : power, blockedIds: blocked };
 }
 function getReviveSpawnTile(state, power, mover) {
-  if (power.charges[mover] !== REVIVE_COST) return null;
+  if (power.charges[mover] < REVIVE_COST) return null;
   if (power.thrall[mover] !== null) return null;
   const corpse = power.corpse[mover];
   if (!corpse) return null;
@@ -1237,14 +1257,12 @@ function applyCorpseExplosion(state, power, mover) {
   const woundedTokenIds = [];
   let working = state;
   for (const victim of victims) {
-    const current = working.tokens.find((t) => t.id === victim.id);
-    const landing = computeKnockbackLanding(working, power, current, 1);
-    if (landing === -1 && isBlessed(power, victim.id)) {
+    if (isBlessed(power, victim.id)) {
       woundedTokenIds.push(victim.id);
       continue;
     }
-    if (landing === -1) sentHomeIds.push(victim.id);
-    tokens = working.tokens.map((t) => t.id === victim.id ? { ...t, position: landing } : t);
+    sentHomeIds.push(victim.id);
+    tokens = working.tokens.map((t) => t.id === victim.id ? { ...t, position: -1 } : t);
     working = { ...working, tokens };
   }
   let nextPower = {
@@ -1261,6 +1279,8 @@ function applyCorpseExplosion(state, power, mover) {
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
   nextPower = clearVitality(nextPower, sentHomeIds);
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
+  nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
+  nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
   nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
@@ -1399,6 +1419,7 @@ function applyExhume(state, power, targetTokenId, mover) {
   return { state: nextState, power: resetTurnFlags(nextPower), returnedTo: landing };
 }
 function getPickpocketTargets(state, power, mover) {
+  if (PICKPOCKET_RETIRED) return [];
   if (power.charges[mover] < PICKPOCKET_COST) return [];
   const foe = otherPlayerId(mover);
   if (power.charges[foe] < 1) return [];
@@ -1417,6 +1438,56 @@ function applyPickpocket(power, mover) {
 }
 function getVanishTargets(state, power, mover) {
   return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => !isBulwarked(power, t)).map((t) => t.id);
+}
+function getBackstabTargets(state, power, mover) {
+  if (power.charges[mover] < BACKSTAB_COST) return [];
+  return getRainOfArrowsTargets(state, power, mover).filter((id) => {
+    const t = state.tokens.find((tok) => tok.id === id);
+    return !onShieldTile(t) && !isBulwarked(power, t);
+  });
+}
+function applyBackstab(state, power, targetTokenId, mover) {
+  const foe = otherPlayerId(mover);
+  const woundsInstead = isBlessed(power, targetTokenId);
+  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: -1 } : t);
+  let spentPower = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST }
+  };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover
+    );
+  } else {
+    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
+    spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
+    spentPower = {
+      ...spentPower,
+      charges: {
+        ...spentPower.charges,
+        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE)
+      }
+    };
+    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+  }
+  spentPower = breakShieldStreak(spentPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null
+  };
 }
 function applyVanish(state, power, targetTokenId, mover) {
   const spent = {
@@ -1454,6 +1525,8 @@ function applyGrandHeist(state, power, targetTokenId, mover) {
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
   nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
   nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   nextPower = { ...nextPower, charges: { ...nextPower.charges, [foe]: 0 } };
@@ -1511,6 +1584,8 @@ function applySacrifice(state, power, targetTokenId, mover) {
   nextPower = clearThrallIfCaptured(nextPower, killed);
   nextPower = clearVitality(nextPower, killed);
   nextPower = clearCurseOnCapture(nextPower, killed);
+  nextPower = clearHamstringOnCapture(nextPower, killed);
+  nextPower = clearInspireOnCapture(nextPower, killed);
   nextPower = grantBloodPact(
     nextPower,
     state.tokens,
@@ -1555,6 +1630,8 @@ function applyFelStorm(state, power, mover) {
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
   nextPower = clearVitality(nextPower, sentHomeIds);
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
+  nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
+  nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
   nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
@@ -1569,6 +1646,49 @@ function applyFelStorm(state, power, mover) {
     power: resetTurnFlags(nextPower),
     struckTokenIds: victims.map((v) => v.id),
     sentHomeIds
+  };
+}
+function blinkStone(state, power, mover) {
+  const stone = findLeastAdvancedToken(state, power, mover);
+  if (!stone || isHamstrung(power, stone.id)) return null;
+  return stone;
+}
+function getBlinkTiles(state, power, mover) {
+  if (power.charges[mover] < BLINK_COST) return [];
+  const stone = blinkStone(state, power, mover);
+  if (!stone) return [];
+  const foe = otherPlayerId(mover);
+  const wolfTile = wolfGuardTile(state, power, foe);
+  const tiles = [];
+  for (let tile = stone.position + 1; tile <= Math.min(stone.position + BLINK_RANGE, PATH_LENGTH_PER_PLAYER - 1); tile++) {
+    if (!BOARD_LAYOUT[tile].isContested) continue;
+    if (BOARD_LAYOUT[tile].type === "shield") continue;
+    if (state.tokens.some((t) => t.position === tile)) continue;
+    if (power.traps?.[foe] === tile) continue;
+    if (wolfTile === tile) continue;
+    tiles.push(tile);
+  }
+  return tiles;
+}
+function applyBlink(state, power, tile, mover) {
+  const stone = blinkStone(state, power, mover);
+  const tokens = state.tokens.map((t) => t.id === stone.id ? { ...t, position: tile } : t);
+  let next = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BLINK_COST }
+  };
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false
+    },
+    power: resetTurnFlags(next),
+    tokenId: stone.id,
+    from: stone.position
   };
 }
 function getSnareTiles(state, power, mover) {
@@ -1628,6 +1748,7 @@ function applyPiercingShot(state, power, mover) {
       next = clearVitality(next, [victim.id]);
       next = clearCurseOnCapture(next, [victim.id]);
       next = clearHamstringOnCapture(next, [victim.id]);
+      next = clearInspireOnCapture(next, [victim.id]);
       next = grantBloodPact(next, state.tokens, [victim.id]);
       killedTokenId = victim.id;
     }
@@ -1688,6 +1809,7 @@ function applyWildHunt(state, power, mover) {
     next = clearVitality(next, [quarry.id]);
     next = clearCurseOnCapture(next, [quarry.id]);
     next = clearHamstringOnCapture(next, [quarry.id]);
+    next = clearInspireOnCapture(next, [quarry.id]);
     next = grantBloodPact(next, state.tokens, [quarry.id]);
     next = addCharge(next, mover);
   }
@@ -1736,6 +1858,7 @@ function applyRecklessSwing(state, power, targetTokenId, mover) {
     next = clearVitality(next, [targetTokenId]);
     next = clearCurseOnCapture(next, [targetTokenId]);
     next = clearHamstringOnCapture(next, [targetTokenId]);
+    next = clearInspireOnCapture(next, [targetTokenId]);
     next = grantBloodPact(next, state.tokens, [targetTokenId]);
     killedTokenId = targetTokenId;
   }
@@ -1750,6 +1873,7 @@ function applyRecklessSwing(state, power, targetTokenId, mover) {
     next = clearVitality(next, [swinger.id]);
     next = clearCurseOnCapture(next, [swinger.id]);
     next = clearHamstringOnCapture(next, [swinger.id]);
+    next = clearInspireOnCapture(next, [swinger.id]);
     next = clearCapturedBulwarks(next, [swinger.id]);
     next = grantBloodPact(next, state.tokens, [swinger.id]);
   }
@@ -1804,6 +1928,7 @@ function applyWhirlwind(state, power, mover) {
     next = clearVitality(next, capturedTokenIds);
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
+    next = clearInspireOnCapture(next, capturedTokenIds);
     next = grantBloodPact(next, state.tokens, capturedTokenIds);
   }
   const knockedTokenIds = [];
@@ -1825,6 +1950,7 @@ function applyWhirlwind(state, power, mover) {
       next = clearVitality(next, [v.id]);
       next = clearCurseOnCapture(next, [v.id]);
       next = clearHamstringOnCapture(next, [v.id]);
+      next = clearInspireOnCapture(next, [v.id]);
       next = clearCapturedBulwarks(next, [v.id]);
       next = grantBloodPact(next, state.tokens, [v.id]);
     }
@@ -1876,6 +2002,7 @@ function applyBloodbath(state, power, mover) {
     next = clearVitality(next, killedTokenIds);
     next = clearCurseOnCapture(next, killedTokenIds);
     next = clearHamstringOnCapture(next, killedTokenIds);
+    next = clearInspireOnCapture(next, killedTokenIds);
     next = grantBloodPact(next, state.tokens, killedTokenIds);
     next = addCharge(next, mover);
   }
@@ -2131,16 +2258,24 @@ function bulwarkFacesThreat(state, target) {
     (t) => t.owner !== target.owner && t.position >= 0 && target.position - t.position >= 1 && target.position - t.position <= 4
   );
 }
-function scoreReinforcedBulwark(state, targetId, rand) {
-  const target = state.tokens.find((t) => t.id === targetId);
-  if (!bulwarkFacesThreat(state, target)) return -Infinity;
-  let score = -40 + target.position * 5;
-  score += rand() * 20;
-  return score;
-}
 function scoreVanish(state, targetId, rand) {
   return scoreBulwark(state, targetId, rand);
 }
+function scoreBlink(state, power, moves, tile, rand) {
+  const mover = state.currentPlayer;
+  const stone = blinkStone(state, power, mover);
+  if (!stone) return -Infinity;
+  const gained = tile - Math.max(0, stone.position);
+  let score = MK_BLINK_FLOOR + MK_BLINK_PER_TILE * gained + tile;
+  const foes = state.tokens.filter((t) => effectiveOwner(power, t) !== mover && t.position >= 4 && t.position <= 11);
+  if (foes.some((t) => tile - t.position >= 1 && tile - t.position <= 4)) score -= 80;
+  if (foes.some((t) => t.position - tile >= 1 && t.position - tile <= 4)) score += 45;
+  if (moves.length === 0) score += 200;
+  if (power.charges[mover] >= CHARGE_CAP) score -= 60;
+  return score + rand() * 20;
+}
+var MK_BLINK_FLOOR = -100;
+var MK_BLINK_PER_TILE = 16;
 function scoreReflip(currentMoveCount, flip, rand) {
   if (flip === 0 || currentMoveCount === 0) return 500 + rand() * 20;
   return -1;
@@ -2150,13 +2285,7 @@ function scoreCorpseExplosion(state, power, victims, rand) {
   let score = 0;
   for (const id of victims) {
     const t = state.tokens.find((tok) => tok.id === id);
-    const landing = (
-      // mirror applyCorpseExplosion's per-victim physics for the estimate
-      t.position - 1 < 4 && possessorOf(power, t.id) !== null ? -1 : state.tokens.some(
-        (o) => o.id !== t.id && o.position === t.position - 1 && (o.owner === t.owner || t.position - 1 >= 4 && t.position - 1 <= 11)
-      ) ? -1 : t.position - 1
-    );
-    score += landing === -1 ? 380 + t.position * 8 : 90;
+    score += isBlessed(power, t.id) ? 140 : 380 + t.position * 8;
   }
   return score + rand() * 20;
 }
@@ -2187,6 +2316,11 @@ function scoreHeal(state, targetId, rand) {
 }
 function scoreBenediction(poolSize, rand) {
   return 250 + 120 * poolSize + rand() * 20;
+}
+function scoreBackstab(state, power, targetId, rand) {
+  const target = state.tokens.find((t) => t.id === targetId);
+  const wounds = isBlessed(power, targetId);
+  return (wounds ? 260 : 460) + target.position * 10 + rand() * 20;
 }
 function scorePickpocket(power, foe, rand) {
   const cap = power.classes[foe] === "necromancer" ? NECRO_CHARGE_CAP : CHARGE_CAP;
@@ -2349,12 +2483,21 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       }
     }
   }
-  if (cls === "archer" && charges === CHARGE_CAP) {
+  if (cls === "archer" && charges >= CHARGED_SHOT_COST) {
     for (const targetId of getChargedShotTargets(state, power, mover)) {
       const score = scoreChargedShot(state, power, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "chargedShot", targetTokenId: targetId };
+      }
+    }
+  }
+  if (cls === "mage") {
+    for (const tile of getBlinkTiles(state, power, mover)) {
+      const score = scoreBlink(state, power, moves, tile, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "blink", tile };
       }
     }
   }
@@ -2390,15 +2533,6 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "bulwark", tokenId: targetId };
-      }
-    }
-    if (charges === CHARGE_CAP) {
-      for (const targetId of bulwarkTargets) {
-        const score = scoreReinforcedBulwark(state, targetId, rand);
-        if (score > bestScore) {
-          bestScore = score;
-          best = { kind: "bulwark", tokenId: targetId, reinforced: true };
-        }
       }
     }
   }
@@ -2463,6 +2597,13 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "pickpocket", targetTokenId: targetId };
+      }
+    }
+    for (const targetId of getBackstabTargets(state, power, mover)) {
+      const score = scoreBackstab(state, power, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "backstab", targetTokenId: targetId };
       }
     }
     if (charges >= VANISH_COST) {
@@ -2606,7 +2747,7 @@ function enumerateCandidates(state, power, moves) {
   if (cls === "archer" && charges >= 1) {
     for (const id of getPushTargets(state, power, mover)) out.push({ kind: "push", targetTokenId: id });
   }
-  if (cls === "archer" && charges === CHARGE_CAP) {
+  if (cls === "archer" && charges >= CHARGED_SHOT_COST) {
     for (const id of getChargedShotTargets(state, power, mover)) {
       out.push({ kind: "chargedShot", targetTokenId: id });
     }
@@ -2623,9 +2764,6 @@ function enumerateCandidates(state, power, moves) {
   if (cls === "warrior" && charges >= 1) {
     const bulwarkTargets = getBulwarkTargets(state, power, mover);
     for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id });
-    if (charges === CHARGE_CAP) {
-      for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id, reinforced: true });
-    }
   }
   if (cls === "necromancer" && getReviveSpawnTile(state, power, mover) !== null) {
     out.push({ kind: "revive" });
@@ -2646,6 +2784,10 @@ function enumerateCandidates(state, power, moves) {
   }
   if (cls === "rogue") {
     for (const id of getPickpocketTargets(state, power, mover)) out.push({ kind: "pickpocket", targetTokenId: id });
+    for (const id of getBackstabTargets(state, power, mover)) out.push({ kind: "backstab", targetTokenId: id });
+  }
+  if (cls === "mage") {
+    for (const tile of getBlinkTiles(state, power, mover)) out.push({ kind: "blink", tile });
     if (charges >= VANISH_COST) {
       for (const id of getVanishTargets(state, power, mover)) out.push({ kind: "vanish", tokenId: id });
     }
@@ -2959,6 +3101,10 @@ function mkSimulate(state, power, c, mover) {
       return { state, power: applyPickpocket(power, mover) };
     case "sacrifice":
       return applySacrifice(state, power, c.targetTokenId, mover);
+    case "backstab":
+      return applyBackstab(state, power, c.targetTokenId, mover);
+    case "blink":
+      return applyBlink(state, power, c.tile, mover);
     case "felStorm":
       return applyFelStorm(state, power, mover);
     case "curse":
@@ -3155,6 +3301,8 @@ function publicPower(doc) {
     grandHeistTargets: doc.mk.classes[mover] === "rogue" && doc.mk.ultimateReady[mover] ? getGrandHeistTargets(doc.state, p, mover) : [],
     curseTargets: doc.mk.classes[mover] === "warlock" ? getCurseTargets(doc.state, p, mover) : [],
     sacrificeTargets: doc.mk.classes[mover] === "warlock" ? getSacrificeTargets(doc.state, p, mover) : [],
+    backstabTargets: doc.mk.classes[mover] === "rogue" ? getBackstabTargets(doc.state, p, mover) : [],
+    blinkTiles: doc.mk.classes[mover] === "mage" ? getBlinkTiles(doc.state, p, mover) : [],
     felStormTargets: doc.mk.classes[mover] === "warlock" && doc.mk.ultimateReady[mover] ? getFelStormTargets(doc.state, p, mover) : [],
     cursed: Object.fromEntries(
       ["p1", "p2"].map((pl) => p.curse[pl]).filter((c) => c !== null).map((c) => [c.tokenId, c.turnsLeft])
@@ -3235,6 +3383,8 @@ function stateEventOf(doc) {
     lastCurse: doc.lastCurse ?? null,
     lastCurseExpired: doc.lastCurseExpired ?? null,
     lastSacrifice: doc.lastSacrifice ?? null,
+    lastBackstab: doc.lastBackstab ?? null,
+    lastBlink: doc.lastBlink ?? null,
     lastFelStorm: doc.lastFelStorm ?? null,
     lastSnare: doc.lastSnare ?? null,
     lastTrapSprung: doc.lastTrapSprung ?? null,
@@ -3297,6 +3447,8 @@ function freshMatchFields(variant) {
     lastCurse: null,
     lastCurseExpired: null,
     lastSacrifice: null,
+    lastBackstab: null,
+    lastBlink: null,
     lastFelStorm: null,
     lastSnare: null,
     lastTrapSprung: null,
@@ -3419,6 +3571,8 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
       if (a.kind === "curse") return { doc: applyMkCurse(doc, seat, a.targetTokenId, now) };
       if (a.kind === "sacrifice") return { doc: applyMkSacrifice(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "backstab") return { doc: applyMkBackstab(doc, seat, a.targetTokenId, now) };
+      if (a.kind === "blink") return { doc: applyMkBlink(doc, seat, a.tile, now) };
       if (a.kind === "felStorm") return { doc: applyMkFelStorm(doc, seat, now) };
       if (a.kind === "snare") return { doc: applyMkSnare(doc, seat, a.tile, now) };
       if (a.kind === "piercingShot") return { doc: applyMkPiercingShot(doc, seat, now) };
@@ -3459,7 +3613,7 @@ function validateUsePower(doc, seat, a) {
       return null;
     case "chargedShot":
       if (cls !== "archer") return "Only an Archer can Charged Shot";
-      if (doc.mk.charges[seat] !== CHARGE_CAP) return "Charged Shot needs a full charge bank";
+      if (doc.mk.charges[seat] < CHARGED_SHOT_COST) return `Charged Shot costs ${CHARGED_SHOT_COST} charges`;
       if (!getChargedShotTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Charged Shot target";
       return null;
     case "blinkStrike":
@@ -3475,7 +3629,8 @@ function validateUsePower(doc, seat, a) {
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
       if (a.reinforced === true) {
-        if (doc.mk.charges[seat] !== CHARGE_CAP) return "Reinforced Bulwark needs a full charge bank";
+        if (BULWARK_REINFORCED_RETIRED) return "Reinforced Bulwark is retired";
+        if (doc.mk.charges[seat] < BULWARK_REINFORCED_COST) return `Reinforced Bulwark costs ${BULWARK_REINFORCED_COST} charges`;
       } else if (doc.mk.charges[seat] < 1) {
         return "No charge available";
       }
@@ -3540,6 +3695,15 @@ function validateUsePower(doc, seat, a) {
     case "sacrifice":
       if (cls !== "warlock") return "Only a Warlock can Sacrifice";
       if (!getSacrificeTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Sacrifice target";
+      return null;
+    case "blink":
+      if (cls !== "mage") return "Only a Mage can Blink";
+      if (!getBlinkTiles(doc.state, p(), seat).includes(a.tile)) return "Invalid Blink tile";
+      return null;
+    case "backstab":
+      if (cls !== "rogue") return "Only a Rogue can Backstab";
+      if (doc.mk.charges[seat] < BACKSTAB_COST) return `Backstab costs ${BACKSTAB_COST} charges`;
+      if (!getBackstabTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Backstab target";
       return null;
     case "felStorm":
       if (cls !== "warlock") return "Only a Warlock can call a Fel Storm";
@@ -3621,6 +3785,8 @@ var CLEAR_SLOTS = {
   lastCurse: null,
   lastCurseExpired: null,
   lastSacrifice: null,
+  lastBackstab: null,
+  lastBlink: null,
   lastFelStorm: null,
   lastSnare: null,
   lastTrapSprung: null,
@@ -3944,6 +4110,43 @@ function applyMkSacrifice(doc, seat, tokenId, now) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
+function applyMkBlink(doc, seat, tile, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const r = applyBlink(doc.state, fromWirePower(doc.mk), tile, seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  const next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBlink: { tokenId: r.tokenId, from: r.from, to: tile }
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+function applyMkBackstab(doc, seat, tokenId, now) {
+  const chargesBefore = doc.mk.charges[seat];
+  const r = applyBackstab(doc.state, fromWirePower(doc.mk), tokenId, seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  const killed = r.woundedTokenId === null;
+  const next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    captures: { ...doc.captures, [seat]: doc.captures[seat] + (killed ? 1 : 0) },
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastBackstab: { targetTokenId: tokenId },
+    lastWound: r.woundedTokenId !== null ? { tokenIds: [r.woundedTokenId] } : null
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
 function applyMkFelStorm(doc, seat, now) {
   const chargesBefore = doc.mk.charges[seat];
   const r = applyFelStorm(doc.state, fromWirePower(doc.mk), seat);
@@ -4186,7 +4389,7 @@ function autoSkipDelay(doc) {
   if (isBot) return AUTO_SKIP_DELAY_MS;
   if (doc.variant === "masterKiller" && doc.mk) {
     const p = fromWirePower(doc.mk);
-    if (doc.mk.classes[mover] === "mage" && canReflipAgain(p, mover)) {
+    if (doc.mk.classes[mover] === "mage" && (canReflipAgain(p, mover) || doc.currentFlip !== null && doc.currentFlip !== 0 && getBlinkTiles(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
     if (doc.mk.classes[mover] === "necromancer" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getReviveSpawnTile(doc.state, p, mover) !== null || getCorpseExplosionTargets(doc.state, p, mover).length > 0)) {
@@ -4195,7 +4398,7 @@ function autoSkipDelay(doc) {
     if (doc.mk.classes[mover] === "cleric" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getBlessTargets(doc.state, p, mover).length > 0 || getHealTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
-    if (doc.mk.classes[mover] === "rogue" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getPickpocketTargets(doc.state, p, mover).length > 0 || doc.mk.charges[mover] >= VANISH_COST && getVanishTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0)) {
+    if (doc.mk.classes[mover] === "rogue" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getPickpocketTargets(doc.state, p, mover).length > 0 || getBackstabTargets(doc.state, p, mover).length > 0 || doc.mk.charges[mover] >= VANISH_COST && getVanishTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getGrandHeistTargets(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
     if (doc.mk.classes[mover] === "warlock" && doc.currentFlip !== null && doc.currentFlip !== 0 && (getCurseTargets(doc.state, p, mover).length > 0 || getSacrificeTargets(doc.state, p, mover).length > 0 || doc.mk.ultimateReady[mover] && getFelStormTargets(doc.state, p, mover).length > 0)) {
@@ -4362,6 +4565,10 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkCurse(doc, seat, action.targetTokenId, now);
     case "sacrifice":
       return applyMkSacrifice(doc, seat, action.targetTokenId, now);
+    case "backstab":
+      return applyMkBackstab(doc, seat, action.targetTokenId, now);
+    case "blink":
+      return applyMkBlink(doc, seat, action.tile, now);
     case "felStorm":
       return applyMkFelStorm(doc, seat, now);
     case "snare":

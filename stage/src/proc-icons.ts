@@ -50,6 +50,8 @@ export type ProcIconId =
   | "larceny"
   | "pickpocket"
   | "vanish"
+  | "backstab"
+  | "blink"
   | "grandHeist"
   | "bloodPact"
   | "curse"
@@ -486,6 +488,25 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<circle cx="10" cy="14" r="1.6" fill="${GOLD}" fill-opacity="0.85"/>` +
       `<circle cx="7" cy="20" r="1.2" fill="${GOLD}" fill-opacity="0.55"/>` +
       `<circle cx="6" cy="27" r="0.8" fill="${GOLD}" fill-opacity="0.3"/>`,
+  ),
+
+  // Mage active (1 mana): the blink — a stone's outline fading out on the
+  // left and re-drawn solid on the right, the jump itself as a dashed arc.
+  blink: wrap(
+    `<path d="${STONE_PATH}" ${DETAIL} fill="none" stroke-dasharray="3 3" transform="translate(-9 0) scale(0.8) translate(6 6)"/>` +
+      `<path d="${STONE_PATH}" ${MAIN} ${BODY} transform="translate(9 0) scale(0.8) translate(6 6)"/>` +
+      `<path d="M14 14 Q24 2 34 14" ${GOLD_DETAIL} fill="none" stroke-dasharray="2.5 2.5"/>` +
+      diamond(34, 14, 1.8, GOLD),
+  ),
+
+  // Rogue active (2 mana): the dagger's tip alone, struck true — no
+  // flourish, just the one guaranteed hit.
+  backstab: wrap(
+    DAGGER +
+      `<path d="M24 2 L24 5.5" ${GOLD_DETAIL}/>` +
+      `<path d="M18 4 L20.5 7.5" ${GOLD_DETAIL}/>` +
+      `<path d="M30 4 L27.5 7.5" ${GOLD_DETAIL}/>` +
+      diamond(24, 1.5, 1.6, GOLD),
   ),
 
   // Rogue ultimate: the dagger at the center of the whole haul — every

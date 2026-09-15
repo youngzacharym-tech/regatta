@@ -33,6 +33,8 @@ import {
   applyReflip,
   applyRevive,
   applyVanish,
+  applyBackstab,
+  applyBlink,
   applyWarpath,
   breakShieldStreak,
   CHARGE_CAP,
@@ -103,6 +105,8 @@ interface GameResult {
     mend: number; // stones mended by Sanctified Ground shield landings
     pickpocket: number; // Rogue Pickpocket casts (turn-keeping bank drain)
     vanish: number; // Rogue Vanish casts (Bulwark's mechanic, Rogue-cast)
+    backstab: number; // Rogue Backstab casts (guaranteed execute; restored 2026-09-13)
+    blink: number; // Mage Blink casts (turn-ending reposition; added 2026-09-13)
     grandHeist: number; // Grand Heist ultimates fired
     curse: number; // Warlock Curse of Chains casts (turn-keeping hex)
     sacrifice: number; // Warlock Sacrifice casts (own stone traded for a pierce-kill)
@@ -441,6 +445,15 @@ function takeTurn(
       const r = applyVanish(state, power, action.tokenId, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, vanish: 1 } };
     }
+    case "blink": {
+      const r = applyBlink(state, power, action.tile, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, blink: 1 } };
+    }
+    case "backstab": {
+      // A guaranteed hit: a kill counts as a capture, a wound does not.
+      const r = applyBackstab(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: r.woundedTokenId === null ? 1 : 0, usage: { ...turnUsage, backstab: 1 } };
+    }
     case "grandHeist": {
       const r = applyGrandHeist(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 1, usage: { ...turnUsage, grandHeist: 1 } };
@@ -595,6 +608,8 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     mend: 0,
     pickpocket: 0,
     vanish: 0,
+    backstab: 0,
+    blink: 0,
     grandHeist: 0,
     curse: 0,
     sacrifice: 0,
@@ -659,6 +674,8 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     // more than once per turn, same shape as revive/bless).
     usage.pickpocket += r.usage.pickpocket ?? 0;
     if (r.usage.vanish) usage.vanish++;
+    if (r.usage.backstab) usage.backstab++;
+    if (r.usage.blink) usage.blink++;
     if (r.usage.grandHeist) usage.grandHeist++;
     // Curses arrive as counts (the turn-keeping loop's shape, like revives).
     usage.curse += r.usage.curse ?? 0;
@@ -757,6 +774,8 @@ for (const [a, b] of matchups) {
   const avgMend = mean(results.map((r) => r.usage.mend));
   const avgPickpocket = mean(results.map((r) => r.usage.pickpocket));
   const avgVanish = mean(results.map((r) => r.usage.vanish));
+  const avgBackstab = mean(results.map((r) => r.usage.backstab));
+  const avgBlink = mean(results.map((r) => r.usage.blink));
   const avgGrandHeist = mean(results.map((r) => r.usage.grandHeist));
   const avgCurse = mean(results.map((r) => r.usage.curse));
   const avgSacrifice = mean(results.map((r) => r.usage.sacrifice));
@@ -784,7 +803,7 @@ for (const [a, b] of matchups) {
   console.log(
     `  turns=${avgTurns.toFixed(1).padStart(6)}  maxTurns=${maxTurns}  flips=${avgFlips.toFixed(1).padStart(6)}  maxSweep=${maxSweep}` +
       `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  chargedShot/g=${avgChargedShot.toFixed(3)}` +
-      `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
+      `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  blink/g=${avgBlink.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
       `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
       `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}` +
       `  revive/g=${avgRevive.toFixed(2)}  explode/g=${avgExplosion.toFixed(3)}  explodeHome/g=${avgExplosionHome.toFixed(3)}` +
@@ -792,7 +811,7 @@ for (const [a, b] of matchups) {
       `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
       `  bless/g=${avgBless.toFixed(2)}  heal/g=${avgHeal.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
       `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}` +
-      `  pickpocket/g=${avgPickpocket.toFixed(2)}  vanish/g=${avgVanish.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}` +
+      `  pickpocket/g=${avgPickpocket.toFixed(2)}  vanish/g=${avgVanish.toFixed(2)}  backstab/g=${avgBackstab.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}` +
       `  curse/g=${avgCurse.toFixed(2)}  sacrifice/g=${avgSacrifice.toFixed(3)}` +
       `  felStorm/g=${avgFelStorm.toFixed(4)}  felStormDrag/g=${avgFelStormDragged.toFixed(3)}` +
       `  snare/g=${avgSnare.toFixed(2)}  trapSprung/g=${avgTrapSprung.toFixed(3)}  trapHome/g=${avgTrapHome.toFixed(3)}` +

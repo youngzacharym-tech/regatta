@@ -32,8 +32,33 @@ function otherPlayerId(p: PlayerId): PlayerId {
 // TUNABLES — adjust these, re-run batch-random-master-killer-games.ts, done.
 // ============================================================================
 
-/** Charges bank up to this many; further income while at the cap is a no-op. */
-export const CHARGE_CAP = 2;
+/** Charges bank up to this many; further income while at the cap is a no-op.
+ *
+ *  RAISED 2 -> 4 on 2026-09-13 (user's call, after a probe): the old 2-cap
+ *  made every "full bank" cast the same decision — spend everything or
+ *  wait — and left the four 2-cost actives across the roster as the only
+ *  spend most classes ever made. At 4 a class can hold its cheap cast AND
+ *  its expensive one. The re-pricing that came with it: every former
+ *  "full bank" cast is now a FIXED cost (CHARGED_SHOT_COST,
+ *  BULWARK_REINFORCED_COST; Revive was already REVIVE_COST) and every gate
+ *  that tested `=== CHARGE_CAP` tests `>= cost` — the probe showed a
+ *  strict-equality gate on a deeper bank simply switches the ability off
+ *  (Revive fell from 7/game to 0.3 before that fix). Ward is the one
+ *  deliberate exception: it still asks for a FULL bank, see isWarded. */
+export const CHARGE_CAP = 4;
+
+/** Archer's Charged Shot: a fixed price, no longer "the whole bank". */
+export const CHARGED_SHOT_COST = 2;
+
+/** Warrior's Reinforced Bulwark: a fixed price, no longer "the whole bank". */
+export const BULWARK_REINFORCED_COST = 2;
+/** The reinforced TIER is retired (2026-09-13, user's call): every class
+ *  now has exactly two actives, and the Warrior's are Charge and Bulwark.
+ *  applyBulwark's `reinforced` path is unreachable from the wire, the bot
+ *  and the client; the saves machinery it drove stays inert. If the
+ *  mage-vs-warrior number it was added to hold (see BULWARK_REINFORCED_TURNS)
+ *  slips, BULWARK_TURNS is the dial now. */
+export const BULWARK_REINFORCED_RETIRED = true;
 
 /** Mage's Re-flip: how many times per turn it can fire (each one still costs
  *  1 charge, still doesn't end the turn). Was hard-capped at 1 via a boolean
@@ -61,7 +86,40 @@ export const CHARGE_CAP = 2;
  *  54.5-54.7/45.3-45.5 at 30000-60000 games. Archer-vs-mage remains the
  *  known open thread it already was pre-change (see
  *  CHARGED_SHOT_WARD_DISTANCE's ship-now-reopen-later note).) */
-export const REFLIPS_PER_TURN = 2;
+export const REFLIPS_PER_TURN = 1;
+
+/* 2 -> 1 on 2026-09-13, as the other half of giving the Mage a second
+ * active (BLINK_COST below). The Mage was 65% against the field with ONE
+ * repeatable active, and the 4-bank probe showed why: re-flips scale with
+ * the bank (11.9 -> 15.7 casts/game at cap 4), so a deeper purse made the
+ * strongest class stronger. One re-flip a turn plus a positional cast is
+ * the same mana spent on decisions instead of dice. */
+
+/** Mage's Blink (added 2026-09-13): teleport the mage's LEAST-advanced
+ *  on-board stone to any EMPTY, non-shield tile in shared water ahead of
+ *  it — no capture, ends the turn. The non-lethal sibling of Blink Strike,
+ *  which is the same jump with a kill at the end and is gated behind the
+ *  ultimate for exactly that reason.
+ *
+ *  The guardrails are this file's own recorded blowouts: SHARED WATER
+ *  ONLY, never the home stretch (any placement past the gauntlet was a
+ *  guaranteed-escape engine — the old Dark Resurrection's 97.8/2.2);
+ *  NEVER A SHIELD TILE (a teleport onto a shield would farm the extra
+ *  turn, the mana and the ultimate streak); ENDS THE TURN (extra ACTIONS
+ *  are what compounded catastrophically — Push-grants-extra-turn at 95/5;
+ *  bought movement that ends the turn is Song of Haste's proven shape).
+ *  Never onto the enemy's trap tile or the tile their wolf guards, since
+ *  those reactive layers resolve on a MOVE's landing and a blink is not
+ *  one — the shadows don't fall where a trap waits. A frozen stone cannot
+ *  blink (frozen means it does not move at all). Which stone: the
+ *  rearmost on the board, Warpath's convention, so the cast is a
+ *  development tool rather than a way to rush the Warded leader home. */
+export const BLINK_COST = 1;
+/** How far ahead a Blink may reach, in tiles. The first matrix run had it
+ *  unbounded and the Mage went to 88.7% (5 blinks/game; mage-vs-warlock
+ *  96.9/3.1) — bought movement without a ceiling is the Rage lesson again.
+ *  4 = the most a flip can give, chosen instead of rolled. */
+export const BLINK_RANGE = 4;
 
 /** Archer's Push: how many tiles back along the TARGET's own path.
  *  (Was 2 — simulation showed Archer mirrors grinding to ~270 turns via a
@@ -359,7 +417,11 @@ export const SOUL_BOUNTY_CHARGES = 3;
  *  Every CHARGE_CAP reference in the archer/mage/warrior kits (Charged
  *  Shot's full-bank gate, Reinforced Bulwark's cost, Ward's threshold) is
  *  deliberately untouched: no other class can ever hold a third charge. */
-export const NECRO_CHARGE_CAP = 3;
+export const NECRO_CHARGE_CAP = CHARGE_CAP;
+/* Was CHARGE_CAP + 1 (the "soul gem", a pip only kills could reach). Set
+ * equal on 2026-09-13, user's call: every class shows and holds the same
+ * four. The Necromancer's identity is that a kill pays SOUL_BOUNTY_CHARGES
+ * at once, not that its purse is deeper. */
 
 /** Necromancer's Revive: the full-soul-bank (NECRO_CHARGE_CAP) cast that
  *  consumes the corpse (see PowerState.corpse) and raises the killed ENEMY
@@ -410,6 +472,18 @@ export const REVIVE_COST = 3;
  *  REVIVE_COST — which is the decision the kit was missing. */
 export const CORPSE_EXPLOSION_COST = 2;
 export const CORPSE_EXPLOSION_RADIUS = 1;
+/* LETHAL since 2026-09-13. The knockback version measured 0.09 casts per
+ * game across the whole matrix, and the reason was arithmetic, not the
+ * bot: a kill pays SOUL_BOUNTY_CHARGES (3), the corpse only exists after a
+ * kill, so whenever a corpse existed Revive (a 3-turn thrall that keeps
+ * the turn and chains) was on the menu — and a 1-tile shove never beats
+ * that. There was no board state where the explosion was the best play.
+ * The fix is the VALUE, not the price: every unprotected enemy within the
+ * radius is now SENT HOME (a blessed one is wounded in place, Push's
+ * rule). Desecration is unchanged and is the whole cost — the kills pay
+ * no bounty and mark no corpse — so the rite is now a real fork: burn the
+ * grave for up to two bodies now, or hold three mana to raise one thrall
+ * that can chain. Radius and a kill cap are the dials if it overshoots. */
 
 /** Necromancer's Exhume ultimate: the board position an ESCAPED enemy token
  *  is dragged back to — the only mechanic in the game that touches the win
@@ -553,6 +627,8 @@ export const ROGUE_STEAL_ON_CAPTURE = 2;
  *  mana back) — a real cost paid for a real cost inflicted, not a free
  *  relocation of resources. */
 export const PICKPOCKET_COST = 1;
+/** See getPickpocketTargets. */
+export const PICKPOCKET_RETIRED = true;
 /** How much of the target's bank Pickpocket drains — RAISED 1 -> 2
  *  alongside Vanish (2026-07-22): the "keep steal and invisibility as two
  *  separate, independently-tunable levers" half of the same request that
@@ -611,6 +687,30 @@ export const VANISH_COST = 1;
  *  optimization added after simulation, not a day-one requirement.
  *  STARTING VALUE, not yet sim-tuned for the reworked kit. */
 export const VANISH_TURNS = BULWARK_TURNS;
+
+/** Rogue's Backstab (RESTORED 2026-09-13, user's call, on the 4-bank):
+ *  a guaranteed execute at one enemy stone in shared water. Pierces Ward by
+ *  construction (nothing in its pool or apply path checks isWarded — the
+ *  "pierce by omission" idiom Charged Shot uses); does NOT pierce a shield
+ *  tile, a Bulwark or a Vanish (excluded from the pool outright), and a
+ *  blessed victim is WOUNDED, not killed. Ends the turn, breaks the streak.
+ *
+ *  HISTORY: this is the 2026-07-21 broad version. It first shipped WITH a
+ *  send-home refund and blew out 62-76% rogue-favored (backstab/g 10-16);
+ *  with the refund removed it landed near even vs archer/mage/cleric but
+ *  ~62% vs warrior/necromancer. It was then narrowed into a middle-shield
+ *  breaker, which crashed the class to 23-42% everywhere, and retired for
+ *  Vanish (d1ee4f8). It comes back BROAD, on top of Vanish, because the
+ *  4-bank changed the economy it was priced in: at cap 2 it was the whole
+ *  purse; at cap 4 it is half, competing with Pickpocket and Vanish for
+ *  the same mana. No refund on a real kill (see applyBackstab) — that rule
+ *  was the whole first balance fix and stays. Larceny's drain applies on
+ *  the kill like any other. STARTING PRICE; 3 is the next stop if the
+ *  matrix says the rogue over-corrects. */
+export const BACKSTAB_COST = 3;
+/* 2 -> 3 after the first matrix at 2: rogue 58.8% vs the field (66% vs
+ * warrior, backstab/g 8.2) — the same warrior/necromancer overshoot the
+ * July trace recorded. At 3 a Backstab is most of the purse again. */
 
 /** Warlock's Blood Pact (passive, free, added 2026-07-26): how many charges
  *  the warlock banks every time one of their OWN stones is KILLED — sent
@@ -1238,6 +1338,11 @@ export type PowerAction =
    *  getPickpocketTargets) but the effect is bank-level, not stone-level —
    *  the target only anchors the UI's "tap a stone" flow. */
   | { kind: "pickpocket"; targetTokenId: number }
+  /** Rogue's Backstab: a guaranteed execute at a target in shared water. */
+  | { kind: "backstab"; targetTokenId: number }
+  /** Mage's Blink: a TILE, not a token (Snare's shape) — the stone is
+   *  server-selected (the mover's least-advanced on-board stone). */
+  | { kind: "blink"; tile: number }
   /** Rogue's Vanish: targets one of the mover's own on-board stones, same
    *  shape as Bulwark's tokenId (see getVanishTargets/applyVanish). */
   | { kind: "vanish"; tokenId: number }
@@ -1854,7 +1959,7 @@ export function getLegalPowerMoves(
       if (
         power.classes[foe] === "necromancer" &&
         power.corpse[foe]?.tokenId === token.id &&
-        power.charges[foe] === REVIVE_COST
+        power.charges[foe] >= REVIVE_COST
       ) {
         continue;
       }
@@ -2195,6 +2300,8 @@ function resolveTurn(
   nextPower = clearCurseOnCapture(nextPower, kills);
   if (to >= PATH_LENGTH_PER_PLAYER && isCursed(nextPower, tokenId)) {
     nextPower = clearCurseOnCapture(nextPower, [tokenId]);
+    nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+    nextPower = clearInspireOnCapture(nextPower, [tokenId]);
   }
   if (woundIds.length > 0) {
     const vitality = { ...nextPower.vitality };
@@ -2281,6 +2388,7 @@ function resolveTurn(
   nextPower = grantBloodPact(nextPower, state.tokens, kills);
   // A dead stone's freeze timer dies with it (reserve-trip hygiene).
   nextPower = clearHamstringOnCapture(nextPower, kills);
+  nextPower = clearInspireOnCapture(nextPower, kills);
 
   // ---- HUNTER's reactive layer: the enemy's SNARE and their WOLF both
   // fire on the mover's landing, after every capture above has settled.
@@ -2311,6 +2419,7 @@ function resolveTurn(
         nextPower = clearVitality(nextPower, [tokenId]);
         nextPower = clearCurseOnCapture(nextPower, [tokenId]);
         nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+        nextPower = clearInspireOnCapture(nextPower, [tokenId]);
         nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
         nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
       }
@@ -2349,6 +2458,7 @@ function resolveTurn(
           nextPower = clearVitality(nextPower, [tokenId]);
           nextPower = clearCurseOnCapture(nextPower, [tokenId]);
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
+          nextPower = clearInspireOnCapture(nextPower, [tokenId]);
           nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
           nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
           nextPower = addCharge(nextPower, foe); // the kill pays the hunter, like any capture
@@ -2603,6 +2713,8 @@ export function applyPush(
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
     spentPower = clearVitality(spentPower, [targetTokenId]);
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
     spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
@@ -2661,7 +2773,7 @@ export function applyPush(
  *  is excluded here only if Charged Shot's OWN distance (Ward-aware) would
  *  send it home, independent of whether a normal Push would. */
 export function getChargedShotTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (power.charges[mover] !== CHARGE_CAP) return [];
+  if (power.charges[mover] < CHARGED_SHOT_COST) return [];
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
@@ -2698,7 +2810,7 @@ export function applyChargedShot(
     : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGE_CAP },
+    charges: { ...power.charges, [mover]: power.charges[mover] - CHARGED_SHOT_COST },
   };
   if (woundsInstead) {
     spentPower = addCharge(
@@ -2713,6 +2825,8 @@ export function applyChargedShot(
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
     spentPower = clearVitality(spentPower, [targetTokenId]);
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
     spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
   }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
@@ -2824,6 +2938,8 @@ export function applyBlinkStrike(
   // the same every-kill-path pair.
   nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
   nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
@@ -2900,6 +3016,8 @@ export function applyWarpath(
   // Curse hygiene + Blood Pact, the same every-kill-path pair.
   nextPower = clearVitality(nextPower, allCaptures);
   nextPower = clearCurseOnCapture(nextPower, allCaptures);
+  nextPower = clearHamstringOnCapture(nextPower, allCaptures);
+  nextPower = clearInspireOnCapture(nextPower, allCaptures);
   nextPower = grantBloodPact(nextPower, state.tokens, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
@@ -2966,7 +3084,7 @@ export function applyBulwark(
   const bulwarkSaves = { ...power.bulwarkSaves };
   let cost = 1;
   if (reinforced) {
-    cost = CHARGE_CAP;
+    cost = BULWARK_REINFORCED_COST;
     bulwarked[targetTokenId] = BULWARK_REINFORCED_TURNS;
     bulwarkSaves[targetTokenId] = BULWARK_REINFORCED_SAVES;
   } else {
@@ -3156,7 +3274,7 @@ export function getReviveSpawnTile(
   power: PowerState,
   mover: PlayerId,
 ): number | null {
-  if (power.charges[mover] !== REVIVE_COST) return null;
+  if (power.charges[mover] < REVIVE_COST) return null;
   if (power.thrall[mover] !== null) return null;
   const corpse = power.corpse[mover];
   if (!corpse) return null;
@@ -3269,17 +3387,14 @@ export function applyCorpseExplosion(
   const woundedTokenIds: number[] = [];
   let working: GameState = state;
   for (const victim of victims) {
-    const current = working.tokens.find((t) => t.id === victim.id)!;
-    const landing = computeKnockbackLanding(working, power, current, 1);
-    if (landing === -1 && isBlessed(power, victim.id)) {
-      // The blessing absorbs the send-home — applyPush's exact rule: the
-      // stone is wounded and holds its ground (it never moves; the soft
-      // 1-tile shove was only ever a side effect of surviving).
+    // Lethal: every unprotected body in the radius goes home. A blessing
+    // absorbs it exactly as it absorbs any other kill — wounded in place.
+    if (isBlessed(power, victim.id)) {
       woundedTokenIds.push(victim.id);
       continue;
     }
-    if (landing === -1) sentHomeIds.push(victim.id);
-    tokens = working.tokens.map((t) => (t.id === victim.id ? { ...t, position: landing } : t));
+    sentHomeIds.push(victim.id);
+    tokens = working.tokens.map((t) => (t.id === victim.id ? { ...t, position: -1 } : t));
     working = { ...working, tokens };
   }
 
@@ -3297,6 +3412,8 @@ export function applyCorpseExplosion(
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds); // unreachable while Bulwark blocks the blast, but a reserve trip must never carry protection — same guard as every send-home path
   nextPower = clearVitality(nextPower, sentHomeIds); // a WOUNDED (unblessed) victim sent home loses its entry — reserve-trip hygiene
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
+  nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
+  nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
   // Desecration denies the CASTER's income (no bounty, no corpse) — not
   // the VICTIM's compensation: a warlock's stones killed in the blast
   // still pay their owner's Blood Pact.
@@ -3624,6 +3741,13 @@ export function applyExhume(
  *  reimplementing the same contested-zone walk. Affordability
  *  (PICKPOCKET_COST) baked in, uniform for every target. */
 export function getPickpocketTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  // RETIRED 2026-09-13 (user's call): with Backstab back the Rogue had
+  // three actives, and Larceny already drains the purse on every kill.
+  // Kit is Larceny / Backstab / Vanish / Grand Heist. The oracle is the
+  // gate everywhere (client, validator, bot, sim), so an empty pool retires
+  // the cast without unthreading its turn-keeping plumbing — Hamstring's
+  // own precedent. The apply path stays for tests and for a future return.
+  if (PICKPOCKET_RETIRED) return [];
   if (power.charges[mover] < PICKPOCKET_COST) return [];
   const foe = otherPlayerId(mover);
   if (power.charges[foe] < 1) return [];
@@ -3670,6 +3794,83 @@ export function getVanishTargets(state: GameState, power: PowerState, mover: Pla
  *  first. No board movement at all, so — exactly like Bulwark — it always
  *  breaks any live shield streak and always ends the turn; doesn't grant a
  *  charge back, since it doesn't capture anything itself. */
+/** Rogue's Backstab: valid targets are enemy stones in shared water, minus
+ *  shield-tile occupants and Bulwarked/Vanished ones (both fully block it,
+ *  same as every other non-ultimate strike) — Ward is deliberately never
+ *  checked here at all, "pierced" by simple omission. Affordability baked
+ *  in. */
+export function getBackstabTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < BACKSTAB_COST) return [];
+  return getRainOfArrowsTargets(state, power, mover).filter((id) => {
+    const t = state.tokens.find((tok) => tok.id === id)!;
+    return !onShieldTile(t) && !isBulwarked(power, t);
+  });
+}
+
+/** Rogue's Backstab: spends BACKSTAB_COST for a guaranteed hit — no
+ *  distance/collision math (a direct strike, not a shove), so it resolves
+ *  as either a WOUND (blessed target — the Cleric's split, as Push/Charged
+ *  Shot honor it; still pays the breaker's standard charge) or a real
+ *  kill. A real kill does NOT refund (an unconditional hit that also
+ *  refunded was a net -1-mana always-available kill and blew out the
+ *  first balance pass) but carries every reserve-trip hygiene a capture
+ *  does and triggers Larceny's drain on top. The mover never moves, so it
+ *  never lands on a shield: breaks any live streak. */
+export function applyBackstab(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; woundedTokenId: number | null } {
+  const foe = otherPlayerId(mover);
+  const woundsInstead = isBlessed(power, targetTokenId);
+  const tokens = woundsInstead
+    ? state.tokens
+    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
+
+  let spentPower: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST },
+  };
+  if (woundsInstead) {
+    spentPower = addCharge(
+      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
+      mover,
+    );
+  } else {
+    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
+    spentPower = clearVitality(spentPower, [targetTokenId]);
+    spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
+    // Larceny: a real kill drains the victim's bank (never a wound).
+    spentPower = {
+      ...spentPower,
+      charges: {
+        ...spentPower.charges,
+        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE),
+      },
+    };
+    // Then the victim's own Blood Pact, in Larceny's shadow (the ordering
+    // BLOOD_PACT_CHARGES's doc fixes for every kill).
+    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+  }
+  spentPower = breakShieldStreak(spentPower, mover);
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(spentPower),
+    woundedTokenId: woundsInstead ? targetTokenId : null,
+  };
+}
+
 export function applyVanish(
   state: GameState,
   power: PowerState,
@@ -3731,6 +3932,8 @@ export function applyGrandHeist(
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
   nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
   // Blood Pact's grant lands here — and the drain-to-zero below takes it
   // straight back. Deliberate (see BLOOD_PACT_CHARGES's ordering note):
   // the heist robs the grave too. The call stays for uniform kill-path
@@ -3897,6 +4100,8 @@ export function applySacrifice(
   nextPower = clearThrallIfCaptured(nextPower, killed);
   nextPower = clearVitality(nextPower, killed);
   nextPower = clearCurseOnCapture(nextPower, killed);
+  nextPower = clearHamstringOnCapture(nextPower, killed);
+  nextPower = clearInspireOnCapture(nextPower, killed);
   // THE PACT DOES NOT PAY FOR SUICIDE. Blood Pact covers blood the ENEMY
   // spills, never blood the warlock spends itself — so the sacrificed
   // stone is excluded here (an enemy warlock's stone dying as the TARGET
@@ -3992,6 +4197,8 @@ export function applyFelStorm(
   nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
   nextPower = clearVitality(nextPower, sentHomeIds);
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
+  nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
+  nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
   nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover); // an attack, not a placement
   const nextState: GameState = {
@@ -4038,6 +4245,65 @@ export function applyFelStorm(
  *  mirror: two traps can share a square, and each springs for its own
  *  setter's opponent. Nothing needs disambiguating — resolveTurn checks the
  *  MOVER's foe's slot only. */
+/** The stone a Blink would move: the mover's least-advanced on-board stone,
+ *  or null if there is none or it is frozen. */
+export function blinkStone(state: GameState, power: PowerState, mover: PlayerId): TokenState | null {
+  const stone = findLeastAdvancedToken(state, power, mover);
+  if (!stone || isHamstrung(power, stone.id)) return null;
+  return stone;
+}
+
+/** Mage's Blink: legal destination tiles — empty, non-shield, contested,
+ *  strictly ahead of the blinking stone, and not a square the enemy's trap
+ *  or wolf covers (see BLINK_COST). Affordability baked in. */
+export function getBlinkTiles(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  if (power.charges[mover] < BLINK_COST) return [];
+  const stone = blinkStone(state, power, mover);
+  if (!stone) return [];
+  const foe = otherPlayerId(mover);
+  const wolfTile = wolfGuardTile(state, power, foe);
+  const tiles: number[] = [];
+  for (let tile = stone.position + 1; tile <= Math.min(stone.position + BLINK_RANGE, PATH_LENGTH_PER_PLAYER - 1); tile++) {
+    if (!BOARD_LAYOUT[tile].isContested) continue;
+    if (BOARD_LAYOUT[tile].type === "shield") continue;
+    if (state.tokens.some((t) => t.position === tile)) continue;
+    if (power.traps?.[foe] === tile) continue;
+    if (wolfTile === tile) continue;
+    tiles.push(tile);
+  }
+  return tiles;
+}
+
+/** Mage's Blink: spends BLINK_COST and moves the blink stone to `tile`.
+ *  Nothing is captured, nothing reacts, the turn ends and the streak
+ *  breaks (a blink never lands on a shield by construction). */
+export function applyBlink(
+  state: GameState,
+  power: PowerState,
+  tile: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; tokenId: number; from: number } {
+  const stone = blinkStone(state, power, mover)!;
+  const tokens = state.tokens.map((t) => (t.id === stone.id ? { ...t, position: tile } : t));
+  let next: PowerState = {
+    ...power,
+    charges: { ...power.charges, [mover]: power.charges[mover] - BLINK_COST },
+  };
+  next = breakShieldStreak(next, mover);
+  return {
+    state: {
+      tokens,
+      currentPlayer: otherPlayerId(mover),
+      lastFlip: null,
+      winner: null,
+      extraTurn: false,
+    },
+    power: resetTurnFlags(next),
+    tokenId: stone.id,
+    from: stone.position,
+  };
+}
+
 export function getSnareTiles(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < SNARE_COST) return [];
   const tiles: number[] = [];
@@ -4128,6 +4394,7 @@ export function applyPiercingShot(
       next = clearVitality(next, [victim.id]);
       next = clearCurseOnCapture(next, [victim.id]);
       next = clearHamstringOnCapture(next, [victim.id]);
+      next = clearInspireOnCapture(next, [victim.id]);
       next = grantBloodPact(next, state.tokens, [victim.id]);
       killedTokenId = victim.id;
     }
@@ -4223,6 +4490,7 @@ export function applyWildHunt(
     next = clearVitality(next, [quarry.id]);
     next = clearCurseOnCapture(next, [quarry.id]);
     next = clearHamstringOnCapture(next, [quarry.id]);
+    next = clearInspireOnCapture(next, [quarry.id]);
     next = grantBloodPact(next, state.tokens, [quarry.id]);
     next = addCharge(next, mover);
   }
@@ -4327,6 +4595,7 @@ export function applyRecklessSwing(
     next = clearVitality(next, [targetTokenId]);
     next = clearCurseOnCapture(next, [targetTokenId]);
     next = clearHamstringOnCapture(next, [targetTokenId]);
+    next = clearInspireOnCapture(next, [targetTokenId]);
     next = grantBloodPact(next, state.tokens, [targetTokenId]);
     killedTokenId = targetTokenId;
   }
@@ -4344,6 +4613,7 @@ export function applyRecklessSwing(
     next = clearVitality(next, [swinger.id]);
     next = clearCurseOnCapture(next, [swinger.id]);
     next = clearHamstringOnCapture(next, [swinger.id]);
+    next = clearInspireOnCapture(next, [swinger.id]);
     next = clearCapturedBulwarks(next, [swinger.id]);
     next = grantBloodPact(next, state.tokens, [swinger.id]);
   }
@@ -4433,6 +4703,7 @@ export function applyWhirlwind(
     next = clearVitality(next, capturedTokenIds);
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
+    next = clearInspireOnCapture(next, capturedTokenIds);
     next = grantBloodPact(next, state.tokens, capturedTokenIds);
   }
 
@@ -4457,6 +4728,7 @@ export function applyWhirlwind(
       next = clearVitality(next, [v.id]);
       next = clearCurseOnCapture(next, [v.id]);
       next = clearHamstringOnCapture(next, [v.id]);
+      next = clearInspireOnCapture(next, [v.id]);
       next = clearCapturedBulwarks(next, [v.id]);
       next = grantBloodPact(next, state.tokens, [v.id]);
     }
@@ -4535,6 +4807,7 @@ export function applyBloodbath(
     next = clearVitality(next, killedTokenIds);
     next = clearCurseOnCapture(next, killedTokenIds);
     next = clearHamstringOnCapture(next, killedTokenIds);
+    next = clearInspireOnCapture(next, killedTokenIds);
     next = grantBloodPact(next, state.tokens, killedTokenIds);
     next = addCharge(next, mover);
   }

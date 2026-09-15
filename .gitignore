@@ -30,3 +30,6 @@ myrmblender/
 
 # Playwright MCP screenshots (session artifacts)
 .playwright-mcp/
+
+# local play-test server logs (detached referee)
+referee-*.log
