@@ -142,6 +142,9 @@ import {
   tickBulwarkForReflip,
   tickCurseForNewTurn,
   tickHamstringForNewTurn,
+  tickDarkBargainForNewTurn,
+  DARK_BARGAIN_RETREAT,
+  BLOOD_PACT_CHARGES,
   tickThrallForNewTurn,
   wolfGuardTile,
   type PlayerClass,
@@ -1771,16 +1774,18 @@ function check(name: string, cond: boolean, detail?: string) {
       const r = applyPowerMove(s, pw, m, "p1");
       check("Bounty: a kill from an empty bank pays the full SOUL_BOUNTY_CHARGES", r.power.charges.p1 === SOUL_BOUNTY_CHARGES, `p1=${r.power.charges.p1}`);
       check("Bounty: corpse marker set on the death tile", r.power.corpse.p1?.tokenId === 4 && r.power.corpse.p1?.tile === 8, JSON.stringify(r.power.corpse.p1));
+      check("Bounty: the grave is dug on the same tile", r.power.grave.p1 === 8, `grave=${r.power.grave.p1}`);
       check("Bounty: the victim banks nothing (death-income is gone)", r.power.charges.p2 === 0, `p2=${r.power.charges.p2}`);
       check("Bounty: the killed token goes home", r.state.tokens.find((t) => t.id === 4)!.position === -1);
     }
 
     // Clamp at the soul cap, and the freshest kill overwrites the corpse.
-    const pwClamp: PowerState = { ...pw, charges: { p1: 2, p2: 0 }, corpse: { p1: { tokenId: 5, tile: 9 }, p2: null } };
+    const pwClamp: PowerState = { ...pw, charges: { p1: 2, p2: 0 }, corpse: { p1: { tokenId: 5, tile: 9 }, p2: null }, grave: { p1: 9, p2: null } };
     if (m) {
       const r = applyPowerMove(s, pwClamp, m, "p1");
       check("Bounty: clamped at NECRO_CHARGE_CAP", r.power.charges.p1 === NECRO_CHARGE_CAP, `p1=${r.power.charges.p1}`);
       check("Bounty: a newer kill overwrites the corpse", r.power.corpse.p1?.tokenId === 4 && r.power.corpse.p1?.tile === 8, JSON.stringify(r.power.corpse.p1));
+      check("Bounty: a newer kill moves the grave", r.power.grave.p1 === 8, `grave=${r.power.grave.p1}`);
     }
 
     // Control: a non-necromancer capturer keeps the classic 1-charge economy
@@ -1871,9 +1876,11 @@ function check(name: string, cond: boolean, detail?: string) {
       ...power({ p1: "necromancer" }, { p1: REVIVE_COST }),
       shieldStreak: { p1: 1, p2: 0 },
       corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+      grave: { p1: 8, p2: null },
     };
     const r = applyRevive(s, pw, "p1");
     check("Revive: the corpse rises where it died", r.state.tokens.find((t) => t.id === 4)!.position === 8);
+    check("Revive: leaves the grave open for Corpse Explosion", r.power.grave.p1 === 8, `grave=${r.power.grave.p1}`);
     check("Revive: reports what rose and where", r.raisedTokenId === 4 && r.raisedTo === 8);
     check("Revive: spends the whole soul bank", r.power.charges.p1 === 0, `p1=${r.power.charges.p1}`);
     check("Revive: consumes the corpse", r.power.corpse.p1 === null);
@@ -1938,73 +1945,76 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Ward pierce: the necromancer's LIVING stones stay blocked", living === undefined, JSON.stringify(living));
   }
 
-  // --- Corpse Explosion: the 2-soul corpse spend ---------------------------
+  // --- Corpse Explosion: the 2-soul GRAVE spend (2026-09-16 split) -------
   {
-    // Corpse marked on tile 8; enemies at 7, 8-adjacent 9, and far 11.
+    // Grave (and the body it came from) on tile 8; enemy 5 stands ON the
+    // grave, 6 one tile out, 7 far.
     const ready: PowerState = {
       ...power({ p1: "necromancer", p2: "archer" }, { p1: CORPSE_EXPLOSION_COST }),
       corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+      grave: { p1: 8, p2: null },
     };
-    const s = state("p1", { 5: 9, 6: 11 });
-    check(
-      "Explosion: strikes the unprotected enemy beside the grave",
-      getCorpseExplosionTargets(s, ready, "p1").includes(5),
-    );
+    const s = state("p1", { 5: 8, 6: 9, 7: 11 });
+    check("Explosion: strikes the unprotected enemy standing on the grave", getCorpseExplosionTargets(s, ready, "p1").includes(5));
     check(
       "Explosion: reaches only CORPSE_EXPLOSION_RADIUS from the grave",
-      !getCorpseExplosionTargets(s, ready, "p1").includes(6),
+      !getCorpseExplosionTargets(s, ready, "p1").includes(6) && !getCorpseExplosionTargets(s, ready, "p1").includes(7),
     );
-    check("Explosion: refused without a corpse", getCorpseExplosionTargets(s, { ...ready, corpse: { p1: null, p2: null } }, "p1").length === 0);
+    check("Explosion: refused without a grave", getCorpseExplosionTargets(s, { ...ready, grave: { p1: null, p2: null } }, "p1").length === 0);
     check(
       "Explosion: refused below its cost",
       getCorpseExplosionTargets(s, { ...ready, charges: { p1: CORPSE_EXPLOSION_COST - 1, p2: 0 } }, "p1").length === 0,
     );
-    const sDenied = state("p1", { 4: 1, 5: 9 });
-    check("Explosion: refused once the corpse token re-enters", getCorpseExplosionTargets(sDenied, ready, "p1").length === 0);
-    check("Explosion: empty pool when nothing stands near the grave", getCorpseExplosionTargets(state("p1", {}), ready, "p1").length === 0);
+    // The grave outlives the body: Revive's consumption of the corpse, and
+    // the victim re-entering its token, both leave the mine armed.
+    const raised: PowerState = { ...ready, corpse: { p1: null, p2: null } };
+    check("Explosion: castable after Revive took the body", getCorpseExplosionTargets(s, raised, "p1").includes(5));
+    const sDenied = state("p1", { 4: 1, 5: 8 });
+    check("Explosion: still castable once the corpse token re-enters", getCorpseExplosionTargets(sDenied, ready, "p1").includes(5));
+    check("Explosion: empty pool when nothing stands on the grave", getCorpseExplosionTargets(state("p1", { 5: 9 }), ready, "p1").length === 0);
     // Unlike Revive, an ACTIVE thrall doesn't block the blast (different slot).
     const midThrall: PowerState = { ...ready, thrall: { p1: { tokenId: 7, turnsLeft: 1 }, p2: null } };
-    const sMid = state("p1", { 5: 9, 7: 5 });
-    check("Explosion: castable while a thrall serves", getCorpseExplosionTargets(sMid, midThrall, "p1").includes(5));
-    check("Explosion: the caster's own thrall is family, never a victim", !getCorpseExplosionTargets(sMid, midThrall, "p1").includes(7));
+    check("Explosion: castable while a thrall serves", getCorpseExplosionTargets(state("p1", { 5: 8, 7: 5 }), midThrall, "p1").includes(5));
+    const ownThrall: PowerState = { ...ready, thrall: { p1: { tokenId: 7, turnsLeft: 1 }, p2: null } };
+    check("Explosion: the caster's own thrall is family, never a victim", !getCorpseExplosionTargets(state("p1", { 7: 8 }), ownThrall, "p1").includes(7));
     // Protections all hold: shield tile 7, Ward, Bulwark.
-    const shielded = state("p1", { 5: 7 });
-    const corpseAt7: PowerState = { ...ready, corpse: { p1: { tokenId: 4, tile: 8 }, p2: null } };
-    check("Explosion: a shield tile shelters its occupant", !getCorpseExplosionTargets(shielded, corpseAt7, "p1").includes(5));
+    const graveAt7: PowerState = { ...ready, corpse: { p1: { tokenId: 4, tile: 7 }, p2: null }, grave: { p1: 7, p2: null } };
+    check("Explosion: a shield tile shelters its occupant", !getCorpseExplosionTargets(state("p1", { 5: 7 }), graveAt7, "p1").includes(5));
     const pwWard: PowerState = {
       ...power({ p1: "necromancer", p2: "mage" }, { p1: CORPSE_EXPLOSION_COST, p2: CHARGE_CAP }),
       corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+      grave: { p1: 8, p2: null },
     };
-    check("Explosion: Ward turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 9 }), pwWard, "p1").includes(5));
+    check("Explosion: Ward turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 8 }), pwWard, "p1").includes(5));
     const pwBul: PowerState = { ...ready, bulwarked: { 5: 2 } };
-    check("Explosion: Bulwark turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 9 }), pwBul, "p1").includes(5));
+    check("Explosion: Bulwark turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 8 }), pwBul, "p1").includes(5));
 
-    // Apply: lethal (2026-09-13) — every unprotected victim goes home, flat cost, desecration.
-    const sApply = state("p1", { 5: 9, 6: 8 }); // 6 stands on the grave itself, 5 one tile out: both in the radius
+    // Apply: lethal (2026-09-13) — the victim goes home, flat cost, desecration.
+    const sApply = state("p1", { 5: 8, 6: 9 }); // 5 stands on the grave; 6 one tile out is safe at radius 0
     const rA = applyCorpseExplosion(sApply, ready, "p1");
-    check("Explosion: every victim in the radius is sent home", rA.state.tokens.find((t) => t.id === 5)!.position === -1 && rA.state.tokens.find((t) => t.id === 6)!.position === -1);
-    check("Explosion: both kills reported", rA.sentHomeIds.length === 2 && rA.sentHomeIds.includes(5) && rA.sentHomeIds.includes(6));
+    check("Explosion: the stone on the grave is sent home", rA.state.tokens.find((t) => t.id === 5)!.position === -1);
+    check("Explosion: a stone outside the radius is untouched", rA.state.tokens.find((t) => t.id === 6)!.position === 9 && rA.sentHomeIds.length === 1);
+    check("Explosion: the kill is reported", rA.sentHomeIds.includes(5) && rA.struckTokenIds.includes(5));
     check("Explosion: spends its flat cost", rA.power.charges.p1 === 0, `p1=${rA.power.charges.p1}`);
-    check("Explosion: consumes the corpse", rA.power.corpse.p1 === null);
+    check("Explosion: consumes the grave", rA.power.grave.p1 === null);
+    check("Explosion: desecration — a blown grave raises nothing", rA.power.corpse.p1 === null);
     check("Explosion: ends the turn", rA.state.currentPlayer === "p2");
     check("Explosion: reports the epicenter", rA.tile === 8);
-    check("Explosion: desecration — no corpse minted by the blast", rA.power.corpse.p1 === null);
-    // Radius: an enemy two tiles out is untouched.
-    const sFar = state("p1", { 5: 10 });
-    const rF = applyCorpseExplosion(sFar, ready, "p1");
-    check("Explosion: a stone outside the radius is untouched", rF.state.tokens.find((t) => t.id === 5)!.position === 10 && rF.sentHomeIds.length === 0);
-    const sWall = state("p1", { 0: 8, 5: 9 }); // my own stone beside the grave is never a victim
-    const rW = applyCorpseExplosion(sWall, ready, "p1");
-    check("Explosion: only enemies die", rW.state.tokens.find((t) => t.id === 5)!.position === -1 && rW.state.tokens.find((t) => t.id === 0)!.position === 8);
-    check("Explosion: blast kills pay no bounty", rW.power.charges.p1 === 0, `p1=${rW.power.charges.p1}`);
+    check("Explosion: desecration — no corpse or grave minted by the blast", rA.power.corpse.p1 === null && rA.power.grave.p1 === null);
+    check("Explosion: blast kills pay no bounty", rA.power.charges.p1 === 0, `p1=${rA.power.charges.p1}`);
+    // After Revive emptied the corpse, the grave-only blast still works and
+    // still leaves nothing behind.
+    const rR = applyCorpseExplosion(sApply, raised, "p1");
+    check("Explosion: grave-only blast kills the stone on it", rR.state.tokens.find((t) => t.id === 5)!.position === -1 && rR.power.grave.p1 === null);
     check("Explosion: the blast breaks a live shield streak", applyCorpseExplosion(sApply, { ...ready, shieldStreak: { p1: 2, p2: 0 } }, "p1").power.shieldStreak.p1 === 0);
     // Mirror: the ENEMY's thrall (my own body) blasted home dies for real.
     const mirrorPw: PowerState = {
       ...power({ p1: "necromancer", p2: "necromancer" }, { p1: CORPSE_EXPLOSION_COST }),
       corpse: { p1: { tokenId: 4, tile: 8 }, p2: null },
+      grave: { p1: 8, p2: null },
       thrall: { p1: null, p2: { tokenId: 0, turnsLeft: 2 } },
     };
-    const sMirror = state("p1", { 0: 9, 1: 8 }); // my body 0 possessed by p2 at 9; my stone 1 walls tile 8
+    const sMirror = state("p1", { 0: 8 }); // my body 0, possessed by p2, stands on my grave
     const rM = applyCorpseExplosion(sMirror, mirrorPw, "p1");
     check("Explosion: an enemy thrall blasted home dies for real", rM.state.tokens.find((t) => t.id === 0)!.position === -1 && rM.power.thrall.p2 === null);
   }
@@ -2426,22 +2436,20 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Absorb/Shot: cost spent, break refunds one", r4.power.charges.p1 === CHARGE_CAP - CHARGED_SHOT_COST + 1);
   check("Absorb/Shot: reported", r4.woundedTokenId === 4);
 
-  // Corpse Explosion: a blessed victim whose knockback would send home is
-  // wounded in place instead; a mortal one still goes home.
-  const s5 = state("p1", { 0: 5, 4: 6, 5: 5 });
-  void s5;
-  const s6 = state("p1", { 4: 6, 5: 5 });
+  // Corpse Explosion: a blessed victim standing on the grave is wounded in
+  // place instead of going home; a mortal one still dies (radius 0: the
+  // grave holds one stone, so the two cases are two blasts).
   const pw6: PowerState = {
     ...power({ p1: "necromancer", p2: "cleric" }, { p1: CORPSE_EXPLOSION_COST }),
     corpse: { p1: { tokenId: 6, tile: 6 }, p2: null },
+    grave: { p1: 6, p2: null },
     vitality: { 4: "blessed" },
   };
-  // Victims: p2's 4 at 6 (blessed -> absorbed as a wound, holds its tile)
-  // and p2's 5 at 5 (mortal -> killed outright by the lethal blast).
-  const r6 = applyCorpseExplosion(s6, pw6, "p1");
+  const r6 = applyCorpseExplosion(state("p1", { 4: 6 }), pw6, "p1");
   check("Absorb/Blast: blessed victim wounded in place", r6.state.tokens.find((t) => t.id === 4)!.position === 6 && r6.power.vitality[4] === "wounded");
   check("Absorb/Blast: reported in woundedTokenIds, not sentHomeIds", r6.woundedTokenIds.includes(4) && !r6.sentHomeIds.includes(4));
-  check("Absorb/Blast: mortal victim killed", r6.state.tokens.find((t) => t.id === 5)!.position === -1 && r6.sentHomeIds.includes(5));
+  const r6m = applyCorpseExplosion(state("p1", { 5: 6 }), pw6, "p1");
+  check("Absorb/Blast: mortal victim killed", r6m.state.tokens.find((t) => t.id === 5)!.position === -1 && r6m.sentHomeIds.includes(5));
 }
 
 // ---------------------------------------------------------------------------
@@ -2825,10 +2833,11 @@ function check(name: string, cond: boolean, detail?: string) {
       `got ${r.power.charges.p2}`,
     );
     check("Backstab: reports no wound", r.woundedTokenId === null);
-    const sPact = state("p1", { 0: 4, 4: 6 });
+    const sPact = state("p1", { 0: 4, 4: 6, 5: 1 }); // warlock's 5 waits behind in its own lane: a stand-in
     const pwPact = power({ p1: "rogue", p2: "warlock" }, { p1: CHARGE_CAP, p2: 0 });
     const rp = applyBackstab(sPact, pwPact, 4, "p1");
-    check("Backstab: Larceny drains first, then the victim's Blood Pact pays (warlock at 0 ends at 1)", rp.power.charges.p2 === 1, `got ${rp.power.charges.p2}`);
+    check("Backstab: Larceny drains first, then the victim's Dark Bargain pays (warlock at 0 ends at 1)", rp.power.charges.p2 === 1, `got ${rp.power.charges.p2}`);
+    check("Backstab: the bargain saved the runner and took the stand-in", rp.state.tokens.find((t) => t.id === 4)!.position === 5 && rp.state.tokens.find((t) => t.id === 5)!.position === -1);
     const pwLit: PowerState = { ...power({ p1: "rogue", p2: "bard" }, { p1: CHARGE_CAP, p2: 0 }), inspired: { 4: 3 } };
     const rl = applyBackstab(sPact, pwLit, 4, "p1");
     check("Backstab: a lit (inspired) victim loses the song on the reserve trip", rl.power.inspired[4] === undefined);
@@ -2960,24 +2969,76 @@ function check(name: string, cond: boolean, detail?: string) {
 // WARLOCK (2026-07-26) — Blood Pact / Curse of Chains / Sacrifice / Fel Storm
 // ---------------------------------------------------------------------------
 {
-  // --- Blood Pact: the warlock banks when its OWN stones die -------------
-  // p2 archer at 8 pushes the p1 warlock's stone at 9 back 1 -> tile 8 is
-  // occupied by the archer, so the landing collides and it goes home.
-  const sPact = state("p2", { 0: 9, 4: 8 });
-  const pwPact = power({ p1: "warlock", p2: "archer" }, { p2: 1 });
-  const rPact = applyPush(sPact, pwPact, 0, "p2");
-  check("Blood Pact: a pushed-home warlock stone actually goes home", rPact.state.tokens.find((t) => t.id === 0)!.position === -1);
-  check("Blood Pact: the warlock banks a charge for its own dead", rPact.power.charges.p1 === 1);
+  // --- Dark Bargain: the fiend trades a rear stone for a runner (2026-09-16,
+  // replaced Blood Pact) ----------------------------------------------------
+  {
+    // p1 archer's 0 at 6 lands on the p2 warlock's runner 4 at 8 (flip 2);
+    // the warlock's 5 at 5 and 6 at 3 stand behind it.
+    const pw = power({ p1: "archer", p2: "warlock" });
+    const landOn8 = (st: GameState) => getLegalPowerMoves(st, pw, 2).find((mv) => mv.tokenId === 0 && mv.to === 8)!;
+    const s = state("p1", { 0: 6, 4: 8, 5: 5, 6: 3 });
+    const r = applyPowerMove(s, pw, landOn8(s), "p1");
+    check("Bargain: the runner steps back one tile", r.state.tokens.find((t) => t.id === 4)!.position === 8 - DARK_BARGAIN_RETREAT);
+    check("Bargain: the least-advanced other stone goes home instead", r.state.tokens.find((t) => t.id === 6)!.position === -1 && r.state.tokens.find((t) => t.id === 5)!.position === 5);
+    check("Bargain: the attacker still takes the tile and still banks the kill", r.state.tokens.find((t) => t.id === 0)!.position === 8 && r.power.charges.p1 === 1);
+    check("Bargain: the stand-in's death pays the warlock", r.power.charges.p2 === BLOOD_PACT_CHARGES, `p2=${r.power.charges.p2}`);
+    check(
+      "Bargain: announced on the warlock's slot",
+      r.power.darkBargain.p2?.savedTokenId === 4 && r.power.darkBargain.p2?.from === 8 && r.power.darkBargain.p2?.to === 7 && r.power.darkBargain.p2?.sacrificedTokenId === 6 && r.power.darkBargain.p2?.sacrificedFrom === 3,
+      JSON.stringify(r.power.darkBargain),
+    );
+    check("Bargain: the fresh-turn tick clears the announcement", tickDarkBargainForNewTurn(r.power).darkBargain.p2 === null);
+    check("Bargain: the tick is a no-op reference when nothing is set", tickDarkBargainForNewTurn(pw) === pw);
 
-  // Non-warlock owners get nothing from the same death.
-  const pwNoPact = power({ p1: "mage", p2: "archer" }, { p2: 1 });
-  const rNoPact = applyPush(sPact, pwNoPact, 0, "p2");
-  check("Blood Pact: a non-warlock victim banks nothing", rNoPact.power.charges.p1 === 0);
+    // No other stone strictly BEHIND the victim: the stone dies, nothing is paid.
+    const sAhead = state("p1", { 0: 6, 4: 8, 5: 10 });
+    const rA = applyPowerMove(sAhead, pw, landOn8(sAhead), "p1");
+    check("Bargain: refused when the only other stone is ahead of the victim", rA.state.tokens.find((t) => t.id === 4)!.position === -1 && rA.state.tokens.find((t) => t.id === 5)!.position === 10);
+    check("Bargain: a refused death pays nothing", rA.power.charges.p2 === 0 && rA.power.darkBargain.p2 === null);
+    const sAlone = state("p1", { 0: 6, 4: 8 });
+    const rAl = applyPowerMove(sAlone, pw, landOn8(sAlone), "p1");
+    check("Bargain: refused when the victim is the warlock's only stone on the board", rAl.state.tokens.find((t) => t.id === 4)!.position === -1 && rAl.power.charges.p2 === 0);
 
-  // Capped by CHARGE_CAP like all generic income — no third pip.
-  const pwFull = power({ p1: "warlock", p2: "archer" }, { p1: CHARGE_CAP, p2: 1 });
-  const rFull = applyPush(sPact, pwFull, 0, "p2");
-  check("Blood Pact: respects CHARGE_CAP", rFull.power.charges.p1 === CHARGE_CAP);
+    // Retreat tile held by someone else: refused.
+    const sBlocked = state("p1", { 0: 6, 1: 7, 4: 8, 6: 3 });
+    const rB = applyPowerMove(sBlocked, pw, landOn8(sBlocked), "p1");
+    check("Bargain: refused when the retreat tile is occupied", rB.state.tokens.find((t) => t.id === 4)!.position === -1 && rB.state.tokens.find((t) => t.id === 6)!.position === 3);
+    // ...unless the occupant IS the stand-in, which vacates it.
+    const sSwap = state("p1", { 0: 6, 4: 8, 5: 7 });
+    const rS = applyPowerMove(sSwap, pw, landOn8(sSwap), "p1");
+    check("Bargain: the stand-in on the retreat tile gives up its place", rS.state.tokens.find((t) => t.id === 4)!.position === 7 && rS.state.tokens.find((t) => t.id === 5)!.position === -1);
+
+    // A Push from directly behind leaves the pusher on the retreat tile — refused by the same rule.
+    const sPush = state("p2", { 0: 9, 1: 3, 4: 8 });
+    const rP = applyPush(sPush, power({ p1: "warlock", p2: "archer" }, { p2: 1 }), 0, "p2");
+    check("Bargain: a pushed-home stone whose retreat tile the pusher holds simply dies", rP.state.tokens.find((t) => t.id === 0)!.position === -1 && rP.state.tokens.find((t) => t.id === 1)!.position === 3 && rP.power.charges.p1 === 0);
+    // Non-warlock owners get nothing from the same death (unchanged).
+    const rNo = applyPush(sPush, power({ p1: "mage", p2: "archer" }, { p2: 1 }), 0, "p2");
+    check("Bargain: a non-warlock victim banks nothing", rNo.power.charges.p1 === 0);
+
+    // Ultimates take what they want: Blink Strike kills the runner outright.
+    const sUlt = state("p1", { 0: 5, 4: 8, 6: 3 });
+    const pwUlt: PowerState = { ...power({ p1: "mage", p2: "warlock" }), ultimateReady: { p1: true, p2: false } };
+    const rU = applyBlinkStrike(sUlt, pwUlt, 4, "p1");
+    check("Bargain: an ultimate bypasses it", rU.state.tokens.find((t) => t.id === 4)!.position === -1 && rU.state.tokens.find((t) => t.id === 6)!.position === 3 && rU.power.charges.p2 === 0);
+
+    // The warlock's own Sacrifice is suicide, never a bargain.
+    const sSelf = state("p1", { 0: 5, 1: 9, 4: 8 });
+    const rSelf = applySacrifice(sSelf, power({ p1: "warlock", p2: "archer" }, { p1: SACRIFICE_COST }), 4, "p1");
+    check("Bargain: never struck for the warlock's own Sacrifice", rSelf.state.tokens.find((t) => t.id === 1)!.position === -1 && rSelf.state.tokens.find((t) => t.id === 0)!.position === 5 && rSelf.power.darkBargain.p1 === null);
+
+    // A necromancer's corpse and grave follow the stone that actually died.
+    const pwNec = power({ p1: "necromancer", p2: "warlock" });
+    const sNec = state("p1", { 0: 6, 4: 8, 6: 3 });
+    const rN = applyPowerMove(sNec, pwNec, getLegalPowerMoves(sNec, pwNec, 2).find((mv) => mv.tokenId === 0 && mv.to === 8)!, "p1");
+    check("Bargain: the necromancer's corpse is the stand-in, on its own tile", rN.power.corpse.p1?.tokenId === 6 && rN.power.corpse.p1?.tile === 3 && rN.power.grave.p1 === 3, JSON.stringify(rN.power.corpse));
+    check("Bargain: the necromancer still banks the soul bounty", rN.power.charges.p1 === SOUL_BOUNTY_CHARGES);
+
+    // The saved stone did not die: its wound stays; the stand-in's entry clears.
+    const pwWound: PowerState = { ...pw, vitality: { 4: "wounded", 6: "wounded" } };
+    const rW = applyPowerMove(s, pwWound, getLegalPowerMoves(s, pwWound, 2).find((mv) => mv.tokenId === 0 && mv.to === 8)!, "p1");
+    check("Bargain: the saved runner keeps its wound, the stand-in's clears", rW.power.vitality[4] === "wounded" && rW.power.vitality[6] === undefined);
+  }
 
   // --- Curse of Chains: targeting -----------------------------------------
   const sCurse = state("p1", { 0: 5, 4: 9, 5: 2 });
@@ -3106,7 +3167,7 @@ function check(name: string, cond: boolean, detail?: string) {
     // In a mirror, the ENEMY warlock is still paid for the stone it lost.
     const pwMirror = power({ p1: "warlock", p2: "warlock" }, { p1: SACRIFICE_COST });
     const rMirror = applySacrifice(sSac, pwMirror, 4, "p1");
-    check("Sacrifice: an enemy warlock's Blood Pact still pays for its dead", rMirror.power.charges.p2 === 1);
+    check("Sacrifice: an enemy warlock's Dark Bargain still fires for the target", rMirror.power.charges.p2 === 1 && rMirror.state.tokens.find((t) => t.id === 5)!.position === -1 && rMirror.state.tokens.find((t) => t.id === 4)!.position === 7);
     check("Sacrifice: the caster still gets nothing for its own", rMirror.power.charges.p1 === 0);
   }
 

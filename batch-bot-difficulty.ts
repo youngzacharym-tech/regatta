@@ -54,6 +54,7 @@ import {
   applySnare,
   applyWildHunt,
   tickHamstringForNewTurn,
+  tickDarkBargainForNewTurn,
   applyPickpocket,
   applyPowerMove,
   applyPush,
@@ -155,6 +156,7 @@ function takeTurnMK(
   // move gen, so a thawing stone moves on the turn its freeze runs out.
   power = tickHamstringForNewTurn(state, power).power;
   power = tickInspireForNewTurn(state, power).power;
+  power = tickDarkBargainForNewTurn(power);
   let moves = getLegalPowerMoves(state, power, flip);
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);

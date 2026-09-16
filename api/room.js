@@ -352,7 +352,7 @@ var NECRO_CHARGE_CAP = CHARGE_CAP;
 var THRALL_TURNS = 3;
 var REVIVE_COST = 3;
 var CORPSE_EXPLOSION_COST = 2;
-var CORPSE_EXPLOSION_RADIUS = 1;
+var CORPSE_EXPLOSION_RADIUS = 0;
 var EXHUME_RETURN_POSITION = 11;
 var BLESS_COST = 2;
 var BLESSING_CAP = 3;
@@ -365,6 +365,7 @@ var VANISH_COST = 1;
 var VANISH_TURNS = BULWARK_TURNS;
 var BACKSTAB_COST = 3;
 var BLOOD_PACT_CHARGES = 1;
+var DARK_BARGAIN_RETREAT = 1;
 var CURSE_COST = 1;
 var CURSE_TURNS = 3;
 var CURSE_SLOW = 1;
@@ -407,8 +408,10 @@ function initialPowerState() {
     bulwarked: {},
     bulwarkSaves: {},
     corpse: { p1: null, p2: null },
+    grave: { p1: null, p2: null },
     thrall: { p1: null, p2: null },
     curse: { p1: null, p2: null },
+    darkBargain: { p1: null, p2: null },
     inspired: {},
     traps: { p1: null, p2: null },
     hamstrung: {},
@@ -512,15 +515,67 @@ function clearThrallIfCaptured(power, capturedIds) {
   for (const pl of hit) thrall[pl] = null;
   return { ...power, thrall };
 }
-function grantBloodPact(power, tokens, killedIds) {
-  let next = power;
+function applyDarkBargain(preTokens, prePower, tokens, nextPower, killedIds, killer) {
+  let out = tokens;
+  let pw = nextPower;
   for (const id of killedIds) {
-    const owner = tokens.find((t) => t.id === id)?.owner;
-    if (owner !== void 0 && power.classes[owner] === "warlock") {
-      for (let i = 0; i < BLOOD_PACT_CHARGES; i++) next = addCharge(next, owner);
+    const victim = preTokens.find((t) => t.id === id);
+    if (!victim) continue;
+    const owner = victim.owner;
+    if (owner === killer) continue;
+    if (prePower.classes[owner] !== "warlock") continue;
+    if (effectiveOwner(prePower, victim) !== owner) continue;
+    if (victim.position < DARK_BARGAIN_RETREAT) continue;
+    const retreat = victim.position - DARK_BARGAIN_RETREAT;
+    const standIn = out.filter(
+      (t) => t.owner === owner && t.id !== id && !killedIds.includes(t.id) && t.position >= 0 && t.position < victim.position && effectiveOwner(prePower, t) === owner
+    ).sort((a, b) => a.position - b.position || a.id - b.id)[0];
+    if (!standIn) continue;
+    const blocked = out.some(
+      (t) => t.id !== standIn.id && t.position === retreat && (retreat >= 4 && retreat <= 11 ? true : t.owner === owner)
+    );
+    if (blocked) continue;
+    out = out.map(
+      (t) => t.id === id ? { ...t, position: retreat } : t.id === standIn.id ? { ...t, position: -1 } : t
+    );
+    if (prePower.vitality[id] !== void 0) pw = { ...pw, vitality: { ...pw.vitality, [id]: prePower.vitality[id] } };
+    if (prePower.hamstrung?.[id] !== void 0) pw = { ...pw, hamstrung: { ...pw.hamstrung, [id]: prePower.hamstrung[id] } };
+    if (prePower.inspired?.[id] !== void 0) pw = { ...pw, inspired: { ...pw.inspired, [id]: prePower.inspired[id] } };
+    for (const pl of ["p1", "p2"]) {
+      if (prePower.curse[pl]?.tokenId === id) pw = { ...pw, curse: { ...pw.curse, [pl]: prePower.curse[pl] } };
     }
+    pw = clearVitality(pw, [standIn.id]);
+    pw = clearCurseOnCapture(pw, [standIn.id]);
+    pw = clearHamstringOnCapture(pw, [standIn.id]);
+    pw = clearInspireOnCapture(pw, [standIn.id]);
+    pw = clearCapturedBulwarks(pw, [standIn.id]);
+    if (pw.corpse[killer]?.tokenId === id) {
+      pw = {
+        ...pw,
+        corpse: { ...pw.corpse, [killer]: { tokenId: standIn.id, tile: standIn.position } },
+        grave: { ...pw.grave, [killer]: standIn.position }
+      };
+    }
+    for (let i = 0; i < BLOOD_PACT_CHARGES; i++) pw = addCharge(pw, owner);
+    pw = {
+      ...pw,
+      darkBargain: {
+        ...pw.darkBargain,
+        [owner]: {
+          savedTokenId: id,
+          from: victim.position,
+          to: retreat,
+          sacrificedTokenId: standIn.id,
+          sacrificedFrom: standIn.position
+        }
+      }
+    };
   }
-  return next;
+  return { tokens: out, power: pw };
+}
+function tickDarkBargainForNewTurn(power) {
+  if (power.darkBargain.p1 === null && power.darkBargain.p2 === null) return power;
+  return { ...power, darkBargain: { p1: null, p2: null } };
 }
 function clearCurseOnCapture(power, capturedIds) {
   const hit = ["p1", "p2"].filter((pl) => {
@@ -781,7 +836,10 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     nextPower = grantKillBounty(nextPower, mover, soulKills.length);
     nextPower = {
       ...nextPower,
-      corpse: { ...nextPower.corpse, [mover]: { tokenId: soulKills[soulKills.length - 1], tile: to } }
+      corpse: { ...nextPower.corpse, [mover]: { tokenId: soulKills[soulKills.length - 1], tile: to } },
+      // The grave is dug on the same tile, and the freshest kill moves it
+      // (see PowerState.grave) — Revive will take the body and leave this.
+      grave: { ...nextPower.grave, [mover]: to }
     };
     if (landsOnShield) nextPower = addCharge(nextPower, mover);
   } else if (kills.length > 0 || woundIds.length > 0 || landsOnShield) {
@@ -810,7 +868,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
       }
     };
   }
-  nextPower = grantBloodPact(nextPower, state.tokens, kills);
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, kills, mover));
   nextPower = clearHamstringOnCapture(nextPower, kills);
   nextPower = clearInspireOnCapture(nextPower, kills);
   let trapSprung = null;
@@ -834,7 +892,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
         nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
         nextPower = clearInspireOnCapture(nextPower, [tokenId]);
         nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-        nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
+        ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe));
       }
       return landing === -1;
     };
@@ -855,6 +913,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
           nextPower = addCharge(nextPower, foe);
           wolfBite = { tokenId, sentHome: false };
         } else if (WOLF_CAPTURES) {
+          const bitten = tokens;
           tokens = tokens.map((t) => t.id === tokenId ? { ...t, position: -1 } : t);
           nextPower = clearThrallIfCaptured(nextPower, [tokenId]);
           nextPower = clearVitality(nextPower, [tokenId]);
@@ -862,7 +921,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
           nextPower = clearInspireOnCapture(nextPower, [tokenId]);
           nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-          nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
+          ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe));
           nextPower = addCharge(nextPower, foe);
           wolfBite = { tokenId, sentHome: true };
         } else {
@@ -948,7 +1007,7 @@ function applyPush(state, power, targetTokenId, mover) {
   const landing = computePushLanding(state, power, target);
   const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
   const sendsHome = landing === -1 && !woundsInstead;
-  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  let tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let spentPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - cost }
@@ -966,7 +1025,7 @@ function applyPush(state, power, targetTokenId, mover) {
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -992,7 +1051,7 @@ function applyChargedShot(state, power, targetTokenId, mover) {
   const landing = computeChargedShotLanding(state, power, target);
   const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
   const sendsHome = landing === -1 && !woundsInstead;
-  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
+  let tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: landing } : t);
   let spentPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGED_SHOT_COST }
@@ -1010,7 +1069,7 @@ function applyChargedShot(state, power, targetTokenId, mover) {
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -1071,7 +1130,6 @@ function applyBlinkStrike(state, power, targetTokenId, mover) {
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
   nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
   nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
-  nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState = {
     tokens,
@@ -1117,7 +1175,6 @@ function applyWarpath(state, power, targetTokenId, mover) {
   nextPower = clearCurseOnCapture(nextPower, allCaptures);
   nextPower = clearHamstringOnCapture(nextPower, allCaptures);
   nextPower = clearInspireOnCapture(nextPower, allCaptures);
-  nextPower = grantBloodPact(nextPower, state.tokens, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState = {
     tokens,
@@ -1243,15 +1300,13 @@ function applyRevive(state, power, mover) {
 }
 function getCorpseExplosionTargets(state, power, mover) {
   if (power.charges[mover] < CORPSE_EXPLOSION_COST) return [];
-  const corpse = power.corpse[mover];
-  if (!corpse) return [];
-  const body = state.tokens.find((t) => t.id === corpse.tokenId);
-  if (!body || body.position !== -1) return [];
-  return state.tokens.filter((t) => effectiveOwner(power, t) !== mover).filter((t) => t.position >= 4 && t.position <= 11).filter((t) => Math.abs(t.position - corpse.tile) <= CORPSE_EXPLOSION_RADIUS).filter((t) => !isProtected(state, power, t)).map((t) => t.id);
+  const grave = power.grave[mover];
+  if (grave === null) return [];
+  return state.tokens.filter((t) => effectiveOwner(power, t) !== mover).filter((t) => t.position >= 4 && t.position <= 11).filter((t) => Math.abs(t.position - grave) <= CORPSE_EXPLOSION_RADIUS).filter((t) => !isProtected(state, power, t)).map((t) => t.id);
 }
 function applyCorpseExplosion(state, power, mover) {
-  const corpse = power.corpse[mover];
-  const victims = getCorpseExplosionTargets(state, power, mover).map((id) => state.tokens.find((t) => t.id === id)).sort((a, b) => Math.abs(a.position - corpse.tile) - Math.abs(b.position - corpse.tile));
+  const grave = power.grave[mover];
+  const victims = getCorpseExplosionTargets(state, power, mover).map((id) => state.tokens.find((t) => t.id === id)).sort((a, b) => Math.abs(a.position - grave) - Math.abs(b.position - grave));
   let tokens = state.tokens;
   const sentHomeIds = [];
   const woundedTokenIds = [];
@@ -1268,7 +1323,8 @@ function applyCorpseExplosion(state, power, mover) {
   let nextPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CORPSE_EXPLOSION_COST },
-    corpse: { ...power.corpse, [mover]: null }
+    corpse: { ...power.corpse, [mover]: null },
+    grave: { ...power.grave, [mover]: null }
   };
   if (woundedTokenIds.length > 0) {
     const vitality = { ...nextPower.vitality };
@@ -1281,7 +1337,7 @@ function applyCorpseExplosion(state, power, mover) {
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
   nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
-  nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, sentHomeIds, mover));
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
     tokens,
@@ -1296,7 +1352,7 @@ function applyCorpseExplosion(state, power, mover) {
     struckTokenIds: victims.map((v) => v.id),
     sentHomeIds,
     woundedTokenIds,
-    tile: corpse.tile
+    tile: grave
   };
 }
 function tickThrallForNewTurn(state, power) {
@@ -1449,7 +1505,7 @@ function getBackstabTargets(state, power, mover) {
 function applyBackstab(state, power, targetTokenId, mover) {
   const foe = otherPlayerId(mover);
   const woundsInstead = isBlessed(power, targetTokenId);
-  const tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: -1 } : t);
+  let tokens = woundsInstead ? state.tokens : state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: -1 } : t);
   let spentPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST }
@@ -1473,7 +1529,7 @@ function applyBackstab(state, power, targetTokenId, mover) {
         [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE)
       }
     };
-    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -1527,7 +1583,6 @@ function applyGrandHeist(state, power, targetTokenId, mover) {
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
   nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
   nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
-  nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   nextPower = { ...nextPower, charges: { ...nextPower.charges, [foe]: 0 } };
   const nextState = {
@@ -1575,7 +1630,7 @@ function getSacrificeTargets(state, power, mover) {
 function applySacrifice(state, power, targetTokenId, mover) {
   const mine = findMostAdvancedToken(state, power, mover);
   const killed = [mine.id, targetTokenId];
-  const tokens = state.tokens.map((t) => killed.includes(t.id) ? { ...t, position: -1 } : t);
+  let tokens = state.tokens.map((t) => killed.includes(t.id) ? { ...t, position: -1 } : t);
   let nextPower = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - SACRIFICE_COST }
@@ -1586,11 +1641,14 @@ function applySacrifice(state, power, targetTokenId, mover) {
   nextPower = clearCurseOnCapture(nextPower, killed);
   nextPower = clearHamstringOnCapture(nextPower, killed);
   nextPower = clearInspireOnCapture(nextPower, killed);
-  nextPower = grantBloodPact(
-    nextPower,
+  ({ tokens, power: nextPower } = applyDarkBargain(
     state.tokens,
-    killed.filter((id) => id !== mine.id)
-  );
+    power,
+    tokens,
+    nextPower,
+    killed.filter((id) => id !== mine.id),
+    mover
+  ));
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
     tokens,
@@ -1632,7 +1690,6 @@ function applyFelStorm(state, power, mover) {
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
   nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
-  nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
     tokens,
@@ -1749,7 +1806,7 @@ function applyPiercingShot(state, power, mover) {
       next = clearCurseOnCapture(next, [victim.id]);
       next = clearHamstringOnCapture(next, [victim.id]);
       next = clearInspireOnCapture(next, [victim.id]);
-      next = grantBloodPact(next, state.tokens, [victim.id]);
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover));
       killedTokenId = victim.id;
     }
     next = addCharge(next, mover);
@@ -1810,7 +1867,6 @@ function applyWildHunt(state, power, mover) {
     next = clearCurseOnCapture(next, [quarry.id]);
     next = clearHamstringOnCapture(next, [quarry.id]);
     next = clearInspireOnCapture(next, [quarry.id]);
-    next = grantBloodPact(next, state.tokens, [quarry.id]);
     next = addCharge(next, mover);
   }
   next = breakShieldStreak(next, mover);
@@ -1859,7 +1915,7 @@ function applyRecklessSwing(state, power, targetTokenId, mover) {
     next = clearCurseOnCapture(next, [targetTokenId]);
     next = clearHamstringOnCapture(next, [targetTokenId]);
     next = clearInspireOnCapture(next, [targetTokenId]);
-    next = grantBloodPact(next, state.tokens, [targetTokenId]);
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover));
     killedTokenId = targetTokenId;
   }
   next = addCharge(next, mover);
@@ -1875,7 +1931,6 @@ function applyRecklessSwing(state, power, targetTokenId, mover) {
     next = clearHamstringOnCapture(next, [swinger.id]);
     next = clearInspireOnCapture(next, [swinger.id]);
     next = clearCapturedBulwarks(next, [swinger.id]);
-    next = grantBloodPact(next, state.tokens, [swinger.id]);
   }
   next = breakShieldStreak(next, mover);
   return {
@@ -1929,7 +1984,7 @@ function applyWhirlwind(state, power, mover) {
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
     next = clearInspireOnCapture(next, capturedTokenIds);
-    next = grantBloodPact(next, state.tokens, capturedTokenIds);
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, capturedTokenIds, mover));
   }
   const knockedTokenIds = [];
   const sentHomeIds = [];
@@ -1952,7 +2007,7 @@ function applyWhirlwind(state, power, mover) {
       next = clearHamstringOnCapture(next, [v.id]);
       next = clearInspireOnCapture(next, [v.id]);
       next = clearCapturedBulwarks(next, [v.id]);
-      next = grantBloodPact(next, state.tokens, [v.id]);
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover));
     }
   }
   if (capturedTokenIds.length > 0 || woundedTokenIds.length > 0) next = addCharge(next, mover);
@@ -2003,7 +2058,6 @@ function applyBloodbath(state, power, mover) {
     next = clearCurseOnCapture(next, killedTokenIds);
     next = clearHamstringOnCapture(next, killedTokenIds);
     next = clearInspireOnCapture(next, killedTokenIds);
-    next = grantBloodPact(next, state.tokens, killedTokenIds);
     next = addCharge(next, mover);
   }
   next = breakShieldStreak(next, mover);
@@ -2084,6 +2138,7 @@ function advanceStones(state, power, mover, ids, distance) {
         woundedIds.push(enemy.id);
         continue;
       }
+      const trampled = tokens;
       tokens = tokens.map((t) => t.id === enemy.id ? { ...t, position: -1 } : t);
       next = clearCapturedBulwarks(next, [enemy.id]);
       next = clearThrallIfCaptured(next, [enemy.id]);
@@ -2091,7 +2146,7 @@ function advanceStones(state, power, mover, ids, distance) {
       next = clearCurseOnCapture(next, [enemy.id]);
       next = clearHamstringOnCapture(next, [enemy.id]);
       next = clearInspireOnCapture(next, [enemy.id]);
-      next = grantBloodPact(next, state.tokens, [enemy.id]);
+      ({ tokens, power: next } = applyDarkBargain(trampled, power, tokens, next, [enemy.id], mover));
       next = addCharge(next, mover);
       capturedIds.push(enemy.id);
     }
@@ -2844,6 +2899,7 @@ var MK_EVAL_CHARGE = 24;
 var MK_EVAL_ULTIMATE = 70;
 var MK_EVAL_NECRO_CHARGE = 4;
 var MK_EVAL_CORPSE = 15;
+var MK_EVAL_GRAVE = 8;
 var MK_EVAL_THRALL = 40;
 var MK_EVAL_THRALL_MENACE = 15;
 var MK_EVAL_NECRO_PREY_SCALE = 1.25;
@@ -2912,6 +2968,7 @@ function mkEvalSide(state, power, player) {
   if (corpse && state.tokens.find((t) => t.id === corpse.tokenId)?.position === -1) {
     score += MK_EVAL_CORPSE;
   }
+  if (power.grave[player] !== null) score += MK_EVAL_GRAVE;
   score += (power.classes[player] === "necromancer" ? MK_EVAL_NECRO_CHARGE : MK_EVAL_CHARGE) * power.charges[player];
   if (power.ultimateReady[player]) {
     const necroWithExhumeTarget = power.classes[player] === "necromancer" && state.tokens.some((t) => t.owner !== player && t.position >= PATH_LENGTH_PER_PLAYER);
@@ -3226,6 +3283,9 @@ function fromWirePower(w) {
     // deploy ships a rules change, not just a schema one, and the old
     // fields simply stop being read.)
     corpse: w.corpse ?? { p1: null, p2: null },
+    // Docs persisted before the grave split have no grave — no mine on the
+    // row; the necromancer digs the next one with their next kill.
+    grave: w.grave ?? { p1: null, p2: null },
     thrall: w.thrall ?? { p1: null, p2: null },
     // Docs persisted before the cleric existed have no vitality — no
     // blessings in flight, which the empty map means exactly.
@@ -3233,6 +3293,8 @@ function fromWirePower(w) {
     // Docs persisted before the warlock existed have no curse — no chains
     // in flight, which the null pair means exactly.
     curse: w.curse ?? { p1: null, p2: null },
+    // Docs persisted before the Dark Bargain passive carry no announcement.
+    darkBargain: w.darkBargain ?? { p1: null, p2: null },
     // Same for the hunter: no traps armed, nothing frozen.
     traps: w.traps ?? { p1: null, p2: null },
     hamstrung: w.hamstrung ?? {},
@@ -3288,6 +3350,8 @@ function publicPower(doc) {
       p1: raisableCorpse(doc, "p1"),
       p2: raisableCorpse(doc, "p2")
     },
+    grave: { p1: doc.mk.grave?.p1 ?? null, p2: doc.mk.grave?.p2 ?? null },
+    darkBargain: { p1: doc.mk.darkBargain?.p1 ?? null, p2: doc.mk.darkBargain?.p2 ?? null },
     thrall: { p1: doc.mk.thrall?.p1 ?? null, p2: doc.mk.thrall?.p2 ?? null },
     reviveSpawnTile: doc.mk.classes[mover] === "necromancer" ? getReviveSpawnTile(doc.state, p, mover) : null,
     corpseExplosionTargets: doc.mk.classes[mover] === "necromancer" ? getCorpseExplosionTargets(doc.state, p, mover) : [],
@@ -4621,6 +4685,7 @@ function commitTurnFlip(doc, now, rand) {
     const fadeResult = tickInspireForNewTurn(state, power);
     power = fadeResult.power;
     if (fadeResult.fadedTokenIds.length > 0) lastInspireFaded = { tokenIds: fadeResult.fadedTokenIds };
+    power = tickDarkBargainForNewTurn(power);
     currentPowerMoves = getLegalPowerMoves(state, power, flip);
     const bulwarkResult = tickBulwarkForNewTurn(state, power, flip);
     power = bulwarkResult.power;

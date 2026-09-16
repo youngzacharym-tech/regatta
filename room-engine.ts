@@ -130,6 +130,8 @@ import {
   tickBulwarkForReflip,
   tickCurseForNewTurn,
   tickHamstringForNewTurn,
+  tickDarkBargainForNewTurn,
+  type DarkBargain,
   tickThrallForNewTurn,
   VANISH_COST,
   wolfGuardTile,
@@ -199,6 +201,9 @@ export interface WirePowerState {
   /** Necromancer rework (2026-07-19): corpse marker + active thrall — see
    *  PowerState's docs. Plain JSON, rides the doc verbatim. */
   corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  /** Necromancer grave (2026-09-16): the detonation tile, kept apart from
+   *  the body so Revive can leave it behind — see PowerState.grave. */
+  grave: Record<PlayerId, number | null>;
   thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
   /** Cleric (2026-07-21): per-token blessed/wounded state — see
    *  PowerState.vitality. Plain JSON, rides the doc verbatim. */
@@ -206,6 +211,8 @@ export interface WirePowerState {
   /** Warlock (2026-07-26): each caster's single live curse — see
    *  PowerState.curse. Plain JSON, rides the doc verbatim. */
   curse: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Warlock Dark Bargain announcement (2026-09-16) — see PowerState.darkBargain. */
+  darkBargain: Record<PlayerId, DarkBargain | null>;
   /** Hunter (2026-07-26): each hunter's armed trap tile, and every frozen
    *  stone's remaining victim-turns — see PowerState.traps / .hamstrung. */
   traps: Record<PlayerId, number | null>;
@@ -241,6 +248,9 @@ export function fromWirePower(w: WirePowerState): PowerState {
     // deploy ships a rules change, not just a schema one, and the old
     // fields simply stop being read.)
     corpse: w.corpse ?? { p1: null, p2: null },
+    // Docs persisted before the grave split have no grave — no mine on the
+    // row; the necromancer digs the next one with their next kill.
+    grave: w.grave ?? { p1: null, p2: null },
     thrall: w.thrall ?? { p1: null, p2: null },
     // Docs persisted before the cleric existed have no vitality — no
     // blessings in flight, which the empty map means exactly.
@@ -248,6 +258,8 @@ export function fromWirePower(w: WirePowerState): PowerState {
     // Docs persisted before the warlock existed have no curse — no chains
     // in flight, which the null pair means exactly.
     curse: w.curse ?? { p1: null, p2: null },
+    // Docs persisted before the Dark Bargain passive carry no announcement.
+    darkBargain: w.darkBargain ?? { p1: null, p2: null },
     // Same for the hunter: no traps armed, nothing frozen.
     traps: w.traps ?? { p1: null, p2: null },
     hamstrung: w.hamstrung ?? {},
@@ -290,6 +302,15 @@ export interface PublicPower {
    *  while still RAISABLE (its token waiting in reserve) — the client's
    *  corpse decal and the DENIED inference both key off presence here. */
   corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  /** Necromancer grave (2026-09-16): each player's open grave tile, the
+   *  Corpse Explosion site — outlives Revive, so the client's headstone
+   *  decal now keys off THIS (the corpse above only gates the Soul Claim
+   *  inference). ADDITIVE: older events lack it. */
+  grave?: Record<PlayerId, number | null>;
+  /** Warlock Dark Bargain struck this turn (2026-09-16) — see
+   *  PowerState.darkBargain. Persists until the next fresh flip; the client
+   *  announces on change. ADDITIVE. */
+  darkBargain?: Record<PlayerId, DarkBargain | null>;
   /** The active possession, if any: which token serves which player and
    *  for how many more of their turns — drives the possession VFX and the
    *  activity log's lifecycle panel. */
@@ -824,6 +845,8 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
       p1: raisableCorpse(doc, "p1"),
       p2: raisableCorpse(doc, "p2"),
     },
+    grave: { p1: doc.mk.grave?.p1 ?? null, p2: doc.mk.grave?.p2 ?? null },
+    darkBargain: { p1: doc.mk.darkBargain?.p1 ?? null, p2: doc.mk.darkBargain?.p2 ?? null },
     thrall: { p1: doc.mk.thrall?.p1 ?? null, p2: doc.mk.thrall?.p2 ?? null },
     reviveSpawnTile:
       doc.mk.classes[mover] === "necromancer" ? getReviveSpawnTile(doc.state, p, mover) : null,
@@ -2599,6 +2622,9 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
     const fadeResult = tickInspireForNewTurn(state, power);
     power = fadeResult.power;
     if (fadeResult.fadedTokenIds.length > 0) lastInspireFaded = { tokenIds: fadeResult.fadedTokenIds };
+    // Last turn's Dark Bargain announcement has been seen; clear it here so
+    // the client can key its proc off the field appearing.
+    power = tickDarkBargainForNewTurn(power);
     currentPowerMoves = getLegalPowerMoves(state, power, flip);
     const bulwarkResult = tickBulwarkForNewTurn(state, power, flip);
     power = bulwarkResult.power;

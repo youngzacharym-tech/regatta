@@ -55,6 +55,7 @@ import {
   grantZeroFlipCharge,
   initialPowerState,
   tickHamstringForNewTurn,
+  tickDarkBargainForNewTurn,
   possessorOf,
   REFLIPS_PER_TURN,
   tickBulwarkForNewTurn,
@@ -129,6 +130,7 @@ interface GameResult {
     songOfHaste: number; // Song of Haste casts
     hasteMarched: number; // stones the song advanced, summed over casts
     crescendo: number; // Crescendo ultimates fired
+    darkBargain: number; // Warlock Dark Bargains struck (turns in which the fiend traded a rear stone for a runner)
   };
 }
 
@@ -177,6 +179,7 @@ function takeTurn(
   power = tickHamstringForNewTurn(state, power).power;
   // Inspiration expiry, same slot: a faded stone moves at its true speed.
   power = tickInspireForNewTurn(state, power).power;
+  power = tickDarkBargainForNewTurn(power);
   let moves = getLegalPowerMoves(state, power, flip);
   // Warrior Bulwark: tick the mover's own countdown, and consume any
   // Bulwark this exact flip's moves reveal as blocked for the opponent —
@@ -632,6 +635,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     songOfHaste: 0,
     hasteMarched: 0,
     crescendo: 0,
+    darkBargain: 0,
   };
   const rand = Math.random;
 
@@ -699,6 +703,9 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.songOfHaste) usage.songOfHaste++;
     usage.hasteMarched += r.usage.hasteMarched ?? 0;
     if (r.usage.crescendo) usage.crescendo++;
+    // The bargain is a passive struck inside the OTHER side's action; the
+    // announcement field survives until the next fresh flip clears it.
+    if (r.power.darkBargain.p1 !== null || r.power.darkBargain.p2 !== null) usage.darkBargain++;
     void wasReflipEligible; // kept for potential future eligibility-rate stat
   }
 
@@ -798,6 +805,7 @@ for (const [a, b] of matchups) {
   const avgHaste = mean(results.map((r) => r.usage.songOfHaste));
   const avgHasteMarched = mean(results.map((r) => r.usage.hasteMarched));
   const avgCrescendo = mean(results.map((r) => r.usage.crescendo));
+  const avgDarkBargain = mean(results.map((r) => r.usage.darkBargain));
 
   console.log(`${label.padEnd(20)} ${a}=${pct(aWins, GAMES_PER_MATCHUP).padStart(6)}  ${b}=${pct(bWins, GAMES_PER_MATCHUP).padStart(6)}  stalemate=${pct(stalemates, GAMES_PER_MATCHUP)}`);
   console.log(
@@ -821,7 +829,7 @@ for (const [a, b] of matchups) {
       `  whirlwind/g=${avgWhirlwind.toFixed(3)}  wwCaught/g=${avgWhirlwindCaught.toFixed(3)}` +
       `  bloodbath/g=${avgBloodbath.toFixed(4)}  bbKills/g=${avgBloodbathKills.toFixed(3)}` +
       `  inspire/g=${avgInspire.toFixed(2)}  haste/g=${avgHaste.toFixed(3)}` +
-      `  hasteMarch/g=${avgHasteMarched.toFixed(3)}  crescendo/g=${avgCrescendo.toFixed(4)}`,
+      `  hasteMarch/g=${avgHasteMarched.toFixed(3)}  crescendo/g=${avgCrescendo.toFixed(4)}  bargain/g=${avgDarkBargain.toFixed(2)}`,
   );
 }
 const elapsed = ((Date.now() - start) / 1000).toFixed(2);

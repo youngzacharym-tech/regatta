@@ -471,7 +471,7 @@ export const REVIVE_COST = 3;
  *  burn it for tempo at 2, or hold the full bank for the thrall at
  *  REVIVE_COST — which is the decision the kit was missing. */
 export const CORPSE_EXPLOSION_COST = 2;
-export const CORPSE_EXPLOSION_RADIUS = 1;
+export const CORPSE_EXPLOSION_RADIUS = 0;
 /* LETHAL since 2026-09-13. The knockback version measured 0.09 casts per
  * game across the whole matrix, and the reason was arithmetic, not the
  * bot: a kill pays SOUL_BOUNTY_CHARGES (3), the corpse only exists after a
@@ -483,7 +483,36 @@ export const CORPSE_EXPLOSION_RADIUS = 1;
  * rule). Desecration is unchanged and is the whole cost — the kills pay
  * no bounty and mark no corpse — so the rite is now a real fork: burn the
  * grave for up to two bodies now, or hold three mana to raise one thrall
- * that can chain. Radius and a kill cap are the dials if it overshoots. */
+ * that can chain. Radius and a kill cap are the dials if it overshoots.
+ *
+ * THE GRAVE OUTLIVES THE RAISE (2026-09-16). Lethal still measured
+ * 0.03-0.2 casts per game, and this time the reason was the fork itself:
+ * a kill pays SOUL_BOUNTY_CHARGES (3), so Revive is affordable the moment
+ * a corpse exists, and the necromancer has no 1-mana spend for the blast's
+ * saving to buy. A 10,000-game probe found a victim beside a fresh grave
+ * on 36% of post-kill turns — the button lit often enough — but Revive was
+ * lit on 90% of those same turns and keeps the turn, so the blast only ever
+ * fired once the bank had been drained below 3 (Rogue Larceny: 0.9/game)
+ * or a thrall already held the slot. Radius could not fix that: only 49%
+ * of banked turns had ANY unprotected enemy on the row, so radius 2 moved
+ * the choice-point figure from 36% to 40%. The fix is to stop the rites
+ * competing: the kill now marks a GRAVE (PowerState.grave) as well as the
+ * corpse; Revive takes the body and leaves the grave; the blast reads the
+ * grave (not the raisable body — a re-entered victim no longer disarms the
+ * mine) and consumes both. So the flow becomes raise now, and the open
+ * grave stays on the row as a threat until a fresh kill moves it or the
+ * necromancer pays 2 to detonate it under whoever stands on it.
+ *
+ * RADIUS 0 came with the split (sweep at 1000/matchup, necromancer vs the
+ * field, old design 46.5% / 0.22 casts): cost 2 radius 1 = 57.0% / 3.7;
+ * cost 3 radius 1 = 56.0% / 2.7; cost 4 radius 1 = 52.3% / 1.7; cost 2
+ * radius 0 = 52.6% / 2.3 (2000/matchup confirms 52.6 / 2.3); cost 3
+ * radius 0 = 52.0% / 1.5. Price barely moves it — kills pay 3, so the
+ * bank is never the constraint — while radius is the whole dial, and 0
+ * reads best at the table: the ONE stone standing on the grave dies.
+ * Cost stays 2 so the kit keeps its below-full-bank spend. The opposing
+ * bots do not yet route around an armed grave; a human will, so live
+ * play should sit a little under these numbers. */
 
 /** Necromancer's Exhume ultimate: the board position an ESCAPED enemy token
  *  is dragged back to — the only mechanic in the game that touches the win
@@ -712,25 +741,63 @@ export const BACKSTAB_COST = 3;
  * warrior, backstab/g 8.2) — the same warrior/necromancer overshoot the
  * July trace recorded. At 3 a Backstab is most of the purse again. */
 
-/** Warlock's Blood Pact (passive, free, added 2026-07-26): how many charges
- *  the warlock banks every time one of their OWN stones is KILLED — sent
- *  home by any capture path (enemy landing/Snipe/sweep/Push/Charged Shot/
- *  ultimate/Corpse Explosion... AND the warlock's own Sacrifice, whose
- *  economy is priced around this refund). Runs through addCharge, so it
- *  caps at CHARGE_CAP like all generic income. This deliberately revives
- *  the death-side economy the necromancer's 2026-07-19 rework vacated
- *  (charge-per-own-loss — "boring, all defense" as a whole KIT, but fine
- *  as one passive inside an aggressive kit that can spend the refund on
- *  Sacrifice/Curse). NOT paid on non-kill returns: a thrall crumbling home
- *  at expiry and an Exhumed escapee are travel, not death. Ordering vs
- *  Rogue's Larceny (the one other ability that touches the victim's bank
- *  on a kill): Larceny's drain resolves FIRST, then the pact pays — the
- *  soul's price can't be picked from a pocket, so a rogue killing a
- *  warlock stone at bank 0 leaves the warlock at 1, not 0. Grand Heist is
- *  the exception by construction: its drain-to-zero lands after the pact's
- *  grant and takes it along with everything else — ultimate-tier robbery
- *  spares nothing. */
+/** Warlock's DARK BARGAIN (passive, free, 2026-09-16 — replaces Blood Pact
+ *  as the class passive at the user's direction): when an ENEMY would kill
+ *  one of the warlock's stones below ultimate tier, the stone instead
+ *  steps back DARK_BARGAIN_RETREAT tile along its own path and the
+ *  warlock's LEAST-ADVANCED other on-board stone is taken in its place.
+ *  That stand-in's death pays the warlock BLOOD_PACT_CHARGES (the old
+ *  pact's income survives only as the bargain's payout — a plain death
+ *  the fiend refused pays nothing). The bargain is struck only when the
+ *  price is cheaper than the loss: the stand-in must stand STRICTLY BEHIND
+ *  the stone it saves (so it always preserves progress, never spends it),
+ *  the retreat tile must be free (the stand-in itself may be the one
+ *  vacating it — "takes its place" literally), and the stone must be the
+ *  warlock's own to lose (a body possessed by an enemy necromancer is the
+ *  necromancer's loss). No per-turn cap: every trigger costs a real stone
+ *  and the strictly-behind rule bounds it by construction (a Warrior
+ *  sweep that kills two runners can cost two rear stones — the same two
+ *  deaths, better-chosen). Ultimates take what they want (roster
+ *  convention — Blink Strike, Warpath, Rain of Arrows, Grand Heist, Fel
+ *  Storm, Wild Hunt, Bloodbath, Crescendo's blows all bypass it), and the
+ *  warlock's own Sacrifice is suicide, never a bargain (killer === owner).
+ *  Ordering vs Rogue's Larceny is unchanged from the pact: the drain
+ *  resolves FIRST, then the bargain pays. Every sub-ultimate kill path
+ *  runs applyDarkBargain where it used to run grantBloodPact; the
+ *  attacker's own income (capture charge, Soul Harvest bounty, Larceny)
+ *  is untouched — a stone still died — but a necromancer's corpse and
+ *  grave follow the stone that ACTUALLY died (the stand-in, on its own
+ *  tile). Statuses the kill hooks stripped from the saved stone (wound,
+ *  curse, freeze, inspiration) are restored: it did not die.
+ *
+ *  FIRST BALANCE PASS (1000/matchup, warlock vs field; Blood Pact design
+ *  48.0%): retreat 1 payout 1 = 53.2% (bargain/g 5-24, archer matchup
+ *  66-70% warlock — the archer's kit is all kills and every kill on a
+ *  runner now lands on a cheap rear stone); retreat 1 payout 0 = 53.0%
+ *  (the payout is nearly inert — generic capture income already fills a
+ *  4-cap bank — so the swap IS the passive); retreat 2 payout 1 = 51.0%
+ *  but bargain/g ROSE to 21 vs archer (a runner thrown two back gets hit
+ *  again) and archer stayed 66%. Shipped retreat 1 / payout 1: the user's
+ *  literal "move back a space", and the archer number is partly the sim's
+ *  (a bot archer keeps killing runners; a human aims at the rear stones
+ *  or saves Rain of Arrows, which bypasses the bargain). Known bot gap:
+ *  attacker scoring still prices a capture of a bargainable runner as a
+ *  full kill. */
 export const BLOOD_PACT_CHARGES = 1;
+/** How far the saved stone steps back along its own path. 1 = it ends
+ *  directly behind whatever killed it, in flip-1 revenge range. */
+export const DARK_BARGAIN_RETREAT = 1;
+
+/** The bargain a warlock struck most recently THIS turn — announcement
+ *  state for the client (proc + activity log), cleared by
+ *  tickDarkBargainForNewTurn at every fresh flip. */
+export interface DarkBargain {
+  savedTokenId: number;
+  from: number;
+  to: number;
+  sacrificedTokenId: number;
+  sacrificedFrom: number;
+}
 
 /** Warlock's Curse of Chains: mana cost of marking one enemy stone in
  *  shared water. Keeps the turn (Re-flip/Bless/Pickpocket's contract) —
@@ -1206,6 +1273,18 @@ export interface PowerState {
    *  play without any extra clearing hook (the engine derives the DENIED
    *  announcement from the same condition). */
   corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  /** Necromancer's grave (2026-09-16): the contested tile of the same last
+   *  qualifying kill, remembered SEPARATELY from the body so the two rites
+   *  stop being exclusive. Set alongside the corpse on every kill
+   *  (overwritten by the freshest, like the corpse), left in place by
+   *  Revive — raising the body leaves the open grave — and consumed only
+   *  by Corpse Explosion, which detonates the ground, not the body. Never
+   *  dead-lettered: the victim re-entering its token takes Revive away,
+   *  not the mine. Before this split the blast needed the same raisable
+   *  body Revive did, so every fresh corpse was a choice between a thrall
+   *  that keeps the turn and a blast that ends it, and the blast measured
+   *  0.03-0.2 casts per game. Only ever populated for a necromancer. */
+  grave: Record<PlayerId, number | null>;
   /** Necromancer's active thrall: the possessed enemy token and how many of
    *  the necromancer's own turns it has left (see THRALL_TURNS). The token
    *  NEVER changes owner in GameState — possession is entirely this entry
@@ -1224,6 +1303,9 @@ export interface PowerState {
    *  reserve-trip hygiene every status gets) or escapes (resolveTurn — a
    *  stone that came home in glory drags no chains). */
   curse: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
+  /** Warlock's Dark Bargain struck this turn, per warlock (see DarkBargain).
+   *  Transient: set by applyDarkBargain, cleared at the next fresh flip. */
+  darkBargain: Record<PlayerId, DarkBargain | null>;
   /** Hunter's Snare (2026-07-26): each hunter's single armed trap, as the
    *  CONTESTED TILE INDEX it sits on — the game's only piece of persistent
    *  board state that isn't a stone. Keyed by the setter (the corpse/curse
@@ -1401,8 +1483,10 @@ export function initialPowerState(): PowerState {
     bulwarked: {},
     bulwarkSaves: {},
     corpse: { p1: null, p2: null },
+    grave: { p1: null, p2: null },
     thrall: { p1: null, p2: null },
     curse: { p1: null, p2: null },
+    darkBargain: { p1: null, p2: null },
     inspired: {},
     traps: { p1: null, p2: null },
     hamstrung: {},
@@ -1677,15 +1761,112 @@ function clearThrallIfCaptured(power: PowerState, capturedIds: number[]): PowerS
  *  expiry, Exhume). No-op (same reference back) when no warlock lost a
  *  stone. Gated on the VICTIM owner's class here so call sites stay
  *  unconditional, grantKillBounty's own shape. */
-function grantBloodPact(power: PowerState, tokens: TokenState[], killedIds: number[]): PowerState {
-  let next = power;
+/** Warlock's Dark Bargain — see BLOOD_PACT_CHARGES's doc for the rule.
+ *  Runs AFTER a kill path has sent `killedIds` home and run its reserve-
+ *  trip hygiene, at the exact slot grantBloodPact used to occupy, and
+ *  rewrites the outcome for every warlock stone the enemy just killed
+ *  that the fiend will trade for: the stone returns to the board one tile
+ *  back, its least-advanced stand-in goes home instead (with the same
+ *  hygiene the stand-in would have had as a normal death), the payout
+ *  lands, and a necromancer killer's corpse/grave follow the stand-in.
+ *  `preTokens` is the board immediately BEFORE the kill (where the victim
+ *  stood when it died); `prePower` the pre-action power (possession and
+ *  statuses as they were). Pure; returns the same references back when
+ *  nothing bargained. */
+export function applyDarkBargain(
+  preTokens: TokenState[],
+  prePower: PowerState,
+  tokens: TokenState[],
+  nextPower: PowerState,
+  killedIds: number[],
+  killer: PlayerId,
+): { tokens: TokenState[]; power: PowerState } {
+  let out = tokens;
+  let pw = nextPower;
   for (const id of killedIds) {
-    const owner = tokens.find((t) => t.id === id)?.owner;
-    if (owner !== undefined && power.classes[owner] === "warlock") {
-      for (let i = 0; i < BLOOD_PACT_CHARGES; i++) next = addCharge(next, owner);
+    const victim = preTokens.find((t) => t.id === id);
+    if (!victim) continue;
+    const owner = victim.owner;
+    if (owner === killer) continue; // blood the warlock spills itself — Sacrifice — is never bargained
+    if (prePower.classes[owner] !== "warlock") continue;
+    if (effectiveOwner(prePower, victim) !== owner) continue; // a possessed body is the necromancer's loss
+    if (victim.position < DARK_BARGAIN_RETREAT) continue;
+    const retreat = victim.position - DARK_BARGAIN_RETREAT;
+    // The stand-in: the warlock's least-advanced OTHER stone on the board,
+    // strictly behind the victim, its own to lose, and not itself dying in
+    // this same blow. Lowest id breaks ties, deterministically.
+    const standIn = out
+      .filter(
+        (t) =>
+          t.owner === owner &&
+          t.id !== id &&
+          !killedIds.includes(t.id) &&
+          t.position >= 0 &&
+          t.position < victim.position &&
+          effectiveOwner(prePower, t) === owner,
+      )
+      .sort((a, b) => a.position - b.position || a.id - b.id)[0];
+    if (!standIn) continue;
+    // The retreat tile must be empty — contested tiles (4-11) are one
+    // square for both numberings, a private-lane tile only ever holds its
+    // owner's stones — except for the stand-in itself, which is leaving.
+    const blocked = out.some(
+      (t) =>
+        t.id !== standIn.id &&
+        t.position === retreat &&
+        (retreat >= 4 && retreat <= 11 ? true : t.owner === owner),
+    );
+    if (blocked) continue;
+
+    out = out.map((t) =>
+      t.id === id ? { ...t, position: retreat } : t.id === standIn.id ? { ...t, position: -1 } : t,
+    );
+    // The saved stone did not die: put back what the kill hooks stripped.
+    if (prePower.vitality[id] !== undefined) pw = { ...pw, vitality: { ...pw.vitality, [id]: prePower.vitality[id] } };
+    if (prePower.hamstrung?.[id] !== undefined) pw = { ...pw, hamstrung: { ...pw.hamstrung, [id]: prePower.hamstrung[id] } };
+    if (prePower.inspired?.[id] !== undefined) pw = { ...pw, inspired: { ...pw.inspired, [id]: prePower.inspired[id] } };
+    for (const pl of ["p1", "p2"] as PlayerId[]) {
+      if (prePower.curse[pl]?.tokenId === id) pw = { ...pw, curse: { ...pw.curse, [pl]: prePower.curse[pl] } };
     }
+    // The stand-in died for real: the standard reserve-trip hygiene.
+    pw = clearVitality(pw, [standIn.id]);
+    pw = clearCurseOnCapture(pw, [standIn.id]);
+    pw = clearHamstringOnCapture(pw, [standIn.id]);
+    pw = clearInspireOnCapture(pw, [standIn.id]);
+    pw = clearCapturedBulwarks(pw, [standIn.id]);
+    // A necromancer's corpse and grave follow the stone that actually died.
+    if (pw.corpse[killer]?.tokenId === id) {
+      pw = {
+        ...pw,
+        corpse: { ...pw.corpse, [killer]: { tokenId: standIn.id, tile: standIn.position } },
+        grave: { ...pw.grave, [killer]: standIn.position },
+      };
+    }
+    for (let i = 0; i < BLOOD_PACT_CHARGES; i++) pw = addCharge(pw, owner);
+    pw = {
+      ...pw,
+      darkBargain: {
+        ...pw.darkBargain,
+        [owner]: {
+          savedTokenId: id,
+          from: victim.position,
+          to: retreat,
+          sacrificedTokenId: standIn.id,
+          sacrificedFrom: standIn.position,
+        },
+      },
+    };
   }
-  return next;
+  return { tokens: out, power: pw };
+}
+
+/** Clear both players' Dark Bargain announcements at the start of a fresh
+ *  turn — tickHamstringForNewTurn's slot (room-engine's commitTurnFlip and
+ *  the sims' takeTurn, BEFORE move gen). No-op (same reference) when
+ *  nothing is set. */
+export function tickDarkBargainForNewTurn(power: PowerState): PowerState {
+  if (power.darkBargain.p1 === null && power.darkBargain.p2 === null) return power;
+  return { ...power, darkBargain: { p1: null, p2: null } };
 }
 
 /** A killed token's curse lifts with it — the same reserve-trip hygiene
@@ -2338,6 +2519,9 @@ function resolveTurn(
     nextPower = {
       ...nextPower,
       corpse: { ...nextPower.corpse, [mover]: { tokenId: soulKills[soulKills.length - 1], tile: to } },
+      // The grave is dug on the same tile, and the freshest kill moves it
+      // (see PowerState.grave) — Revive will take the body and leave this.
+      grave: { ...nextPower.grave, [mover]: to },
     };
     // A shield landing's generic charge still applies on top (addCharge's
     // CHARGE_CAP clamp makes it a no-op whenever the bounty already filled
@@ -2381,11 +2565,11 @@ function resolveTurn(
     };
   }
 
-  // Warlock's Blood Pact: the victim's owner banks for every stone of
-  // theirs that just died. AFTER Larceny by design — see
+  // Warlock's Dark Bargain: the fiend may trade a rear stone for each
+  // runner that just died. AFTER Larceny by design — see
   // BLOOD_PACT_CHARGES's ordering note (the soul's price can't be
   // pickpocketed off the corpse).
-  nextPower = grantBloodPact(nextPower, state.tokens, kills);
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, kills, mover));
   // A dead stone's freeze timer dies with it (reserve-trip hygiene).
   nextPower = clearHamstringOnCapture(nextPower, kills);
   nextPower = clearInspireOnCapture(nextPower, kills);
@@ -2421,7 +2605,8 @@ function resolveTurn(
         nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
         nextPower = clearInspireOnCapture(nextPower, [tokenId]);
         nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-        nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
+        // The trap is the FOE's kill of the mover's stone: bargainable.
+        ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe));
       }
       return landing === -1;
     };
@@ -2453,6 +2638,7 @@ function resolveTurn(
           nextPower = addCharge(nextPower, foe);
           wolfBite = { tokenId, sentHome: false };
         } else if (WOLF_CAPTURES) {
+          const bitten = tokens;
           tokens = tokens.map((t) => (t.id === tokenId ? { ...t, position: -1 } : t));
           nextPower = clearThrallIfCaptured(nextPower, [tokenId]);
           nextPower = clearVitality(nextPower, [tokenId]);
@@ -2460,7 +2646,7 @@ function resolveTurn(
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
           nextPower = clearInspireOnCapture(nextPower, [tokenId]);
           nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-          nextPower = grantBloodPact(nextPower, state.tokens, [tokenId]);
+          ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe));
           nextPower = addCharge(nextPower, foe); // the kill pays the hunter, like any capture
           wolfBite = { tokenId, sentHome: true };
         } else {
@@ -2690,7 +2876,7 @@ export function applyPush(
   const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
   const sendsHome = landing === -1 && !woundsInstead; // functionally a capture — refund below
 
-  const tokens = woundsInstead
+  let tokens = woundsInstead
     ? state.tokens
     : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
@@ -2715,7 +2901,7 @@ export function applyPush(
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
   }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
@@ -2805,7 +2991,7 @@ export function applyChargedShot(
   const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
   const sendsHome = landing === -1 && !woundsInstead; // functionally a capture — refund below
 
-  const tokens = woundsInstead
+  let tokens = woundsInstead
     ? state.tokens
     : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
@@ -2827,7 +3013,7 @@ export function applyChargedShot(
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
   }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
   const nextState: GameState = {
@@ -2940,7 +3126,6 @@ export function applyBlinkStrike(
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
   nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
   nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
-  nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
     tokens,
@@ -3018,7 +3203,6 @@ export function applyWarpath(
   nextPower = clearCurseOnCapture(nextPower, allCaptures);
   nextPower = clearHamstringOnCapture(nextPower, allCaptures);
   nextPower = clearInspireOnCapture(nextPower, allCaptures);
-  nextPower = grantBloodPact(nextPower, state.tokens, allCaptures);
   nextPower = addCharge(nextPower, mover);
   const nextState: GameState = {
     tokens,
@@ -3286,9 +3470,11 @@ export function getReviveSpawnTile(
   return null; // unreachable by the counting argument above — kept as a guard
 }
 
-/** Necromancer's Revive: spends the whole soul bank, consumes the corpse,
- *  and raises the killed enemy token on getReviveSpawnTile's answer as a
- *  thrall for THRALL_TURNS. Does NOT end the turn — the caller keeps the
+/** Necromancer's Revive: spends the whole soul bank, consumes the corpse
+ *  (the body — the GRAVE stays open on the row for Corpse Explosion, see
+ *  PowerState.grave), and raises the killed enemy token on
+ *  getReviveSpawnTile's answer as a thrall for THRALL_TURNS. Does NOT end
+ *  the turn — the caller keeps the
  *  SAME flip and recomputes legal moves against the new board (the risen
  *  stone may be the one that moves), exactly the Re-flip contract, and
  *  like Re-flip no resetTurnFlags and no streak interaction: a raise is a
@@ -3325,8 +3511,10 @@ export function applyRevive(
 /** Necromancer's Corpse Explosion: the blast's victim list, and THE
  *  legality oracle (Charged Shot's bake-it-in precedent — affordability is
  *  uniform, and an empty pool means "not castable" everywhere: server
- *  validation, bot, dock gate). Requires the same raisable corpse Revive
- *  does (marked, its token still in reserve) and CORPSE_EXPLOSION_COST
+ *  validation, bot, dock gate). Requires a GRAVE (PowerState.grave — the
+ *  ground, which Revive leaves behind and a re-entered victim does not
+ *  disarm; the raisable-body requirement was the old exclusive-rite
+ *  design, see CORPSE_EXPLOSION_RADIUS's history) and CORPSE_EXPLOSION_COST
  *  banked — but NOT a free thrall slot, and not the full bank. Victims:
  *  enemy stones (by EFFECTIVE owner — the caster's own thrall is family;
  *  an enemy necromancer's thrall is fair game) on contested tiles within
@@ -3340,31 +3528,28 @@ export function getCorpseExplosionTargets(
   mover: PlayerId,
 ): number[] {
   if (power.charges[mover] < CORPSE_EXPLOSION_COST) return [];
-  const corpse = power.corpse[mover];
-  if (!corpse) return [];
-  const body = state.tokens.find((t) => t.id === corpse.tokenId);
-  if (!body || body.position !== -1) return []; // dead-lettered: soul reclaimed
+  const grave = power.grave[mover];
+  if (grave === null) return [];
   return state.tokens
     .filter((t) => effectiveOwner(power, t) !== mover)
     .filter((t) => t.position >= 4 && t.position <= 11)
-    .filter((t) => Math.abs(t.position - corpse.tile) <= CORPSE_EXPLOSION_RADIUS)
+    .filter((t) => Math.abs(t.position - grave) <= CORPSE_EXPLOSION_RADIUS)
     .filter((t) => !isProtected(state, power, t))
     .map((t) => t.id);
 }
 
 /** Necromancer's Corpse Explosion: spends CORPSE_EXPLOSION_COST, consumes
- *  the corpse, and knocks every oracle victim back 1 along its own path —
- *  computeKnockbackLanding's standard collision semantics, so a blocked
- *  landing (or a thrall bounced below the row) is a send-home. Desecration
- *  rule: blast send-homes pay NO bounty and mark NO corpse (see
- *  CORPSE_EXPLOSION_COST's doc — chain explosions stay impossible), and
- *  unlike Push there is no send-home refund: the flat 2 is the whole
- *  price. A struck enemy THRALL that goes home dies for real
- *  (clearThrallIfCaptured). Ends the turn, breaks the caster's shield
- *  streak — Push's exact shape. Victims resolve nearest-the-grave first
- *  (deterministic, and an inner victim vacating its tile never blocks an
- *  outer one's knockback into it). Returns the struck/sent-home lists so
- *  the server can announce the blast without re-deriving it. */
+ *  the GRAVE and — if the body is still banked — the corpse with it (the
+ *  desecration: a blown grave raises nothing), and sends every oracle
+ *  victim home (lethal since 2026-09-13; a blessed one is wounded in
+ *  place). Desecration rule: blast send-homes pay NO bounty and mark NO
+ *  corpse or grave (see CORPSE_EXPLOSION_COST's doc — chain explosions
+ *  stay impossible), and unlike Push there is no send-home refund: the
+ *  flat 2 is the whole price. A struck enemy THRALL that goes home dies
+ *  for real (clearThrallIfCaptured). Ends the turn, breaks the caster's
+ *  shield streak — Push's exact shape. Victims resolve nearest-the-grave
+ *  first (deterministic). Returns the struck/sent-home lists so the
+ *  server can announce the blast without re-deriving it. */
 export function applyCorpseExplosion(
   state: GameState,
   power: PowerState,
@@ -3377,10 +3562,10 @@ export function applyCorpseExplosion(
   woundedTokenIds: number[];
   tile: number;
 } {
-  const corpse = power.corpse[mover]!;
+  const grave = power.grave[mover]!;
   const victims = getCorpseExplosionTargets(state, power, mover)
     .map((id) => state.tokens.find((t) => t.id === id)!)
-    .sort((a, b) => Math.abs(a.position - corpse.tile) - Math.abs(b.position - corpse.tile));
+    .sort((a, b) => Math.abs(a.position - grave) - Math.abs(b.position - grave));
 
   let tokens = state.tokens;
   const sentHomeIds: number[] = [];
@@ -3402,6 +3587,7 @@ export function applyCorpseExplosion(
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CORPSE_EXPLOSION_COST },
     corpse: { ...power.corpse, [mover]: null },
+    grave: { ...power.grave, [mover]: null },
   };
   if (woundedTokenIds.length > 0) {
     const vitality = { ...nextPower.vitality };
@@ -3416,8 +3602,8 @@ export function applyCorpseExplosion(
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
   // Desecration denies the CASTER's income (no bounty, no corpse) — not
   // the VICTIM's compensation: a warlock's stones killed in the blast
-  // still pay their owner's Blood Pact.
-  nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
+  // may still strike their owner's Dark Bargain.
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, sentHomeIds, mover));
   nextPower = breakShieldStreak(nextPower, mover); // never lands the mover on a shield
 
   const nextState: GameState = {
@@ -3433,7 +3619,7 @@ export function applyCorpseExplosion(
     struckTokenIds: victims.map((v) => v.id),
     sentHomeIds,
     woundedTokenIds,
-    tile: corpse.tile,
+    tile: grave,
   };
 }
 
@@ -3824,7 +4010,7 @@ export function applyBackstab(
 ): { state: GameState; power: PowerState; woundedTokenId: number | null } {
   const foe = otherPlayerId(mover);
   const woundsInstead = isBlessed(power, targetTokenId);
-  const tokens = woundsInstead
+  let tokens = woundsInstead
     ? state.tokens
     : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
 
@@ -3852,9 +4038,9 @@ export function applyBackstab(
         [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE),
       },
     };
-    // Then the victim's own Blood Pact, in Larceny's shadow (the ordering
+    // Then the victim's own Dark Bargain, in Larceny's shadow (the ordering
     // BLOOD_PACT_CHARGES's doc fixes for every kill).
-    spentPower = grantBloodPact(spentPower, state.tokens, [targetTokenId]);
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState: GameState = {
@@ -3938,7 +4124,6 @@ export function applyGrandHeist(
   // straight back. Deliberate (see BLOOD_PACT_CHARGES's ordering note):
   // the heist robs the grave too. The call stays for uniform kill-path
   // discipline, not effect.
-  nextPower = grantBloodPact(nextPower, state.tokens, [targetTokenId]);
   nextPower = addCharge(nextPower, mover);
   nextPower = { ...nextPower, charges: { ...nextPower.charges, [foe]: 0 } };
   const nextState: GameState = {
@@ -3953,9 +4138,11 @@ export function applyGrandHeist(
 
 // ============================================================================
 // WARLOCK (added 2026-07-26) — profits from its own dead; the only class
-// that WANTS to lose stones. Passive: BLOOD PACT — every kill of a
-// warlock-owned stone banks the warlock BLOOD_PACT_CHARGES (grantBloodPact,
-// threaded through every kill path the way clearVitality is). Actives:
+// that WANTS to lose stones. Passive: DARK BARGAIN (2026-09-16, replaced
+// Blood Pact) — an enemy's sub-ultimate kill of a warlock stone becomes a
+// one-tile retreat and the death of the warlock's least-advanced other
+// stone instead, paying BLOOD_PACT_CHARGES (applyDarkBargain, threaded
+// through every sub-ultimate kill path the way clearVitality is). Actives:
 // CURSE OF CHAINS (CURSE_COST, keeps the turn) shortens one enemy stone's
 // every move by CURSE_SLOW for CURSE_TURNS of the victim's turn-starts —
 // the game's only move-DISTANCE modifier; SACRIFICE (SACRIFICE_COST, the
@@ -4085,7 +4272,7 @@ export function applySacrifice(
 ): { state: GameState; power: PowerState; sacrificedTokenId: number } {
   const mine = findMostAdvancedToken(state, power, mover)!;
   const killed = [mine.id, targetTokenId];
-  const tokens = state.tokens.map((t) => (killed.includes(t.id) ? { ...t, position: -1 } : t));
+  let tokens = state.tokens.map((t) => (killed.includes(t.id) ? { ...t, position: -1 } : t));
   let nextPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - SACRIFICE_COST },
@@ -4121,11 +4308,14 @@ export function applySacrifice(
   // their own bodies forever and nobody raced. Without the refund the cast
   // costs the full bank AND a real runner, which is the trade the ability
   // was designed around.
-  nextPower = grantBloodPact(
-    nextPower,
+  ({ tokens, power: nextPower } = applyDarkBargain(
     state.tokens,
+    power,
+    tokens,
+    nextPower,
     killed.filter((id) => id !== mine.id),
-  );
+    mover,
+  ));
   nextPower = breakShieldStreak(nextPower, mover); // an attack, not a placement
   const nextState: GameState = {
     tokens,
@@ -4199,7 +4389,6 @@ export function applyFelStorm(
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
   nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
-  nextPower = grantBloodPact(nextPower, state.tokens, sentHomeIds);
   nextPower = breakShieldStreak(nextPower, mover); // an attack, not a placement
   const nextState: GameState = {
     tokens,
@@ -4395,7 +4584,7 @@ export function applyPiercingShot(
       next = clearCurseOnCapture(next, [victim.id]);
       next = clearHamstringOnCapture(next, [victim.id]);
       next = clearInspireOnCapture(next, [victim.id]);
-      next = grantBloodPact(next, state.tokens, [victim.id]);
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover));
       killedTokenId = victim.id;
     }
     next = addCharge(next, mover);
@@ -4491,7 +4680,6 @@ export function applyWildHunt(
     next = clearCurseOnCapture(next, [quarry.id]);
     next = clearHamstringOnCapture(next, [quarry.id]);
     next = clearInspireOnCapture(next, [quarry.id]);
-    next = grantBloodPact(next, state.tokens, [quarry.id]);
     next = addCharge(next, mover);
   }
   next = breakShieldStreak(next, mover);
@@ -4596,7 +4784,7 @@ export function applyRecklessSwing(
     next = clearCurseOnCapture(next, [targetTokenId]);
     next = clearHamstringOnCapture(next, [targetTokenId]);
     next = clearInspireOnCapture(next, [targetTokenId]);
-    next = grantBloodPact(next, state.tokens, [targetTokenId]);
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover));
     killedTokenId = targetTokenId;
   }
   next = addCharge(next, mover); // the blow landed, wound or kill
@@ -4615,7 +4803,6 @@ export function applyRecklessSwing(
     next = clearHamstringOnCapture(next, [swinger.id]);
     next = clearInspireOnCapture(next, [swinger.id]);
     next = clearCapturedBulwarks(next, [swinger.id]);
-    next = grantBloodPact(next, state.tokens, [swinger.id]);
   }
 
   next = breakShieldStreak(next, mover);
@@ -4704,7 +4891,7 @@ export function applyWhirlwind(
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
     next = clearInspireOnCapture(next, capturedTokenIds);
-    next = grantBloodPact(next, state.tokens, capturedTokenIds);
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, capturedTokenIds, mover));
   }
 
   // The shoves, resolved outward-in against the working board so a vacated
@@ -4730,7 +4917,7 @@ export function applyWhirlwind(
       next = clearHamstringOnCapture(next, [v.id]);
       next = clearInspireOnCapture(next, [v.id]);
       next = clearCapturedBulwarks(next, [v.id]);
-      next = grantBloodPact(next, state.tokens, [v.id]);
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover));
     }
   }
 
@@ -4808,7 +4995,6 @@ export function applyBloodbath(
     next = clearCurseOnCapture(next, killedTokenIds);
     next = clearHamstringOnCapture(next, killedTokenIds);
     next = clearInspireOnCapture(next, killedTokenIds);
-    next = grantBloodPact(next, state.tokens, killedTokenIds);
     next = addCharge(next, mover);
   }
   next = breakShieldStreak(next, mover);
@@ -4975,6 +5161,7 @@ function advanceStones(
         woundedIds.push(enemy.id);
         continue;
       }
+      const trampled = tokens;
       tokens = tokens.map((t) => (t.id === enemy.id ? { ...t, position: -1 } : t));
       next = clearCapturedBulwarks(next, [enemy.id]);
       next = clearThrallIfCaptured(next, [enemy.id]);
@@ -4982,7 +5169,7 @@ function advanceStones(
       next = clearCurseOnCapture(next, [enemy.id]);
       next = clearHamstringOnCapture(next, [enemy.id]);
       next = clearInspireOnCapture(next, [enemy.id]);
-      next = grantBloodPact(next, state.tokens, [enemy.id]);
+      ({ tokens, power: next } = applyDarkBargain(trampled, power, tokens, next, [enemy.id], mover));
       next = addCharge(next, mover);
       capturedIds.push(enemy.id);
     }

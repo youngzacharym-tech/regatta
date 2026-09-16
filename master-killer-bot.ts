@@ -534,8 +534,12 @@ function scoreCorpseExplosion(state: GameState, power: PowerState, victims: numb
     // blessed one is only wounded, worth roughly a Push's break.
     score += isBlessed(power, t.id) ? 140 : 380 + t.position * 8;
   }
-  // Desecration forfeits the corpse Revive would have raised, so a single
-  // unblessed body has to clear the thrall's own value to be worth burning.
+  // Desecration forfeits the corpse Revive would have raised — when the
+  // body is still banked. Since the grave split (PowerState.grave) the
+  // usual case is a grave Revive already emptied: nothing forfeited, and
+  // the send-home price above is the whole story. scoreRevive's 900 base
+  // still wins the fresh-corpse choice on purpose: raise now, and the open
+  // grave keeps this cast on the menu for later.
   return score + rand() * 20;
 }
 
@@ -1553,6 +1557,11 @@ const MK_EVAL_NECRO_CHARGE = 4;
  *  A valid banked corpse is a Revive waiting on funding: option value,
  *  real but modest — the victim can deny it any turn by re-entering. */
 const MK_EVAL_CORPSE = 15;
+/** An open grave (2026-09-16, outlives the raise — see PowerState.grave):
+ *  a 2-mana mine that fires under whoever stops beside it. Cheaper option
+ *  value than the corpse — it needs a victim to wander into radius and the
+ *  bank to hold 2 — and nothing the foe can disarm except by keeping clear. */
+const MK_EVAL_GRAVE = 8;
 /** An active thrall: a temporary extra attacker on the row. Scaled by
  *  turnsLeft/THRALL_TURNS (a last-turn thrall is worth half a fresh one)
  *  plus a per-menaced-enemy bonus in mkEvalSide — the thrall's value IS
@@ -1730,6 +1739,8 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
   if (corpse && state.tokens.find((t) => t.id === corpse.tokenId)?.position === -1) {
     score += MK_EVAL_CORPSE;
   }
+  // An open grave is a mine waiting for a passer-by (and for 2 mana).
+  if (power.grave[player] !== null) score += MK_EVAL_GRAVE;
   // Necromancer charges are revive fuel and nothing else — see
   // MK_EVAL_NECRO_CHARGE's doc for the separation-gate failure the shared
   // price caused.

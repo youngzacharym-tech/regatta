@@ -1690,13 +1690,15 @@ const thrallBadges = (["p1", "p2"] as const).map(() => {
   return el;
 });
 
-/** Sync the two corpse decals to the latest broadcast — called from
- *  updateTokenTints (the per-broadcast status pass). */
+/** Sync the two grave decals to the latest broadcast — called from
+ *  updateTokenTints (the per-broadcast status pass). The headstone marks
+ *  the GRAVE (the Corpse Explosion site, which outlives Revive), not the
+ *  raisable body — an open grave with no body left is still a mine. */
 function updateCorpseDecals() {
   (["p1", "p2"] as PlayerId[]).forEach((side, i) => {
-    const corpse = currentPower?.corpse?.[side] ?? null;
+    const tile = currentPower?.grave?.[side] ?? currentPower?.corpse?.[side]?.tile ?? null;
     const mesh = corpseDecals[i];
-    if (!corpse) {
+    if (tile === null) {
       mesh.visible = false;
       return;
     }
@@ -1706,7 +1708,7 @@ function updateCorpseDecals() {
     (mesh.material as THREE.MeshBasicMaterial).color.setHex(
       viewSide(side) === "p1" ? 0xd94a45 : 0x7e9bd6,
     );
-    const pos = tileWorldPos(side, corpse.tile);
+    const pos = tileWorldPos(side, tile);
     mesh.position.set(pos.x, pos.y + 0.012, pos.z);
     mesh.visible = true;
   });
@@ -1991,8 +1993,16 @@ let currentPower: {
    *  (null = not castable) — the client's whole gem gate. Exhume's targets
    *  are the opponent's ESCAPED token ids, pushTargets' population rule. */
   corpse?: Record<PlayerId, { tokenId: number; tile: number } | null>;
+  /** Grave split (2026-09-16): the open grave tile — outlives Revive, and
+   *  is what Corpse Explosion detonates. The headstone decal keys off THIS;
+   *  `corpse` above only feeds the Soul Claim inference. */
+  grave?: Record<PlayerId, number | null>;
   thrall?: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
   reviveSpawnTile?: number | null;
+  /** Warlock's Dark Bargain struck this turn, per warlock (2026-09-16):
+   *  the runner that stepped back and the stand-in that went home instead.
+   *  Persists until the next fresh flip; the client announces on change. */
+  darkBargain?: Record<PlayerId, { savedTokenId: number; from: number; to: number; sacrificedTokenId: number; sacrificedFrom: number } | null>;
   corpseExplosionTargets?: number[];
   exhumeTargets?: number[];
   /** Optional (older servers omit them): raw lifecycle numbers behind
@@ -2256,7 +2266,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Corpse Explosion",
     cost: `${CORPSE_EXPLOSION_COST} mana`,
     klass: "necromancer",
-    desc: "Detonate the marked corpse instead of raising it: every unprotected enemy stone beside the grave is killed outright — sent home. A blessed stone is only wounded. The blast desecrates the corpse: no thrall, and its kills pay no mana and mark no corpse. Shields, Wards, and Bulwarks all turn it. The same grave, two rites: burn it now, or raise it as a thrall.",
+    desc: "Detonate your open grave: the unprotected enemy stone standing on it is killed outright — sent home. A blessed stone is only wounded. The grave stays open after Revive takes the body, so raise first and keep the mine armed for whoever stops on it; your next kill moves the grave. The blast desecrates it: a blown grave raises nothing, and its kill pays no mana and marks no corpse. Shields, Wards, and Bulwarks all turn it.",
   },
   exhume: {
     name: "Exhume",
@@ -2327,11 +2337,11 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "rogue",
     desc: "Teleport your furthest-along stone onto any enemy in shared water and take it — straight through shields, Wards, and Bulwarks — then empty their ENTIRE bank on the spot. A capture and a robbery in the same breath.",
   },
-  bloodPact: {
-    name: "Blood Pact",
+  darkBargain: {
+    name: "Dark Bargain",
     cost: "Passive · always on",
     klass: "warlock",
-    desc: `Your dead pay you. Every stone of yours sent home banks ${BLOOD_PACT_CHARGES} mana — the only class that profits from losing. It pays for blood your enemies spill, never for the stone you spend yourself on a Sacrifice.`,
+    desc: `When an enemy would kill one of your stones, the fiend intervenes: that stone steps back one tile and your least-advanced other stone on the board is taken in its place — and its death pays you ${BLOOD_PACT_CHARGES} mana. The stand-in must be behind the stone it saves, and the tile behind must be free. Ultimates take what they want, and your own Sacrifice is never bargained.`,
   },
   curse: {
     name: "Curse of Chains",
@@ -2529,7 +2539,7 @@ const DOCK_COST: Record<string, number> = {
   vanish: VANISH_COST,
   backstab: BACKSTAB_COST,
   grandHeist: 0,
-  bloodPact: 0,
+  darkBargain: 0,
   curse: CURSE_COST,
   sacrifice: SACRIFICE_COST,
   felStorm: 0,
@@ -2574,7 +2584,7 @@ const DOCK_NAMES: Record<string, string> = {
   vanish: "Vanish",
   backstab: "Backstab",
   grandHeist: "Grand Heist",
-  bloodPact: "Blood Pact",
+  darkBargain: "Dark Bargain",
   curse: "Curse",
   sacrifice: "Sacrifice",
   felStorm: "Fel Storm",
@@ -2638,7 +2648,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "grandHeist", ult: true },
   ],
   warlock: [
-    { ability: "bloodPact", passive: true },
+    { ability: "darkBargain", passive: true },
     { ability: "curse" },
     { ability: "sacrifice" },
     { ability: "felStorm", ult: true },
@@ -2804,9 +2814,9 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
     // soul bank.
     case "corpseExplosion": {
       if ((p.corpseExplosionTargets ?? []).length > 0) return { state: "ready" };
-      if (!p.corpse?.[mySide]) return { state: "noafford", reason: "No corpse — kill to mark one" };
+      if ((p.grave?.[mySide] ?? null) === null) return { state: "noafford", reason: "No grave — kill to dig one" };
       if (charges < CORPSE_EXPLOSION_COST) return { state: "noafford", reason: `Need ${CORPSE_EXPLOSION_COST} mana` };
-      return { state: "noafford", reason: "No enemies near the grave" };
+      return { state: "noafford", reason: "No enemy standing on the grave" };
     }
     case "revive": {
       if ((p.reviveSpawnTile ?? null) !== null) return { state: "ready" };
@@ -2973,6 +2983,7 @@ function updateDock(active?: boolean) {
     p.reviveSpawnTile ?? "",
     (p.corpseExplosionTargets ?? []).join(),
     JSON.stringify(p.corpse ?? null),
+    JSON.stringify(p.grave ?? null),
     JSON.stringify(p.thrall ?? null),
     (p.exhumeTargets ?? []).join(),
     (p.blessTargets ?? []).join(),
@@ -3657,13 +3668,20 @@ canvas.addEventListener("pointerdown", (e) => {
     const graveSide = findCorpseDecalUnderPointer(e.clientX, e.clientY);
     if (graveSide) {
       const mine = graveSide === (myRole ?? "p1");
+      // The body may already have risen (Revive leaves the grave open) or
+      // been reclaimed — then this is a bare mine, not a marked corpse.
+      const bodyHere = (currentPower?.corpse?.[graveSide] ?? null) !== null;
       showInfoCardAt(e.clientX, e.clientY, {
-        name: "Marked Corpse",
+        name: bodyHere ? "Marked Corpse" : "Open Grave",
         cost: mine ? "your kill lies here" : "the enemy's kill lies here",
         klass: "necromancer",
         desc: mine
-          ? "The stone you killed here is marked. Spend 2 mana on Corpse Explosion to blast everything beside this grave, or all 3 on Revive to raise it as your thrall — right on this tile. While your mana is full, its owner cannot bring it back."
-          : "The enemy Necromancer killed a stone here and marked its corpse. If their mana dips below full, re-enter that stone from your hand to reclaim the soul — otherwise expect an explosion from this grave, or the corpse rising against you.",
+          ? bodyHere
+            ? `The stone you killed here is marked. Spend all ${REVIVE_COST} mana on Revive to raise it as your thrall right on this tile — the grave stays open afterwards — or ${CORPSE_EXPLOSION_COST} on Corpse Explosion to kill whatever enemy stone stands on it. While your mana is full, its owner cannot bring the body back. Your next kill moves the grave.`
+            : `Your grave is open and armed: spend ${CORPSE_EXPLOSION_COST} mana on Corpse Explosion to kill the enemy stone standing on it. It stays here until you detonate it or your next kill moves it.`
+          : bodyHere
+            ? "The enemy Necromancer killed a stone here and marked its corpse. If their mana dips below full, re-enter that stone from your hand to reclaim the soul — otherwise expect the corpse to rise against you. Either way, don't stop on this tile: an armed grave kills the stone standing on it."
+            : "The enemy Necromancer's grave is open and armed. Don't end a move on this tile — for 2 mana they can detonate it and kill the stone standing on it. Only their next kill moves it.",
       });
       return;
     }
@@ -4869,6 +4887,22 @@ function replayEvent(ev: RoomEvent) {
   announceFromState(ev);
   refreshMarkers(ev.state, ev.lastExhume != null);
   currentPower = ev.power ?? null;
+  // Dark Bargain: the fiend intervened inside the other side's action —
+  // announce the trade the moment the field appears (or changes).
+  for (const side of ["p1", "p2"] as PlayerId[]) {
+    const bargain = ev.power?.darkBargain?.[side] ?? null;
+    const key = bargain ? JSON.stringify(bargain) : "";
+    if (key && key !== prevBargainKey[side]) {
+      showProc("warlock", "Dark Bargain!", "darkBargain");
+      showAnnouncement(
+        side === myRole
+          ? `Dark Bargain — your stone stepped back to ${tileDisplay(bargain!.to)}; your stone from ${tileDisplay(bargain!.sacrificedFrom)} was taken in its place`
+          : `Dark Bargain — their stone stepped back to ${tileDisplay(bargain!.to)}; their stone from ${tileDisplay(bargain!.sacrificedFrom)} was taken in its place`,
+        "capture",
+      );
+    }
+    prevBargainKey[side] = key;
+  }
   // Thrall countdown telegraph: the moment a possession enters its LAST
   // turn, say so — the crumble should never feel like a surprise.
   for (const side of ["p1", "p2"] as PlayerId[]) {
@@ -4897,6 +4931,9 @@ function replayEvent(ev: RoomEvent) {
 
 /** Last seen thrall turns per side — drives the last-turn telegraph. */
 const prevThrallTurns: Record<PlayerId, number | null> = { p1: null, p2: null };
+/** Last announced Dark Bargain per side (serialized) — the field persists
+ *  until the next fresh flip, so announce only when it changes. */
+const prevBargainKey: Record<PlayerId, string> = { p1: "", p2: "" };
 
 /** Apply the response's CURRENT overlay — idempotent, interactive state. */
 function applyOverlay(v: RoomResponse) {
@@ -5170,6 +5207,14 @@ function describeEffects(i: number): string[] {
     fx.push(
       `<b>Corpse Explosion</b> on ${tileDisplay(ev.lastCorpseExplosion.tile)}: struck ${ev.lastCorpseExplosion.struckTokenIds.map((id) => ownedLabel(id)).join(", ") || "nothing"}${ev.lastCorpseExplosion.sentHomeIds.length > 0 ? ` — ${ev.lastCorpseExplosion.sentHomeIds.map((id) => ownedLabel(id)).join(", ")} sent home` : ""}`,
     );
+  for (const side of ["p1", "p2"] as PlayerId[]) {
+    const b = ev.power?.darkBargain?.[side] ?? null;
+    const before = prev?.power?.darkBargain?.[side] ?? null;
+    if (b && JSON.stringify(b) !== JSON.stringify(before))
+      fx.push(
+        `<b>Dark Bargain</b>${cls(side)}: ${ownedLabel(b.savedTokenId)} steps back ${tileDisplay(b.from)} → ${tileDisplay(b.to)}; ${ownedLabel(b.sacrificedTokenId)} is taken in its place`,
+      );
+  }
   if (ev.lastCorpseDenied)
     fx.push(`<b>Soul reclaimed</b>: ${ownedLabel(ev.lastCorpseDenied.tokenId)} re-entered — the Revive is denied`);
   if (ev.lastBless)
@@ -6052,7 +6097,7 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Necromancer</b> — Soul Harvest, Revive, Exhume.</li>
        <li><b>Cleric</b> — Bless, Heal, Benediction.</li>
        <li><b>Rogue</b> — Larceny, Backstab, Vanish.</li>
-       <li><b>Warlock</b> — Blood Pact, Curse, Sacrifice.</li>
+       <li><b>Warlock</b> — Dark Bargain, Curse, Sacrifice.</li>
        <li><b>Hunter</b> — Wolf, Snare, Piercing Shot.</li>
        <li><b>Barbarian</b> — Rage, Reckless Swing, Whirlwind.</li>
        <li><b>Bard</b> — Encore, Inspire, Song of Haste.</li>
@@ -6159,10 +6204,11 @@ const GUIDE_SPREADS: [string, string][] = [
        cannot re-enter from the enemy's hand — the soul is yours until you
        spend it.</li>
        <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} mana):
-       detonate the marked corpse instead of raising it: every unprotected
-       enemy beside the grave is killed outright — sent home; a blessed one
-       is only wounded. It desecrates the corpse: no thrall, and its kills
-       pay no mana.</li>
+       detonate your open grave: the unprotected enemy stone standing on it
+       is killed outright — sent home; a blessed one is only wounded. The
+       grave stays open after Revive takes the body, so raise first and
+       keep the mine armed; your next kill moves it. A blown grave raises
+       nothing, and its kill pays no mana.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
@@ -6247,10 +6293,13 @@ const GUIDE_SPREADS: [string, string][] = [
   [
     `<h2>The Warlock</h2>
      <ul>
-       <li><b>Blood Pact</b> (passive, free): your dead pay you. Every
-       stone of yours the enemy sends home banks ${BLOOD_PACT_CHARGES}
-       mana — the only class that profits from losing. It never pays for
-       the stone you spend yourself on a Sacrifice.</li>
+       <li><b>Dark Bargain</b> (passive, free): when an enemy would kill
+       one of your stones, it steps back one tile instead and your
+       least-advanced other stone on the board is taken in its place —
+       that death pays you ${BLOOD_PACT_CHARGES} mana. The stand-in must
+       be behind the stone it saves and the tile behind must be free;
+       ultimates take what they want, and your own Sacrifice is never
+       bargained.</li>
        <li><b>Curse of Chains</b> (active, ${CURSE_COST} mana, keeps your
        turn): shackle one enemy stone in shared water. Every move it
        makes is ${CURSE_SLOW} tile shorter — a flip of ${CURSE_SLOW}
@@ -7044,6 +7093,7 @@ if (dockDemoParam !== null) {
       // Necromancer demo pools mirror the server's gating: Revive needs a
       // full soul bank + a marked corpse, exhume the ultimate.
       corpse: { p1: cls === "necromancer" && d.charges > 0 ? { tokenId: 4, tile: 8 } : null, p2: null },
+      grave: { p1: cls === "necromancer" && d.charges > 0 ? 8 : null, p2: null },
       thrall: { p1: null, p2: null },
       reviveSpawnTile: cls === "necromancer" && d.charges >= REVIVE_COST ? 8 : null,
       exhumeTargets: cls === "necromancer" && d.ult ? [4] : [],

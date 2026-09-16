@@ -53,7 +53,7 @@ export type ProcIconId =
   | "backstab"
   | "blink"
   | "grandHeist"
-  | "bloodPact"
+  | "darkBargain"
   | "curse"
   | "sacrifice"
   | "felStorm"
@@ -524,7 +524,7 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
   // Warlock passive: a drop of the warlock's own blood falling THROUGH the
   // link — the pact paying out. The link is open at the bottom because
   // this is the one warlock icon where the chain gives rather than binds.
-  bloodPact: wrap(
+  darkBargain: wrap(
     LINK(24, 15, 6, 4) +
       DROP(24, 30, 5) +
       `<path d="M24 19 L24 24" ${GOLD_DETAIL}/>` +
