@@ -20,6 +20,7 @@ import {
   applyBless,
   applyBenediction,
   applyBlinkStrike,
+  applyRainOfArrows,
   applyBulwark,
   applyCharge,
   applyChargedShot,
@@ -385,6 +386,10 @@ function takeTurn(
           ...(r.woundedTokenId !== null ? { wound: 1 } : {}),
         },
       };
+    }
+    case "rainOfArrows": {
+      const r = applyRainOfArrows(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 1, usage: { ...turnUsage, rainOfArrows: 1 } };
     }
     case "blinkStrike": {
       const r = applyBlinkStrike(state, power, action.targetTokenId, mover);

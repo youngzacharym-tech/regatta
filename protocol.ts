@@ -332,7 +332,7 @@ export type ServerMessage =
        *  empty for Blink Strike, which never sweeps). Server-computed,
        *  never re-derived client-side. */
       lastUltimate?: {
-        kind: "blinkStrike" | "warpath" | "grandHeist";
+        kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
         targetTokenId: number;
         sweptTokenIds: number[];
         /** Grand Heist only: how much of the target owner's bank was
@@ -513,6 +513,7 @@ export type ClientMessage =
         | { kind: "reflip" }
         | { kind: "charge"; moveIndex: number }
         | { kind: "blinkStrike"; targetTokenId: number }
+        | { kind: "rainOfArrows"; targetTokenId: number }
         | { kind: "warpath"; targetTokenId: number }
         /** `reinforced` is additive: true spends the full charge bank on
          *  the doubled (Reinforced) Bulwark; absent/false is the plain

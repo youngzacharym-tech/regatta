@@ -68,6 +68,7 @@ import {
   PICKPOCKET_COST,
   PICKPOCKET_STEAL,
   REFLIPS_PER_TURN,
+  REFLIP_COST,
   REVIVE_COST,
   SACRIFICE_COST,
   THRALL_TURNS,
@@ -1980,6 +1981,7 @@ let currentPower: {
   chargedShotTargets: number[];
   ultimateReady: Record<PlayerId, boolean>;
   blinkStrikeTargets: number[];
+  rainOfArrowsTargets?: number[];
   warpathTargets: number[];
   bulwarkTargets: number[];
   bulwarkedTokenIds: number[];
@@ -2071,6 +2073,7 @@ type ArmedKind =
   | "push"
   | "chargedShot"
   | "blinkStrike"
+  | "rainOfArrows"
   | "warpath"
   | "bulwark"
   | "bulwarkReinforced"
@@ -2188,7 +2191,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Re-flip",
     cost: "1 mana each · keeps your turn",
     klass: "mage",
-    desc: `Don't like your roll? Flip all four coins again instead of moving — ${REFLIPS_PER_TURN === 1 ? "once a turn" : `up to ${REFLIPS_PER_TURN} times a turn`}, one mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it — unless the new flip is a zero, which pays the mana right back.`,
+    desc: `Don't like your roll? Flip all four coins again instead of moving — ${REFLIPS_PER_TURN === 1 ? "once a turn" : `up to ${REFLIPS_PER_TURN} times a turn`}, ${REFLIP_COST} mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it. A zero on the new flip still pays one mana back.`,
   },
   push: {
     name: "Push",
@@ -2240,9 +2243,9 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   rainOfArrows: {
     name: "Rain of Arrows",
-    cost: "Ultimate · fires on its own",
+    cost: "Ultimate · 3 shield landings in a row",
     klass: "archer",
-    desc: "Chain three shield-tile landings in a row and the sky answers: the moment the third lands, arrows strike one random enemy in shared water down through every protection. No aiming, no spending — it simply happens.",
+    desc: "Chain three shield-tile landings in a row, your turn never passing, and the sky is yours to call: tap any enemy stone in shared water and the arrows strike it down through every protection — shield, Ward, Bulwark, Blessing, Vanish, even a Warlock's bargain. Spends the ultimate, not mana; grants a mana like any capture; ends your turn.",
   },
   ward: {
     name: "Ward",
@@ -2513,7 +2516,7 @@ const vignetteEl = document.getElementById("target-vignette") as HTMLDivElement;
  *  Ultimates cost no charges (their price is the shield streak, telegraphed
  *  by the always-visible dormant slot), so they carry no pips. */
 const DOCK_COST: Record<string, number> = {
-  reflip: 1,
+  reflip: REFLIP_COST,
   blink: BLINK_COST,
   push: 1,
   chargedShot: CHARGED_SHOT_COST,
@@ -2615,7 +2618,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "snipe", passive: true },
     { ability: "push" },
     { ability: "chargedShot" },
-    { ability: "rainOfArrows", ult: true, passive: true },
+    { ability: "rainOfArrows", ult: true },
   ],
   mage: [
     { ability: "ward", passive: true },
@@ -2707,6 +2710,7 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   bulwark: "tap one of your stones to shield",
   bulwarkReinforced: "tap one of your stones",
   blinkStrike: "tap an enemy to strike",
+  rainOfArrows: "tap an enemy to rain on",
   warpath: "tap an enemy to end on",
   bless: "tap one of your stones to bless",
   heal: "tap a wounded stone to mend",
@@ -2802,9 +2806,10 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to shield" };
       return { state: "ready" };
     case "blinkStrike":
+    case "rainOfArrows":
     case "warpath": {
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
-      const targets = ability === "blinkStrike" ? p.blinkStrikeTargets : p.warpathTargets;
+      const targets = ability === "blinkStrike" ? p.blinkStrikeTargets : ability === "rainOfArrows" ? (p.rainOfArrowsTargets ?? []) : p.warpathTargets;
       if (targets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
     }
@@ -2978,6 +2983,7 @@ function updateDock(active?: boolean) {
     p.pushTargets.join(),
     p.chargedShotTargets.join(),
     p.blinkStrikeTargets.join(),
+    (p.rainOfArrowsTargets ?? []).join(),
     p.warpathTargets.join(),
     p.bulwarkTargets.join(),
     p.reviveSpawnTile ?? "",
@@ -3075,6 +3081,8 @@ function armAbility(kind: ArmedKind) {
         ? p.chargedShotTargets
         : kind === "blinkStrike"
           ? p.blinkStrikeTargets
+          : kind === "rainOfArrows"
+            ? (p.rainOfArrowsTargets ?? [])
           : kind === "warpath"
             ? p.warpathTargets
             : kind === "charge"
@@ -3149,6 +3157,9 @@ function fireArmed(tokenId: number) {
       break;
     case "blinkStrike":
       sendToServer({ type: "usePower", action: { kind: "blinkStrike", targetTokenId: tokenId } });
+      break;
+    case "rainOfArrows":
+      sendToServer({ type: "usePower", action: { kind: "rainOfArrows", targetTokenId: tokenId } });
       break;
     case "warpath":
       sendToServer({ type: "usePower", action: { kind: "warpath", targetTokenId: tokenId } });
@@ -4177,7 +4188,7 @@ function announceFromState(msg: {
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
   lastUltimate?: {
-    kind: "blinkStrike" | "warpath" | "grandHeist";
+    kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
     targetTokenId: number;
     sweptTokenIds: number[];
     drained?: number;
@@ -4637,7 +4648,13 @@ function announceFromState(msg: {
     const subject = isMe ? "You" : who;
     const target = isMe ? "opponent's" : "your";
     const label =
-      msg.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : msg.lastUltimate.kind === "warpath" ? "Warpath" : "Grand Heist";
+      msg.lastUltimate.kind === "blinkStrike"
+        ? "Blink Strike"
+        : msg.lastUltimate.kind === "warpath"
+          ? "Warpath"
+          : msg.lastUltimate.kind === "rainOfArrows"
+            ? "Rain of Arrows"
+            : "Grand Heist";
     const sweptCount = msg.lastUltimate.sweptTokenIds.length;
     const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
     const drained = msg.lastUltimate.drained ?? 0;
@@ -5133,7 +5150,14 @@ function actorOf(ev: StateEvent): PlayerId {
 function summarizeEvent(ev: StateEvent): string {
   if (ev.state.winner) return `${logLabel(ev.state.winner)} win${ev.state.winner === myRole ? "" : "s"} the game`;
   if (ev.lastExhume) return `Exhume — dragged back to ${tileDisplay(ev.lastExhume.returnedTo)}`;
-  if (ev.lastUltimate) return ev.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath";
+  if (ev.lastUltimate)
+    return ev.lastUltimate.kind === "blinkStrike"
+      ? "Blink Strike"
+      : ev.lastUltimate.kind === "rainOfArrows"
+        ? "Rain of Arrows"
+        : ev.lastUltimate.kind === "grandHeist"
+          ? "Grand Heist"
+          : "Warpath";
   if (ev.lastRainOfArrows)
     return ev.lastRainOfArrows.targetTokenId === null ? "Rain of Arrows — no target" : "Rain of Arrows";
   if (ev.lastRevive) return `Revive — thrall rises on ${tileDisplay(ev.lastRevive.tile)}`;
@@ -6081,8 +6105,9 @@ const GUIDE_SPREADS: [string, string][] = [
      <p>A darker table, offered from the menu before you sit down: each crew
      picks a <span class="gold">class</span> before the flip-off and plays
      the whole match armed with its powers.</p>
-     <p>Every capture, every zero you roll, and every shield tile you land on
-     fills your <span class="gold">mana</span> — up to ${CHARGE_CAP} banked
+     <p>Every capture, every zero you roll, every shield tile you land on,
+     and every stone you bring home fills your <span class="gold">mana</span>
+     — up to ${CHARGE_CAP} banked
      at once, the same purse for every class. Spend mana to fire your
      class's active powers, offered as buttons beside your coins whenever
      you can afford them.</p>
@@ -6129,11 +6154,13 @@ const GUIDE_SPREADS: [string, string][] = [
        can still reach it at all. Send the target all the way home and one
        charge comes right back. A Warrior can never be Warded, so it always
        takes the full hit.</li>
-       <li><b>Rain of Arrows</b> (the ultimate, free): chain three shield
-       landings in a row, your turn never passing between them, and the
-       third strikes down a random enemy stone in shared water — through
-       shields, Wards, and Bulwarks alike. Rare by design: the board holds
-       only three shield tiles.</li>
+       <li><b>Rain of Arrows</b> (active, spends your ultimate): chain
+       three shield landings in a row, your turn never passing between
+       them, and the rain is yours to call whenever you like — tap any
+       enemy stone in shared water and it is struck down through shields,
+       Wards, Bulwarks and Blessings alike. It grants a mana like any
+       capture and ends your turn. Rare by design: the board holds only
+       three shield tiles.</li>
      </ul>`,
   ],
   [
@@ -6143,24 +6170,21 @@ const GUIDE_SPREADS: [string, string][] = [
        ${CHARGE_CAP} charges, your furthest-along stone still on the water
        cannot be captured. A plain Push can't budge it at all, though a
        Charged Shot can still knock it back.</li>
-       <li>What does break through: a Warrior's Ward Breaker, a
-       Necromancer's thrall, a blessed Cleric stone, a Warlock's
-       Sacrifice, and any ultimate. A Warlock's Curse binds a Warded stone
-       like any other.</li>
-       <li>Ward always follows whichever of your stones is furthest along —
-       send that one home and it passes to the new leader.</li>
+       <li>What breaks through: a Warrior's Ward Breaker, a Necromancer's
+       thrall, a blessed Cleric stone, a Warlock's Sacrifice, and any
+       ultimate. A Curse binds a Warded stone like any other. Ward follows
+       your furthest stone — send it home and it passes to the new leader.</li>
        <li><b>Blink</b> (active, ${BLINK_COST} mana): teleport your rearmost
        stone on the board to any empty tile in shared water ahead of it —
-       never a shield tile, a trap, or a wolf's watch. Nothing is captured.
-       Ends your turn.</li>
+       never a shield, trap or wolf's watch. Nothing is captured. Ends
+       your turn.</li>
      </ul>`,
     `<div class="runner">The Mage &middot; continued</div>
      <ul>
-       <li><b>Re-flip</b> (active, 1 charge each): dislike your roll? Spend
-       a charge to flip again instead of moving — it does not end your turn,
-       and you may re-flip up to ${REFLIPS_PER_TURN} time${REFLIPS_PER_TURN === 1 ? "" : "s"} a turn.
-       Mind the price: Ward only holds at a full bank, so the moment you
-       spend below it your lead stone stands unwarded.</li>
+       <li><b>Re-flip</b> (active, ${REFLIP_COST} mana): dislike your roll? Flip
+       again instead of moving — your turn continues — up to
+       ${REFLIPS_PER_TURN} time${REFLIPS_PER_TURN === 1 ? "" : "s"} a turn. Mind the price: Ward only holds
+       at a full bank, so spending below it unwards your lead stone.</li>
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight
@@ -6273,22 +6297,19 @@ const GUIDE_SPREADS: [string, string][] = [
      </ul>`,
     `<div class="runner">The Rogue &middot; continued</div>
      <ul>
-       <li>What still reaches a Vanished stone: a Charged Shot can shove it
-       (never home), a Barbarian's Reckless Swing cuts it down, and any
-       ultimate finds it.</li>
-       <li><b>Backstab</b> (active, ${BACKSTAB_COST} mana): a guaranteed
-       kill on any enemy in shared water — no roll, straight through a
-       Ward. A shield tile, a Bulwark, or a Vanish turns it aside; a
-       blessed stone is only wounded. Larceny still drains the purse.
-       Ends your turn.</li>
-       <li><b>Grand Heist</b> (active, spends your ultimate): land on a
-       shield tile three times running, then teleport your furthest-along
-       stone onto any enemy in shared water and take it — straight through
-       shields, Wards, and Bulwarks — then empty their ENTIRE bank on the
-       spot. A capture and a robbery in the same breath.</li>
+       <li>What still reaches a Vanished stone: a Charged Shot shoves it
+       (never home), a Reckless Swing cuts it down, any ultimate finds it.</li>
+       <li><b>Backstab</b> (active, ${BACKSTAB_COST} mana, the full bank): a
+       guaranteed kill on any enemy in shared water — no roll, straight
+       through a Ward. A shield tile, Bulwark or Vanish turns it aside; a
+       blessed stone is only wounded. Larceny still drains. Ends your turn.</li>
+       <li><b>Grand Heist</b> (active, spends your ultimate): three shield
+       landings running, then teleport your furthest stone onto any enemy
+       in shared water and take it — through everything — and empty their
+       ENTIRE bank on the spot.</li>
      </ul>
-     <p>The Rogue wins by making the enemy poor: every kill drains their
-     purse as well as their stone.</p>`,
+     <p>The Rogue wins by making the enemy poor: every kill drains a purse
+     as well as a stone.</p>`,
   ],
   [
     `<h2>The Warlock</h2>
@@ -6572,6 +6593,41 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // player-facing tavern voice, telling people what to LOOK FOR, not a diff.
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-09-16-the-open-grave",
+    date: "September 16, 2026",
+    title: "The Open Grave",
+    items: [
+      "<b>Bringing a stone home pays a mana.</b> Every capture, zero, shield landing — and now every escape — fills your purse. Winning the race is no longer the way to go broke.",
+      "<b>The Necromancer's grave outlives the raise.</b> A kill still marks the corpse where it fell, but the grave stays open after Revive takes the body. Spend 2 mana on <b>Corpse Explosion</b> to kill the enemy stone standing on it — whenever they stop there — and your next kill moves the grave. Tap the headstone to see whether the body is still in it.",
+      "<b>The Warlock's Blood Pact is gone. Dark Bargain takes its place.</b> When an enemy would kill one of your stones, it steps back one tile instead and your least-advanced stone behind it is taken in its place — that death pays you a mana. Ultimates take what they want, and your own Sacrifice is never bargained. Watch for the proc: the fiend's chain, and a stone that wasn't where you left it.",
+      "<b>Rain of Arrows is yours to aim.</b> The Archer's ultimate no longer fires the instant the third shield landing lands (and no longer wastes when nothing is in range): it banks like every other ultimate, and you tap the enemy you want struck down.",
+      "<b>Prices.</b> The Mage's <b>Re-flip</b> now costs 2 mana (it was the one free rescue on the table). The Rogue's <b>Backstab</b> costs the full bank, 4. The Hunter's <b>Piercing Shot</b> costs 3.",
+      "<b>One front door.</b> The game lives at <b>masterkiller.vercel.app</b>; the old regatta-one address simply walks you there.",
+    ],
+  },
+  {
+    id: "2026-09-14-four-mana",
+    date: "September 14, 2026",
+    title: "Four Mana for Everyone",
+    items: [
+      "<b>The purse is four deep now</b> — every class, the same four crystals. Two-mana casts are a rhythm, not a whole bank; full-bank casts cost what they cost, so a deeper purse never switches an ability off.",
+      "<b>The Mage learns to Blink.</b> 1 mana: your rearmost stone on the board jumps up to four tiles ahead to an empty tile in shared water. It ends your turn, and it will not land you on a trap or a wolf's tile. Re-flip is once a turn.",
+      "<b>Backstab is back, Pickpocket is retired.</b> The Rogue's guaranteed kill returns as the second active beside Vanish; the purse-picking cast is gone.",
+      "<b>The Warrior's Reinforced Bulwark is retired</b> — one Bulwark, one price.",
+      "<b>Corpse Explosion is lethal.</b> The blast sends every unprotected stone it reaches home outright; a blessed one is only wounded.",
+      "<b>Every class has a face.</b> Rogue, Warlock, Hunter, Barbarian and Bard stones carry their own sculpted reliefs now, and this book gained four new chapters and a page for every one of the ten.",
+    ],
+  },
+  {
+    id: "2026-07-27-ten-faces",
+    date: "July 27, 2026",
+    title: "Ten Faces on the Table",
+    items: [
+      "<b>Four new classes sit down.</b> The <b>Warlock</b> curses legs and trades blood for kills; the <b>Hunter</b> lays snares and hunts with a wolf; the <b>Barbarian</b> rages down the row and spins through crowds; the <b>Bard</b> lights stones with song and marches them home. Each has a chapter in this book and its own ultimate.",
+      "<b>Pick from ten.</b> The class picker, docks, rings and icons all grew to fit — and the balance table behind them grew with them.",
+    ],
+  },
   {
     id: "2026-07-22-the-vanishing",
     date: "July 22, 2026",

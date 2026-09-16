@@ -330,10 +330,12 @@ function otherPlayerId(p) {
   return p === "p1" ? "p2" : "p1";
 }
 var CHARGE_CAP = 4;
+var ESCAPE_CHARGES = 1;
 var CHARGED_SHOT_COST = 2;
 var BULWARK_REINFORCED_COST = 2;
 var BULWARK_REINFORCED_RETIRED = true;
 var REFLIPS_PER_TURN = 1;
+var REFLIP_COST = 2;
 var BLINK_COST = 1;
 var BLINK_RANGE = 4;
 var PUSH_DISTANCE = 1;
@@ -363,7 +365,7 @@ var PICKPOCKET_RETIRED = true;
 var PICKPOCKET_STEAL = 2;
 var VANISH_COST = 1;
 var VANISH_TURNS = BULWARK_TURNS;
-var BACKSTAB_COST = 3;
+var BACKSTAB_COST = 4;
 var BLOOD_PACT_CHARGES = 1;
 var DARK_BARGAIN_RETREAT = 1;
 var CURSE_COST = 1;
@@ -376,7 +378,7 @@ var WOLF_CAPTURES = true;
 var TRAP_BOUNTY = 1;
 var SNARE_COST = 1;
 var TRAP_KNOCKBACK = 2;
-var PIERCING_SHOT_COST = 2;
+var PIERCING_SHOT_COST = 3;
 var WILD_HUNT_FREEZE_TURNS = 1;
 var RAGE_MAX = 2;
 var RAGE_FREE_DEFICIT = 0;
@@ -422,7 +424,7 @@ function resetTurnFlags(power) {
   return { ...power, reflipsUsedThisTurn: 0 };
 }
 function canReflipAgain(power, mover) {
-  return power.charges[mover] >= 1 && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
+  return power.charges[mover] >= REFLIP_COST && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
 }
 function possessorOf(power, tokenId) {
   if (power.thrall.p1?.tokenId === tokenId) return "p1";
@@ -527,14 +529,9 @@ function applyDarkBargain(preTokens, prePower, tokens, nextPower, killedIds, kil
     if (effectiveOwner(prePower, victim) !== owner) continue;
     if (victim.position < DARK_BARGAIN_RETREAT) continue;
     const retreat = victim.position - DARK_BARGAIN_RETREAT;
-    const standIn = out.filter(
-      (t) => t.owner === owner && t.id !== id && !killedIds.includes(t.id) && t.position >= 0 && t.position < victim.position && effectiveOwner(prePower, t) === owner
-    ).sort((a, b) => a.position - b.position || a.id - b.id)[0];
+    const standIn = pickDarkBargainStandIn(out, prePower, victim, killedIds);
     if (!standIn) continue;
-    const blocked = out.some(
-      (t) => t.id !== standIn.id && t.position === retreat && (retreat >= 4 && retreat <= 11 ? true : t.owner === owner)
-    );
-    if (blocked) continue;
+    if (darkBargainRetreatBlocked(out, owner, retreat, standIn.id)) continue;
     out = out.map(
       (t) => t.id === id ? { ...t, position: retreat } : t.id === standIn.id ? { ...t, position: -1 } : t
     );
@@ -572,6 +569,17 @@ function applyDarkBargain(preTokens, prePower, tokens, nextPower, killedIds, kil
     };
   }
   return { tokens: out, power: pw };
+}
+function pickDarkBargainStandIn(tokens, prePower, victim, excludeIds) {
+  const owner = victim.owner;
+  return tokens.filter(
+    (t) => t.owner === owner && t.id !== victim.id && !excludeIds.includes(t.id) && t.position >= 0 && t.position < victim.position && effectiveOwner(prePower, t) === owner
+  ).sort((a, b) => a.position - b.position || a.id - b.id)[0];
+}
+function darkBargainRetreatBlocked(tokens, owner, retreat, standInId) {
+  return tokens.some(
+    (t) => t.id !== standInId && t.position === retreat && (retreat >= 4 && retreat <= 11 ? true : t.owner === owner)
+  );
 }
 function tickDarkBargainForNewTurn(power) {
   if (power.darkBargain.p1 === null && power.darkBargain.p2 === null) return power;
@@ -772,15 +780,33 @@ function resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, ra
   if (next < ULTIMATE_STREAK) {
     return { power: { ...power, shieldStreak: { ...power.shieldStreak, [mover]: next } }, rainOfArrows: null };
   }
+  void state;
+  void allCaptures;
+  void rand;
   const reset = { ...power, shieldStreak: { ...power.shieldStreak, [mover]: 0 } };
-  const cls = power.classes[mover];
-  if (cls !== "archer") {
-    return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
-  }
-  const pool = getRainOfArrowsTargets(state, reset, mover).filter((id) => !allCaptures.includes(id));
-  if (pool.length === 0) return { power: reset, rainOfArrows: { targetTokenId: null } };
-  const picked = pool[Math.floor(rand() * pool.length)];
-  return { power: reset, rainOfArrows: { targetTokenId: picked } };
+  return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
+}
+function applyRainOfArrows(state, power, targetTokenId, mover) {
+  const tokens = state.tokens.map((t) => t.id === targetTokenId ? { ...t, position: -1 } : t);
+  let nextPower = clearCapturedBulwarks(
+    { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } },
+    [targetTokenId]
+  );
+  nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
+  nextPower = clearVitality(nextPower, [targetTokenId]);
+  nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
+  nextPower = addCharge(nextPower, mover);
+  nextPower = breakShieldStreak(nextPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: [] };
 }
 function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShield, causesWin, rand = Math.random) {
   const streakResult = resolveShieldStreak(state, power, mover, landsOnShield, allCaptures, rand);
@@ -844,6 +870,9 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
     if (landsOnShield) nextPower = addCharge(nextPower, mover);
   } else if (kills.length > 0 || woundIds.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
+  }
+  if (to >= PATH_LENGTH_PER_PLAYER) {
+    for (let i = 0; i < ESCAPE_CHARGES; i++) nextPower = addCharge(nextPower, mover);
   }
   const mendedTokenIds = [];
   if (power.classes[mover] === "cleric" && landsOnShield) {
@@ -1088,7 +1117,7 @@ function applyChargedShot(state, power, targetTokenId, mover) {
 function applyReflip(power, mover) {
   return {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    charges: { ...power.charges, [mover]: power.charges[mover] - REFLIP_COST },
     reflipsUsedThisTurn: power.reflipsUsedThisTurn + 1
   };
 }
@@ -2121,6 +2150,7 @@ function advanceStones(state, power, mover, ids, distance) {
       if (to !== PATH_LENGTH_PER_PLAYER - 1) continue;
       tokens = tokens.map((t) => t.id === stone.id ? { ...t, position: PATH_LENGTH_PER_PLAYER } : t);
       movedIds.push(stone.id);
+      for (let i = 0; i < ESCAPE_CHARGES; i++) next = addCharge(next, mover);
       continue;
     }
     const destTile = BOARD_LAYOUT[to];
@@ -2431,14 +2461,19 @@ var MK_PIERCING_SHOT_FLOOR = 240;
 var MK_PIERCING_SHOT_PER_TILE = 22;
 function scoreSnare(state, power, tile, rand) {
   const mover = state.currentPlayer;
-  let threatened = 0;
-  for (const t of state.tokens) {
-    if (effectiveOwner(power, t) === mover) continue;
-    if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
-    const gap = tile - t.position;
-    if (gap >= 1 && gap <= 4) threatened++;
-  }
-  return MK_SNARE_FLOOR + MK_SNARE_PER_THREATENED * threatened + MK_SNARE_PER_TILE * tile + rand() * 20;
+  const placement = (at) => {
+    let threatened = 0;
+    for (const t of state.tokens) {
+      if (effectiveOwner(power, t) === mover) continue;
+      if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
+      const gap = at - t.position;
+      if (gap >= 1 && gap <= 4) threatened++;
+    }
+    return MK_SNARE_PER_THREATENED * threatened + MK_SNARE_PER_TILE * at;
+  };
+  const armed = power.traps?.[mover] ?? null;
+  const gain = armed === null ? placement(tile) : placement(tile) - placement(armed);
+  return MK_SNARE_FLOOR + gain + rand() * 20;
 }
 function scorePiercingShot(state, moves, targetId, rand) {
   const target = state.tokens.find((t) => t.id === targetId);
@@ -2561,6 +2596,15 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "reflip" };
+    }
+  }
+  if (cls === "archer" && power.ultimateReady[mover]) {
+    for (const targetId of getRainOfArrowsTargets(state, power, mover)) {
+      const score = scoreUltimateStrike(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "rainOfArrows", targetTokenId: targetId };
+      }
     }
   }
   if (cls === "mage" && power.ultimateReady[mover]) {
@@ -2811,6 +2855,11 @@ function enumerateCandidates(state, power, moves) {
   if (cls === "mage" && power.ultimateReady[mover]) {
     for (const id of getBlinkStrikeTargets(state, power, mover)) {
       out.push({ kind: "blinkStrike", targetTokenId: id });
+    }
+  }
+  if (cls === "archer" && power.ultimateReady[mover]) {
+    for (const id of getRainOfArrowsTargets(state, power, mover)) {
+      out.push({ kind: "rainOfArrows", targetTokenId: id });
     }
   }
   if (cls === "warrior" && power.ultimateReady[mover]) {
@@ -3134,6 +3183,8 @@ function mkSimulate(state, power, c, mover) {
       return applyChargedShot(state, power, c.targetTokenId, mover);
     case "blinkStrike":
       return applyBlinkStrike(state, power, c.targetTokenId, mover);
+    case "rainOfArrows":
+      return applyRainOfArrows(state, power, c.targetTokenId, mover);
     case "warpath":
       return applyWarpath(state, power, c.targetTokenId, mover);
     case "bulwark":
@@ -3324,6 +3375,7 @@ function publicPower(doc) {
     pushTargets: doc.mk.classes[mover] === "archer" ? getPushTargets(doc.state, p, mover) : [],
     chargedShotTargets: doc.mk.classes[mover] === "archer" ? getChargedShotTargets(doc.state, p, mover) : [],
     ultimateReady: { ...doc.mk.ultimateReady },
+    rainOfArrowsTargets: doc.mk.classes[mover] === "archer" && doc.mk.ultimateReady[mover] ? getRainOfArrowsTargets(doc.state, p, mover) : [],
     blinkStrikeTargets: doc.mk.classes[mover] === "mage" && doc.mk.ultimateReady[mover] ? getBlinkStrikeTargets(doc.state, p, mover) : [],
     warpathTargets: doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover] ? getWarpathTargets(doc.state, p, mover) : [],
     bulwarkTargets: doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1 ? getBulwarkTargets(doc.state, p, mover) : [],
@@ -3622,6 +3674,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "push") return { doc: applyMkSimple(doc, seat, "push", a.targetTokenId, now) };
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
+      if (a.kind === "rainOfArrows") return { doc: applyMkSimple(doc, seat, "rainOfArrows", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
       if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, rand, a.reinforced === true) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
@@ -3679,6 +3732,11 @@ function validateUsePower(doc, seat, a) {
       if (cls !== "archer") return "Only an Archer can Charged Shot";
       if (doc.mk.charges[seat] < CHARGED_SHOT_COST) return `Charged Shot costs ${CHARGED_SHOT_COST} charges`;
       if (!getChargedShotTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Charged Shot target";
+      return null;
+    case "rainOfArrows":
+      if (cls !== "archer") return "Only an Archer can call the rain";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (!getRainOfArrowsTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Rain of Arrows target";
       return null;
     case "blinkStrike":
       if (cls !== "mage") return "Only a Mage can Blink Strike";
@@ -3957,6 +4015,13 @@ function applyMkSimple(doc, seat, kind, tokenId, now, rand = Math.random, reinfo
       r = rr;
       capsGained = 1 + rr.sweptTokenIds.length;
       slots = { lastUltimate: { kind: "blinkStrike", targetTokenId: tokenId, sweptTokenIds: rr.sweptTokenIds } };
+      break;
+    }
+    case "rainOfArrows": {
+      const rr = applyRainOfArrows(doc.state, power, tokenId, seat);
+      r = rr;
+      capsGained = 1;
+      slots = { lastUltimate: { kind: "rainOfArrows", targetTokenId: tokenId, sweptTokenIds: [] } };
       break;
     }
     case "warpath": {
@@ -4603,6 +4668,8 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkReflip(doc, seat, now, rand);
     case "blinkStrike":
       return applyMkSimple(doc, seat, "blinkStrike", action.targetTokenId, now);
+    case "rainOfArrows":
+      return applyMkSimple(doc, seat, "rainOfArrows", action.targetTokenId, now);
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":

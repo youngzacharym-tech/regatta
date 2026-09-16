@@ -46,6 +46,17 @@ function otherPlayerId(p: PlayerId): PlayerId {
  *  (Revive fell from 7/game to 0.3 before that fix). Ward is the one
  *  deliberate exception: it still asks for a FULL bank, see isWarded. */
 export const CHARGE_CAP = 4;
+/** ESCAPE PAYS (2026-09-16, user rule: "when a token crosses the finish to
+ *  make a point you get a mana"): every escape banks the mover this many
+ *  charges, through addCharge (so it clamps at the cap like all generic
+ *  income). Until now the charge economy paid only for captures, zero
+ *  flips and shield landings — every income was a fight or a fluke, and a
+ *  side that was simply WINNING THE RACE was the side starved of mana.
+ *  This is the race's own income. Paid on the classic exact-landing
+ *  escape in resolveTurn and on a Bard march that escapes a stone
+ *  (advanceStones); NOT on the game-winning fourth escape in any way that
+ *  matters (the game is over). */
+export const ESCAPE_CHARGES = 1;
 
 /** Archer's Charged Shot: a fixed price, no longer "the whole bank". */
 export const CHARGED_SHOT_COST = 2;
@@ -87,6 +98,12 @@ export const BULWARK_REINFORCED_RETIRED = true;
  *  known open thread it already was pre-change (see
  *  CHARGED_SHOT_WARD_DISTANCE's ship-now-reopen-later note).) */
 export const REFLIPS_PER_TURN = 1;
+/** Mana per Re-flip (2026-09-16, was a hardcoded 1). The bot only ever
+ *  re-flips as a RESCUE — a zero flip or a blocked turn — and a zero flip
+ *  pays a charge on commit before the decision, so at 1 the rescue was net
+ *  free and the mage simply never had a dead turn (9.5 rescues per game;
+ *  the roster's standing 62-64% class). The price is the dial. */
+export const REFLIP_COST = 2;
 
 /* 2 -> 1 on 2026-09-13, as the other half of giving the Mage a second
  * active (BLINK_COST below). The Mage was 65% against the field with ONE
@@ -736,7 +753,7 @@ export const VANISH_TURNS = BULWARK_TURNS;
  *  was the whole first balance fix and stays. Larceny's drain applies on
  *  the kill like any other. STARTING PRICE; 3 is the next stop if the
  *  matrix says the rogue over-corrects. */
-export const BACKSTAB_COST = 3;
+export const BACKSTAB_COST = 4;
 /* 2 -> 3 after the first matrix at 2: rogue 58.8% vs the field (66% vs
  * warrior, backstab/g 8.2) — the same warrior/necromancer overshoot the
  * July trace recorded. At 3 a Backstab is most of the purse again. */
@@ -942,7 +959,16 @@ export const TRAP_KNOCKBACK = 2;
  *  worthless at any price. Freeze survives as Wild Hunt's ultimate-only
  *  effect, which is where an effect that strong and that un-counterable
  *  belongs anyway. The bow in the portrait was always the better read. */
-export const PIERCING_SHOT_COST = 2;
+/* 3 since 2026-09-16 (was 2, the full bank of the 2-cap era). The bot
+ * hunter had been re-laying Snare on ~30 turns a game — one mana each,
+ * moving the trap a tile at a time — which quietly burned the income this
+ * shot needed. Once scoreSnare priced a re-lay by its IMPROVEMENT over
+ * the armed trap (master-killer-bot.ts), the trap stayed put and sprang
+ * more (5.2 -> 6.2/game), the saved mana went here (1.4 -> 4.2 shots/game)
+ * and the hunter jumped 49 -> 59% vs the field: the spam had been masking
+ * an overtuned kit. Sweep (1000/matchup): cost 3 = 50.9%, cost 4 = 46.0%,
+ * SNARE_COST 2 instead = 58.0% (the trap is not the problem). */
+export const PIERCING_SHOT_COST = 3;
 
 /** Hunter's Wild Hunt ultimate: every trap in the world snaps shut at once
  *  — every enemy stone in shared water is frozen for this many of its
@@ -1384,6 +1410,9 @@ export type PowerAction =
   | { kind: "push"; targetTokenId: number }
   | { kind: "chargedShot"; targetTokenId: number }
   | { kind: "reflip" }
+  /** Archer's Rain of Arrows (banked, aimed since 2026-09-16): one enemy in
+   *  shared water, through everything — getRainOfArrowsTargets' pool. */
+  | { kind: "rainOfArrows"; targetTokenId: number }
   | { kind: "charge"; move: PowerMove }
   | { kind: "blinkStrike"; targetTokenId: number }
   | { kind: "warpath"; targetTokenId: number }
@@ -1505,7 +1534,7 @@ export function resetTurnFlags(power: PowerState): PowerState {
  *  cap. (Class gating stays at the call sites — this answers "may THIS
  *  mage re-flip again," not "is this player a mage.") */
 export function canReflipAgain(power: PowerState, mover: PlayerId): boolean {
-  return power.charges[mover] >= 1 && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
+  return power.charges[mover] >= REFLIP_COST && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
 }
 
 /** Which player's thrall this token currently is — null when unpossessed.
@@ -1792,31 +1821,9 @@ export function applyDarkBargain(
     if (effectiveOwner(prePower, victim) !== owner) continue; // a possessed body is the necromancer's loss
     if (victim.position < DARK_BARGAIN_RETREAT) continue;
     const retreat = victim.position - DARK_BARGAIN_RETREAT;
-    // The stand-in: the warlock's least-advanced OTHER stone on the board,
-    // strictly behind the victim, its own to lose, and not itself dying in
-    // this same blow. Lowest id breaks ties, deterministically.
-    const standIn = out
-      .filter(
-        (t) =>
-          t.owner === owner &&
-          t.id !== id &&
-          !killedIds.includes(t.id) &&
-          t.position >= 0 &&
-          t.position < victim.position &&
-          effectiveOwner(prePower, t) === owner,
-      )
-      .sort((a, b) => a.position - b.position || a.id - b.id)[0];
+    const standIn = pickDarkBargainStandIn(out, prePower, victim, killedIds);
     if (!standIn) continue;
-    // The retreat tile must be empty — contested tiles (4-11) are one
-    // square for both numberings, a private-lane tile only ever holds its
-    // owner's stones — except for the stand-in itself, which is leaving.
-    const blocked = out.some(
-      (t) =>
-        t.id !== standIn.id &&
-        t.position === retreat &&
-        (retreat >= 4 && retreat <= 11 ? true : t.owner === owner),
-    );
-    if (blocked) continue;
+    if (darkBargainRetreatBlocked(out, owner, retreat, standIn.id)) continue;
 
     out = out.map((t) =>
       t.id === id ? { ...t, position: retreat } : t.id === standIn.id ? { ...t, position: -1 } : t,
@@ -1858,6 +1865,42 @@ export function applyDarkBargain(
     };
   }
   return { tokens: out, power: pw };
+}
+
+/** The stand-in Dark Bargain would take for `victim`: the warlock's
+ *  least-advanced OTHER stone on `tokens`, strictly behind the victim, its
+ *  own to lose (not possessed), and not in `excludeIds` (the stones dying
+ *  in the same blow). Lowest id breaks ties, deterministically. */
+function pickDarkBargainStandIn(
+  tokens: TokenState[],
+  prePower: PowerState,
+  victim: TokenState,
+  excludeIds: number[],
+): TokenState | undefined {
+  const owner = victim.owner;
+  return tokens
+    .filter(
+      (t) =>
+        t.owner === owner &&
+        t.id !== victim.id &&
+        !excludeIds.includes(t.id) &&
+        t.position >= 0 &&
+        t.position < victim.position &&
+        effectiveOwner(prePower, t) === owner,
+    )
+    .sort((a, b) => a.position - b.position || a.id - b.id)[0];
+}
+
+/** Is the retreat tile taken? Contested tiles (4-11) are one square for
+ *  both numberings; a private-lane tile only ever holds its owner's stones.
+ *  The stand-in itself never blocks — it is the one leaving. */
+function darkBargainRetreatBlocked(tokens: TokenState[], owner: PlayerId, retreat: number, standInId: number): boolean {
+  return tokens.some(
+    (t) =>
+      t.id !== standInId &&
+      t.position === retreat &&
+      (retreat >= 4 && retreat <= 11 ? true : t.owner === owner),
+  );
 }
 
 /** Clear both players' Dark Bargain announcements at the start of a fresh
@@ -2338,9 +2381,14 @@ export function breakShieldStreak(power: PowerState, player: PlayerId): PowerSta
 }
 
 /** Advances or breaks the mover's shield-streak for this resolving action,
- *  and resolves whatever completing it means for their class. Archer's
- *  ultimate (Rain of Arrows) fires immediately; Mage/Warrior instead bank
- *  ultimateReady for a not-yet-built active ability to spend later. */
+ *  and resolves what completing it means: EVERY class banks ultimateReady
+ *  to spend later. (Until 2026-09-16 the Archer's Rain of Arrows fired on
+ *  the third landing itself, at a random target, and wasted when nothing
+ *  stood in shared water — it landed in 1-in-100 games while every banked
+ *  ultimate fired in ~1-in-10, and the archer sat second-from-bottom. It
+ *  now banks like the other nine and is cast, aimed, from the dock — see
+ *  applyRainOfArrows. The `rainOfArrows` slot in this result is kept for
+ *  the callers' shape and is always null.) */
 function resolveShieldStreak(
   state: GameState,
   power: PowerState,
@@ -2357,16 +2405,46 @@ function resolveShieldStreak(
   }
 
   // Completed the combo — consumed either way, regardless of class or target availability.
+  void state; void allCaptures; void rand; // the archer's auto-fire used these; retired 2026-09-16
   const reset: PowerState = { ...power, shieldStreak: { ...power.shieldStreak, [mover]: 0 } };
-  const cls = power.classes[mover];
-  if (cls !== "archer") {
-    return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
-  }
+  return { power: { ...reset, ultimateReady: { ...reset.ultimateReady, [mover]: true } }, rainOfArrows: null };
+}
 
-  const pool = getRainOfArrowsTargets(state, reset, mover).filter((id) => !allCaptures.includes(id));
-  if (pool.length === 0) return { power: reset, rainOfArrows: { targetTokenId: null } };
-  const picked = pool[Math.floor(rand() * pool.length)];
-  return { power: reset, rainOfArrows: { targetTokenId: picked } };
+/** Archer's Rain of Arrows (banked ultimate since 2026-09-16): strikes one
+ *  chosen enemy stone in shared water down through every protection —
+ *  shield tile, Ward, Bulwark, Blessing, Vanish — the exact pool
+ *  getRainOfArrowsTargets has always described. Spends ultimateReady, not
+ *  a charge; grants exactly 1 charge back like any capturing action
+ *  (Blink Strike's economy). An ultimate, so the Warlock's Dark Bargain
+ *  does not answer it. Ends the turn, breaks the shield streak — an
+ *  attack, not a placement (Push's shape). Callers gate on
+ *  ultimateReady + the pool, as for every banked ultimate. */
+export function applyRainOfArrows(
+  state: GameState,
+  power: PowerState,
+  targetTokenId: number,
+  mover: PlayerId,
+): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
+  const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
+  let nextPower: PowerState = clearCapturedBulwarks(
+    { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } },
+    [targetTokenId],
+  );
+  nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
+  nextPower = clearVitality(nextPower, [targetTokenId]);
+  nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
+  nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
+  nextPower = addCharge(nextPower, mover);
+  nextPower = breakShieldStreak(nextPower, mover);
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: [] };
 }
 
 /** Shared plumbing: send a set of token ids to reserve, advance the mover,
@@ -2529,6 +2607,10 @@ function resolveTurn(
     if (landsOnShield) nextPower = addCharge(nextPower, mover);
   } else if (kills.length > 0 || woundIds.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
+  }
+  // Escape pays — see ESCAPE_CHARGES.
+  if (to >= PATH_LENGTH_PER_PLAYER) {
+    for (let i = 0; i < ESCAPE_CHARGES; i++) nextPower = addCharge(nextPower, mover);
   }
 
   // Cleric's Sanctified Ground (passive): the mover's shield-tile landing
@@ -3037,7 +3119,7 @@ export function applyChargedShot(
 export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
   return {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    charges: { ...power.charges, [mover]: power.charges[mover] - REFLIP_COST },
     reflipsUsedThisTurn: power.reflipsUsedThisTurn + 1,
   };
 }
@@ -5142,6 +5224,8 @@ function advanceStones(
       if (to !== PATH_LENGTH_PER_PLAYER - 1) continue;
       tokens = tokens.map((t) => (t.id === stone.id ? { ...t, position: PATH_LENGTH_PER_PLAYER } : t));
       movedIds.push(stone.id);
+      // A marched escape is still an escape — it pays (ESCAPE_CHARGES).
+      for (let i = 0; i < ESCAPE_CHARGES; i++) next = addCharge(next, mover);
       continue;
     }
     const destTile = BOARD_LAYOUT[to];

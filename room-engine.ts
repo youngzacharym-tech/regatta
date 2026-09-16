@@ -90,6 +90,8 @@ import {
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
+  getRainOfArrowsTargets,
+  applyRainOfArrows,
   getBulwarkTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
@@ -285,6 +287,9 @@ export interface PublicPower {
   chargedShotTargets: number[];
   ultimateReady: Record<PlayerId, boolean>;
   blinkStrikeTargets: number[];
+  /** Archer's banked Rain of Arrows (2026-09-16): enemy ids in shared water,
+   *  populated only while ultimateReady — the dock gate. ADDITIVE. */
+  rainOfArrowsTargets?: number[];
   warpathTargets: number[];
   bulwarkTargets: number[];
   bulwarkedTokenIds: number[];
@@ -433,7 +438,7 @@ export type RoomEvent =
       lastChargeEvent: { player: PlayerId; delta: number } | null;
       lastRainOfArrows: { targetTokenId: number | null } | null;
       lastUltimate: {
-        kind: "blinkStrike" | "warpath" | "grandHeist";
+        kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
         targetTokenId: number;
         sweptTokenIds: number[];
         /** Grand Heist only: how much of the target owner's bank was
@@ -620,7 +625,7 @@ export interface RoomDoc {
   zeroFlipChargeBefore: number | null;
   lastRainOfArrows: { targetTokenId: number | null } | null;
   lastUltimate: {
-    kind: "blinkStrike" | "warpath" | "grandHeist";
+    kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
     targetTokenId: number;
     sweptTokenIds: number[];
     drained?: number;
@@ -705,6 +710,7 @@ export type RoomActionInput =
         | { kind: "reflip" }
         | { kind: "charge"; moveIndex: number }
         | { kind: "blinkStrike"; targetTokenId: number }
+        | { kind: "rainOfArrows"; targetTokenId: number }
         | { kind: "warpath"; targetTokenId: number }
         /** `reinforced` is ADDITIVE: absent/false is the plain 1-charge
          *  Bulwark, unchanged; true spends the full bank on the doubled
@@ -810,6 +816,10 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
     pushTargets: doc.mk.classes[mover] === "archer" ? getPushTargets(doc.state, p, mover) : [],
     chargedShotTargets: doc.mk.classes[mover] === "archer" ? getChargedShotTargets(doc.state, p, mover) : [],
     ultimateReady: { ...doc.mk.ultimateReady },
+    rainOfArrowsTargets:
+      doc.mk.classes[mover] === "archer" && doc.mk.ultimateReady[mover]
+        ? getRainOfArrowsTargets(doc.state, p, mover)
+        : [],
     blinkStrikeTargets:
       doc.mk.classes[mover] === "mage" && doc.mk.ultimateReady[mover]
         ? getBlinkStrikeTargets(doc.state, p, mover)
@@ -1220,6 +1230,7 @@ export function applyAction(
       if (a.kind === "push") return { doc: applyMkSimple(doc, seat, "push", a.targetTokenId, now) };
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
+      if (a.kind === "rainOfArrows") return { doc: applyMkSimple(doc, seat, "rainOfArrows", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
       // `=== true` (not truthiness): these client-supplied flags are echoed
       // into the persisted doc (lastBulwark/lastRaise) and broadcast, and
@@ -1292,6 +1303,11 @@ function validateUsePower(
       if (cls !== "archer") return "Only an Archer can Charged Shot";
       if (doc.mk.charges[seat] < CHARGED_SHOT_COST) return `Charged Shot costs ${CHARGED_SHOT_COST} charges`;
       if (!getChargedShotTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Charged Shot target";
+      return null;
+    case "rainOfArrows":
+      if (cls !== "archer") return "Only an Archer can call the rain";
+      if (!doc.mk!.ultimateReady[seat]) return "Ultimate not ready";
+      if (!getRainOfArrowsTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Rain of Arrows target";
       return null;
     case "blinkStrike":
       if (cls !== "mage") return "Only a Mage can Blink Strike";
@@ -1592,7 +1608,7 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
-  kind: "push" | "chargedShot" | "blinkStrike" | "warpath" | "bulwark" | "exhume" | "heal" | "vanish" | "grandHeist",
+  kind: "push" | "chargedShot" | "blinkStrike" | "rainOfArrows" | "warpath" | "bulwark" | "exhume" | "heal" | "vanish" | "grandHeist",
   tokenId: number,
   now: number,
   rand: () => number = Math.random,
@@ -1628,6 +1644,13 @@ function applyMkSimple(
       r = rr;
       capsGained = 1 + rr.sweptTokenIds.length;
       slots = { lastUltimate: { kind: "blinkStrike", targetTokenId: tokenId, sweptTokenIds: rr.sweptTokenIds } };
+      break;
+    }
+    case "rainOfArrows": {
+      const rr = applyRainOfArrows(doc.state, power, tokenId, seat);
+      r = rr;
+      capsGained = 1;
+      slots = { lastUltimate: { kind: "rainOfArrows", targetTokenId: tokenId, sweptTokenIds: [] } };
       break;
     }
     case "warpath": {
@@ -2529,6 +2552,8 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkReflip(doc, seat, now, rand);
     case "blinkStrike":
       return applyMkSimple(doc, seat, "blinkStrike", action.targetTokenId, now);
+    case "rainOfArrows":
+      return applyMkSimple(doc, seat, "rainOfArrows", action.targetTokenId, now);
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":

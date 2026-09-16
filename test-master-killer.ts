@@ -16,6 +16,7 @@ import {
   BULWARK_REINFORCED_TURNS,
   BULWARK_TURNS,
   CHARGE_CAP,
+  ESCAPE_CHARGES,
   CHARGED_SHOT_COST,
   BULWARK_REINFORCED_COST,
   CHARGE_SWEEP_CAP,
@@ -55,6 +56,7 @@ import {
   PUSH_WARD_COST,
   PUSH_WARD_DISTANCE,
   REFLIPS_PER_TURN,
+  REFLIP_COST,
   REVIVE_COST,
   ROGUE_STEAL_ON_CAPTURE,
   SOUL_BOUNTY_CHARGES,
@@ -125,6 +127,7 @@ import {
   getPickpocketTargets,
   getPushTargets,
   getRainOfArrowsTargets,
+  applyRainOfArrows,
   getReviveSpawnTile,
   getVanishTargets,
   getWarpathTargets,
@@ -189,6 +192,34 @@ function check(name: string, cond: boolean, detail?: string) {
   } else {
     failures.push(`${name}${detail ? ` — ${detail}` : ""}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 0. Escape pays (2026-09-16): bringing a stone home banks ESCAPE_CHARGES
+// ---------------------------------------------------------------------------
+{
+  // p1 archer stone 0 on tile 13 with a flip of 1 lands exactly on the finish
+  // (14) and escapes (to = 15); stone 1 stays behind so it is not the win.
+  const s = state("p1", { 0: 13, 1: 5 });
+  const pw = power({ p1: "archer", p2: "mage" });
+  const esc = getLegalPowerMoves(s, pw, 1).find((mv) => mv.tokenId === 0)!;
+  check("Escape pays: the exact-landing escape is legal", esc !== undefined && esc.to === 15, JSON.stringify(esc));
+  const r = applyPowerMove(s, pw, esc, "p1");
+  check("Escape pays: the stone is home", r.state.tokens.find((t) => t.id === 0)!.position === 15);
+  check("Escape pays: the mover banks ESCAPE_CHARGES", r.power.charges.p1 === ESCAPE_CHARGES, `p1=${r.power.charges.p1}`);
+  check("Escape pays: the opponent banks nothing", r.power.charges.p2 === 0);
+  const rCap = applyPowerMove(s, power({ p1: "archer", p2: "mage" }, { p1: CHARGE_CAP }), esc, "p1");
+  check("Escape pays: clamps at CHARGE_CAP", rCap.power.charges.p1 === CHARGE_CAP);
+  // A plain advance that does not escape pays nothing.
+  const sMid = state("p1", { 0: 5, 1: 9 });
+  const mv = getLegalPowerMoves(sMid, power({ p1: "archer", p2: "mage" }), 1).find((m) => m.tokenId === 0)!; // 5 -> 6, not a shield
+  check("Escape pays: an ordinary quiet move still pays nothing", applyPowerMove(sMid, power({ p1: "archer", p2: "mage" }), mv, "p1").power.charges.p1 === 0);
+  // A Bard march that escapes a stone pays the same.
+  const sBard = state("p1", { 0: 14 - HASTE_TILES, 1: 3 });
+  let pwBard = power({ p1: "bard", p2: "archer" }, { p1: INSPIRE_COST + HASTE_COST });
+  pwBard = applyInspire(pwBard, 0, "p1");
+  const rBard = applySongOfHaste(sBard, pwBard, "p1");
+  check("Escape pays: a marched escape banks it too", rBard.state.tokens.find((t) => t.id === 0)!.position === 15 && rBard.power.charges.p1 === ESCAPE_CHARGES, `p1=${rBard.power.charges.p1} pos=${rBard.state.tokens.find((t) => t.id === 0)!.position}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,14 +334,15 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Re-flip: spends exactly one charge per use, counts uses, and is capped
+// 4. Re-flip: spends REFLIP_COST per use (2 since 2026-09-16), counts uses, and is capped
 //    at REFLIPS_PER_TURN per turn (see canReflipAgain — the shared gate the
 //    server's validation, the bot, and the client button all consult)
 // ---------------------------------------------------------------------------
 {
   const pw = power({ p1: "mage" }, { p1: CHARGE_CAP });
   const after = applyReflip(pw, "p1");
-  check("Re-flip: spends exactly one charge", after.charges.p1 === CHARGE_CAP - 1);
+  check("Re-flip: spends exactly REFLIP_COST", after.charges.p1 === CHARGE_CAP - REFLIP_COST, `got ${after.charges.p1}`);
+  check("Re-flip: not offered below REFLIP_COST", !canReflipAgain(power({ p1: "mage" }, { p1: REFLIP_COST - 1 }), "p1") && canReflipAgain(power({ p1: "mage" }, { p1: REFLIP_COST }), "p1"));
   check("Re-flip: increments the per-turn use counter", after.reflipsUsedThisTurn === 1);
   check("Re-flip: does not touch the other player's charges", after.charges.p2 === pw.charges.p2);
 
@@ -688,70 +720,56 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. Ultimates: 3 consecutive shield landings in one unbroken turn-chain.
-//     Archer's Rain of Arrows fires immediately; Mage/Warrior instead bank
-//     ultimateReady for a not-yet-built active ability.
+// 12. Ultimates: 3 consecutive shield landings in one unbroken turn-chain
+//     bank ultimateReady for EVERY class (2026-09-16: the Archer's Rain of
+//     Arrows used to fire on the third landing itself; it is now banked and
+//     aimed like the other nine — see applyRainOfArrows).
 // ---------------------------------------------------------------------------
 {
   const seed = (n: number) => (pw: PowerState) => ({ ...pw, shieldStreak: { ...pw.shieldStreak, p1: n } });
 
-  // Fires exactly on the 3rd consecutive landing — not the 2nd, not the 4th.
+  // The 3rd consecutive landing banks the flag — not the 2nd, not the 4th.
   const pwArcher2 = seed(2)(power({ p1: "archer" }));
   const s1 = state("p1", { 0: 6, 4: 9 }); // token0 6->7 (shield); enemy4 alone at 9 (contested)
   const m1 = getLegalPowerMoves(s1, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
   check("Ultimate: move to a shield tile is legal and available for this fixture", !!m1);
   const r1 = applyPowerMove(s1, pwArcher2, m1, "p1", () => 0);
-  check("Ultimate: fires Rain of Arrows on the 3rd consecutive shield landing", r1.rainOfArrows?.targetTokenId === 4);
-  check("Ultimate: streak resets to 0 once it fires", r1.power.shieldStreak.p1 === 0);
-  check(
-    "Ultimate: a successful Rain of Arrows hit grants a charge, like any other capture",
-    r1.power.charges.p1 === 1,
-    `got ${r1.power.charges.p1}`,
-  );
+  check("Ultimate: the Archer banks ultimateReady on the 3rd consecutive shield landing", r1.power.ultimateReady.p1 === true);
+  check("Ultimate: nothing fires on the landing itself any more", r1.rainOfArrows === null && r1.state.tokens.find((t) => t.id === 4)!.position === 9);
+  check("Ultimate: streak resets to 0 once it banks", r1.power.shieldStreak.p1 === 0);
+  check("Ultimate: the landing still only grants the ordinary shield charge", r1.power.charges.p1 === 1, `got ${r1.power.charges.p1}`);
 
-  // 1st and 2nd landings accumulate without firing.
+  // 1st and 2nd landings accumulate without banking.
   const pwArcher0 = power({ p1: "archer" });
   const r0 = applyPowerMove(s1, pwArcher0, m1, "p1", () => 0);
-  check("Ultimate: 1st landing accumulates without firing", r0.rainOfArrows === null && r0.power.shieldStreak.p1 === 1);
+  check("Ultimate: 1st landing accumulates without banking", r0.power.ultimateReady.p1 === false && r0.power.shieldStreak.p1 === 1);
   const pwArcher1 = seed(1)(power({ p1: "archer" }));
   const rMid = applyPowerMove(s1, pwArcher1, m1, "p1", () => 0);
-  check(
-    "Ultimate: 2nd landing accumulates without firing",
-    rMid.rainOfArrows === null && rMid.power.shieldStreak.p1 === 2,
-  );
+  check("Ultimate: 2nd landing accumulates without banking", rMid.power.ultimateReady.p1 === false && rMid.power.shieldStreak.p1 === 2);
 
-  // Bypasses shield-tile protection: the sole eligible candidate sits ON a
-  // shield tile (7, contested) while the Archer's own landing is elsewhere
-  // (13, the private-lane shield) — Rain of Arrows can still pick it.
-  const sShieldTarget = state("p1", { 0: 12, 4: 7 }); // token0 12->13 (shield); enemy4 ON shield tile 7
-  const mShield = getLegalPowerMoves(sShieldTarget, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 13)!;
-  check("Ultimate: sanity — enemy candidate really is on a shield tile", BOARD_LAYOUT[7].type === "shield");
-  const rShield = applyPowerMove(sShieldTarget, pwArcher2, mShield, "p1", () => 0);
-  check(
-    "Ultimate: Rain of Arrows bypasses shield-tile protection for its target",
-    rShield.rainOfArrows?.targetTokenId === 4,
-  );
-
-  // Bypasses Ward: the sole eligible candidate is a maxed Mage's warded token.
-  const pwVsMage2 = seed(2)(power({ p1: "archer", p2: "mage" }, { p2: CHARGE_CAP }));
-  const mageEnemy = s1.tokens.find((t) => t.id === 4)!;
-  check("Ultimate: sanity — the candidate really is warded", isWarded(s1, pwVsMage2, mageEnemy));
-  const rWard = applyPowerMove(s1, pwVsMage2, m1, "p1", () => 0);
-  check("Ultimate: Rain of Arrows bypasses Ward for its target", rWard.rainOfArrows?.targetTokenId === 4);
-
-  // Empty pool entirely (no enemies anywhere): a clean whiff — streak still
-  // consumed (not a silent no-op), and no phantom charge beyond the
-  // ordinary landsOnShield grant.
-  const sEmpty = state("p1", { 0: 6 });
-  const mEmpty = getLegalPowerMoves(sEmpty, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
-  const rEmpty = applyPowerMove(sEmpty, pwArcher2, mEmpty, "p1", () => 0);
-  check("Ultimate: whiffs cleanly with no enemies on the board at all", rEmpty.rainOfArrows?.targetTokenId === null);
-  check("Ultimate: streak still resets to 0 on a whiff", rEmpty.power.shieldStreak.p1 === 0);
-  check(
-    "Ultimate: an empty-pool whiff still only grants the ordinary shield-landing charge",
-    rEmpty.power.charges.p1 === 1,
-    `got ${rEmpty.power.charges.p1}`,
-  );
+  // The cast: aimed at one enemy in shared water, through everything.
+  const ready: PowerState = { ...power({ p1: "archer", p2: "mage" }, { p1: 0, p2: CHARGE_CAP }), ultimateReady: { p1: true, p2: false } };
+  const sCast = state("p1", { 0: 5, 4: 7, 5: 9, 6: 2 }); // enemy4 ON shield tile 7, enemy5 at 9 (warded: most advanced), enemy6 in its own lane
+  const pool = getRainOfArrowsTargets(sCast, ready, "p1");
+  check("Rain of Arrows: pool is every enemy in shared water, protections ignored", JSON.stringify(pool) === JSON.stringify([4, 5]), JSON.stringify(pool));
+  check("Rain of Arrows: sanity — the candidate at 9 really is warded", isWarded(sCast, ready, sCast.tokens.find((t) => t.id === 5)!));
+  const rW = applyRainOfArrows(sCast, ready, 5, "p1");
+  check("Rain of Arrows: kills through Ward", rW.state.tokens.find((t) => t.id === 5)!.position === -1);
+  const rS = applyRainOfArrows(sCast, ready, 4, "p1");
+  check("Rain of Arrows: kills through a shield tile", rS.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Rain of Arrows: the archer's own stones are untouched", rS.state.tokens.find((t) => t.id === 0)!.position === 5);
+  check("Rain of Arrows: spends ultimateReady", rS.power.ultimateReady.p1 === false);
+  check("Rain of Arrows: grants one charge like any capturing action", rS.power.charges.p1 === 1, `got ${rS.power.charges.p1}`);
+  check("Rain of Arrows: ends the turn", rS.state.currentPlayer === "p2" && rS.state.extraTurn === false);
+  check("Rain of Arrows: breaks a live shield streak", applyRainOfArrows(sCast, { ...ready, shieldStreak: { p1: 2, p2: 0 } }, 4, "p1").power.shieldStreak.p1 === 0);
+  const rB = applyRainOfArrows(sCast, { ...power({ p1: "archer", p2: "warrior" }), ultimateReady: { p1: true, p2: false }, bulwarked: { 4: 3 } }, 4, "p1");
+  check("Rain of Arrows: kills through Bulwark and clears the entry", rB.state.tokens.find((t) => t.id === 4)!.position === -1 && rB.power.bulwarked[4] === undefined);
+  const rBl = applyRainOfArrows(sCast, { ...power({ p1: "archer", p2: "cleric" }), ultimateReady: { p1: true, p2: false }, vitality: { 4: "blessed" } }, 4, "p1");
+  check("Rain of Arrows: kills a blessed stone outright and clears its vitality", rBl.state.tokens.find((t) => t.id === 4)!.position === -1 && rBl.power.vitality[4] === undefined);
+  // An ultimate: the Warlock's Dark Bargain does not answer it.
+  const sWl = state("p1", { 0: 5, 4: 8, 6: 3 });
+  const rWl = applyRainOfArrows(sWl, { ...power({ p1: "archer", p2: "warlock" }), ultimateReady: { p1: true, p2: false } }, 4, "p1");
+  check("Rain of Arrows: bypasses Dark Bargain", rWl.state.tokens.find((t) => t.id === 4)!.position === -1 && rWl.state.tokens.find((t) => t.id === 6)!.position === 3);
 
   // Streak resets to 0 on any resolving move that doesn't land on a shield.
   const sPlain = state("p1", { 0: 4 });
@@ -766,51 +784,18 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Ultimate: streak resets to 0 via Push", rPush.power.shieldStreak.p1 === 0);
 
   // Re-flip is turn-neutral and doesn't touch the streak either way.
-  const afterReflip = applyReflip(pwArcher2, "p1");
+  const afterReflip = applyReflip({ ...pwArcher2, charges: { p1: REFLIP_COST, p2: 0 } }, "p1");
   check("Ultimate: Re-flip leaves the streak untouched", afterReflip.shieldStreak.p1 === 2);
 
-  // Uniform-random selection spans the full candidate pool under
-  // deterministic rand stand-ins: first, middle, and last. Enemies sit at
-  // 9,10,11 (not 8 = to+1) specifically so Snipe doesn't ALSO fire on this
-  // same shield-landing move and exclude one of them from the pool.
-  const sPool = state("p1", { 0: 6, 4: 9, 5: 10, 6: 11 }); // token0 6->7 (shield); 3 enemies at 9,10,11
-  const mPool = getLegalPowerMoves(sPool, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
-  check("Ultimate: sanity — Snipe does not also fire on this move", mPool.bonusCaptures.length === 0);
-  const pool = getRainOfArrowsTargets(sPool, pwArcher2, "p1");
-  check("Ultimate: sanity — the candidate pool has all 3 enemies in id order", JSON.stringify(pool) === JSON.stringify([4, 5, 6]));
-  const rFirst = applyPowerMove(sPool, pwArcher2, mPool, "p1", () => 0);
-  const rMidPool = applyPowerMove(sPool, pwArcher2, mPool, "p1", () => 0.4);
-  const rLast = applyPowerMove(sPool, pwArcher2, mPool, "p1", () => 0.999999);
-  check("Ultimate: rand=0 picks the first pool candidate", rFirst.rainOfArrows?.targetTokenId === 4);
-  check("Ultimate: rand=0.4 picks the middle pool candidate", rMidPool.rainOfArrows?.targetTokenId === 5);
-  check("Ultimate: rand near 1 picks the last pool candidate", rLast.rainOfArrows?.targetTokenId === 6);
-
-  // Never double-captures a token this same move already captured via Snipe.
-  const sSnipe = state("p1", { 0: 6, 4: 8 }); // token0 6->7 (shield); Snipe should hit enemy4 at 8 (to+1)
-  const mSnipe = getLegalPowerMoves(sSnipe, pwArcher2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
-  check("Ultimate: sanity — Snipe fires on this same shield-landing move", mSnipe.bonusCaptures.includes(4));
-  const rSnipe = applyPowerMove(sSnipe, pwArcher2, mSnipe, "p1", () => 0);
-  check(
-    "Ultimate: does not re-target a token this same move already captured via Snipe",
-    rSnipe.rainOfArrows?.targetTokenId === null,
-  );
-
-  // Mage/Warrior completing the combo bank ultimateReady instead of firing
-  // Rain of Arrows — no capture, no rainOfArrows signal either way.
+  // Mage/Warrior complete the combo the same way.
   const pwMage2 = seed(2)(power({ p1: "mage" }));
   const mMage = getLegalPowerMoves(s1, pwMage2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
   const rMage = applyPowerMove(s1, pwMage2, mMage, "p1", () => 0);
-  check(
-    "Ultimate: Mage completing the combo banks ultimateReady, not Rain of Arrows",
-    rMage.rainOfArrows === null && rMage.power.ultimateReady.p1 === true && rMage.power.shieldStreak.p1 === 0,
-  );
+  check("Ultimate: Mage completing the combo banks ultimateReady", rMage.power.ultimateReady.p1 === true && rMage.power.shieldStreak.p1 === 0);
   const pwWarrior2 = seed(2)(power({ p1: "warrior" }));
   const mWarrior = getLegalPowerMoves(s1, pwWarrior2, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
   const rWarrior = applyPowerMove(s1, pwWarrior2, mWarrior, "p1", () => 0);
-  check(
-    "Ultimate: Warrior completing the combo banks ultimateReady, not Rain of Arrows",
-    rWarrior.rainOfArrows === null && rWarrior.power.ultimateReady.p1 === true && rWarrior.power.shieldStreak.p1 === 0,
-  );
+  check("Ultimate: Warrior completing the combo banks ultimateReady", rWarrior.power.ultimateReady.p1 === true && rWarrior.power.shieldStreak.p1 === 0);
 
   // breakShieldStreak: no-op at 0 (same reference back), resets a nonzero
   // streak to exactly 0, and works for any class (no gate anymore).
@@ -1092,20 +1077,13 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- Rain of Arrows pierces Bulwark (always has) --------------------------
+  // --- Rain of Arrows pierces Bulwark (always has; cast form since 2026-09-16)
   {
-    const s = state("p1", { 0: 6, 4: 9 }); // token0 6->7 (shield); sole candidate enemy4 at 9, Bulwarked
-    const seeded: PowerState = {
-      ...power({ p1: "archer" }),
-      shieldStreak: { p1: 2, p2: 0 },
-      bulwarked: { 4: 3 },
-    };
-    const m = getLegalPowerMoves(s, seeded, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
-    const r = applyPowerMove(s, seeded, m, "p1", () => 0);
-    check(
-      "Bulwark: Rain of Arrows bypasses Bulwark (same rule as every ultimate now)",
-      r.rainOfArrows?.targetTokenId === 4,
-    );
+    const s = state("p1", { 0: 6, 4: 9 }); // enemy4 at 9, Bulwarked
+    const seeded: PowerState = { ...power({ p1: "archer" }), ultimateReady: { p1: true, p2: false }, bulwarked: { 4: 3 } };
+    check("Bulwark: a Bulwarked stone is still in Rain of Arrows' pool", getRainOfArrowsTargets(s, seeded, "p1").includes(4));
+    const r = applyRainOfArrows(s, seeded, 4, "p1");
+    check("Bulwark: Rain of Arrows bypasses Bulwark (same rule as every ultimate now)", r.state.tokens.find((t) => t.id === 4)!.position === -1);
   }
 
   // --- Push: soft knockback still lands, send-home is blocked ---------------
@@ -1435,20 +1413,18 @@ function check(name: string, cond: boolean, detail?: string) {
     // a REINFORCED Bulwark on the sole candidate: the ultimate still
     // punches through, and the captured token's bulwarked AND bulwarkSaves
     // entries must both clear (no free re-entry protection later).
-    const s = state("p1", { 0: 6, 4: 9 }); // token0 6->7 (shield); sole candidate enemy4 at 9
+    const s = state("p1", { 0: 6, 4: 9 }); // enemy4 at 9, reinforced-Bulwarked
     const base = power({ p1: "archer", p2: "warrior" });
     const pw: PowerState = {
       ...base,
-      shieldStreak: { ...base.shieldStreak, p1: ULTIMATE_STREAK - 1 },
+      ultimateReady: { p1: true, p2: false },
       bulwarked: { 4: BULWARK_REINFORCED_TURNS },
       bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
     };
-    const move = getLegalPowerMoves(s, pw, 1).find((m) => m.tokenId === 0 && m.landsOnShield)!;
-    const r = applyPowerMove(s, pw, move, "p1", () => 0);
+    const r = applyRainOfArrows(s, pw, 4, "p1");
     check(
       "Reinforced Bulwark: Rain of Arrows still bypasses it (same judgment call as plain)",
-      r.rainOfArrows?.targetTokenId === 4 && r.state.tokens.find((t) => t.id === 4)!.position === -1,
-      JSON.stringify(r.rainOfArrows),
+      r.state.tokens.find((t) => t.id === 4)!.position === -1,
     );
     check("Reinforced Bulwark: the captured token's bulwarked entry is cleared", r.power.bulwarked[4] === undefined);
     check("Reinforced Bulwark: the captured token's saves entry is cleared with it", r.power.bulwarkSaves[4] === undefined);
@@ -2349,20 +2325,18 @@ function check(name: string, cond: boolean, detail?: string) {
 // Cleric: ultimates pierce the blessing
 // ---------------------------------------------------------------------------
 {
-  // Rain of Arrows: archer's 3rd consecutive shield landing kills a blessed
-  // stone for real (rand pinned to pick the only pool member).
+  // Rain of Arrows (banked cast) kills a blessed stone for real.
   const s = state("p2", { 0: 9, 4: 6 });
   const pw: PowerState = {
     ...power({ p1: "cleric", p2: "archer" }),
-    shieldStreak: { p1: 0, p2: ULTIMATE_STREAK - 1 },
+    ultimateReady: { p1: false, p2: true },
     vitality: { 0: "blessed" },
   };
-  const m = getLegalPowerMoves(s, pw, 1).find((mv) => mv.tokenId === 4 && mv.to === 7)!;
-  check("Pierce: setup — landing on the shield tile", m.landsOnShield);
-  const r = applyPowerMove(s, pw, m, "p2", () => 0);
+  check("Pierce: setup — the blessed stone is in the pool", getRainOfArrowsTargets(s, pw, "p2").includes(0));
+  const r = applyRainOfArrows(s, pw, 0, "p2");
   check("Pierce: Rain of Arrows kills a blessed stone outright", r.state.tokens.find((t) => t.id === 0)!.position === -1);
   check("Pierce: the dead stone's vitality entry clears", r.power.vitality[0] === undefined);
-  check("Pierce: rain reported", r.rainOfArrows?.targetTokenId === 0);
+  check("Pierce: the ultimate is spent", r.power.ultimateReady.p2 === false);
 
   // Blink Strike: same pierce.
   const s2 = state("p2", { 0: 9, 4: 6 });

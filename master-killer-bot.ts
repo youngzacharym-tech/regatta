@@ -69,6 +69,8 @@ import {
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
+  getRainOfArrowsTargets,
+  applyRainOfArrows,
   getBulwarkTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
@@ -238,6 +240,10 @@ function scoreMove(
     // Each additional capture in the same move (Snipe/Charge stacking) is
     // worth a real but diminishing bonus — multi-capture moves should win
     // ties against single captures without becoming a blowout auto-pick.
+    // (TRIED 2026-09-16: valuing a kill by the stone a Warlock's Dark
+    // Bargain would take instead. It made the archer WORSE vs warlock,
+    // 28 -> 25%: a bargained kill still shrinks the army and delays the
+    // runner, so declining those shots only lets the warlock race.)
     score += (400 + victimProgress * 10 + (kills.length - 1) * 150) * captureScale;
   }
   // captureScale rides the wound value too: for the necromancer (2.5) a
@@ -810,14 +816,24 @@ const MK_PIERCING_SHOT_PER_TILE = 22;
  *  a trap never hurts its setter, so proximity to friendlies is irrelevant. */
 function scoreSnare(state: GameState, power: PowerState, tile: number, rand: () => number): number {
   const mover = state.currentPlayer;
-  let threatened = 0;
-  for (const t of state.tokens) {
-    if (effectiveOwner(power, t) === mover) continue;
-    if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
-    const gap = tile - t.position;
-    if (gap >= 1 && gap <= 4) threatened++;
-  }
-  return MK_SNARE_FLOOR + MK_SNARE_PER_THREATENED * threatened + MK_SNARE_PER_TILE * tile + rand() * 20;
+  const placement = (at: number): number => {
+    let threatened = 0;
+    for (const t of state.tokens) {
+      if (effectiveOwner(power, t) === mover) continue;
+      if (t.position < 0 || t.position >= PATH_LENGTH_PER_PLAYER) continue;
+      const gap = at - t.position;
+      if (gap >= 1 && gap <= 4) threatened++;
+    }
+    return MK_SNARE_PER_THREATENED * threatened + MK_SNARE_PER_TILE * at;
+  };
+  // RE-LAY DISCIPLINE (2026-09-16): with a trap already armed, a new
+  // placement is worth only its IMPROVEMENT over the one in the ground —
+  // the old absolute valuation re-laid the trap on ~30 turns a game (5
+  // springs), one mana each, moving it a tile at a time. Measured against
+  // the armed trap the floor does its job again.
+  const armed = power.traps?.[mover] ?? null;
+  const gain = armed === null ? placement(tile) : placement(tile) - placement(armed);
+  return MK_SNARE_FLOOR + gain + rand() * 20;
 }
 
 /** Score Hunter's Piercing Shot — the full-bank, turn-ending kill at range.
@@ -1099,6 +1115,19 @@ function pickStandardPowerAction(
     if (score > bestScore) {
       bestScore = score;
       best = { kind: "reflip" };
+    }
+  }
+
+  if (cls === "archer" && power.ultimateReady[mover]) {
+    // Banked Rain of Arrows (2026-09-16): a guaranteed through-everything
+    // kill — scoreUltimateStrike's "never sit on it" temperament, same as
+    // Blink Strike's.
+    for (const targetId of getRainOfArrowsTargets(state, power, mover)) {
+      const score = scoreUltimateStrike(state, targetId, rand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { kind: "rainOfArrows", targetTokenId: targetId };
+      }
     }
   }
 
@@ -1405,6 +1434,11 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   if (cls === "mage" && power.ultimateReady[mover]) {
     for (const id of getBlinkStrikeTargets(state, power, mover)) {
       out.push({ kind: "blinkStrike", targetTokenId: id });
+    }
+  }
+  if (cls === "archer" && power.ultimateReady[mover]) {
+    for (const id of getRainOfArrowsTargets(state, power, mover)) {
+      out.push({ kind: "rainOfArrows", targetTokenId: id });
     }
   }
   if (cls === "warrior" && power.ultimateReady[mover]) {
@@ -2036,6 +2070,8 @@ function mkSimulate(
       return applyChargedShot(state, power, c.targetTokenId, mover);
     case "blinkStrike":
       return applyBlinkStrike(state, power, c.targetTokenId, mover);
+    case "rainOfArrows":
+      return applyRainOfArrows(state, power, c.targetTokenId, mover);
     case "warpath":
       return applyWarpath(state, power, c.targetTokenId, mover);
     case "bulwark":
