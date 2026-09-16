@@ -6092,10 +6092,10 @@ const GUIDE_SPREADS: [string, string][] = [
     `<div class="runner">Master Killer &middot; the ten classes</div>
      <ul>
        <li><b>Archer</b> — Snipe, Push, Charged Shot.</li>
-       <li><b>Mage</b> — Ward, Re-flip, Blink, Blink Strike.</li>
+       <li><b>Mage</b> — Ward, Re-flip, Blink.</li>
        <li><b>Warrior</b> — Ward Breaker, Charge, Bulwark.</li>
-       <li><b>Necromancer</b> — Soul Harvest, Revive, Exhume.</li>
-       <li><b>Cleric</b> — Bless, Heal, Benediction.</li>
+       <li><b>Necromancer</b> — Soul Harvest, Corpse Explosion, Revive.</li>
+       <li><b>Cleric</b> — Sanctified Ground, Bless, Heal.</li>
        <li><b>Rogue</b> — Larceny, Backstab, Vanish.</li>
        <li><b>Warlock</b> — Dark Bargain, Curse, Sacrifice.</li>
        <li><b>Hunter</b> — Wolf, Snare, Piercing Shot.</li>
