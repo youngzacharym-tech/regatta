@@ -3,7 +3,7 @@
 A two-player race across the board — a fan-made, browser-based take on the
 *Soulframe* minigame. Play a friend by room code or link, or play the CPU.
 
-**Live:** https://regatta-one.vercel.app *(installable as an app — "Add to
+**Live:** https://masterkiller.vercel.app *(installable as an app — "Add to
 Home Screen" on a phone)*
 
 - 3D board and pieces sculpted in Nomad Sculpt, prepped in Blender, rendered

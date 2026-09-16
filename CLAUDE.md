@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Regatta: a fan-made, browser-based 2-player race-and-capture board game (a
 digital take on a *Soulframe* minigame), played with coin flips instead of
 dice. Three.js/Vite client + authoritative server (HTTP long-polling) sharing a
-pure TypeScript rulebook. Live at https://regatta-one.vercel.app, installable
+pure TypeScript rulebook. Live at https://masterkiller.vercel.app, installable
 as a PWA. **Master Killer** is the class-powers variant (Archer / Mage /
 Warrior, charge economy) selectable from the menu — this is the project's
 active focus (the repo is literally named for it).
@@ -20,7 +20,7 @@ active focus (the repo is literally named for it).
   `master-killer-mode` branch** — `master` on both repos is classic-only.
   Work here happens on the local `master-killer-mode` branch tracking
   upstream's.
-- The live `regatta-one.vercel.app` deploys from Zach's own Vercel account —
+- The live `masterkiller.vercel.app` deploys from Zach's own Vercel account —
   NOT reachable from the `wetwarelabs` Vercel team this machine's CLI is
   logged into. Kasen cannot deploy there; coordinate with Zach or stand up a
   separate deployment.
