@@ -41,7 +41,7 @@ import {
   applyPiercingShot,
   applyRecklessSwing,
   applyWhirlwind,
-  applyHeal,
+  applyVigil,
   applyPickpocket,
   applyBackstab,
   applyBlink,
@@ -56,12 +56,11 @@ import {
   applyVanish,
   applyWarpath,
   applyWildHunt,
+  canCastVigil,
   canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_COST,
-  BULWARK_REINFORCED_COST,
   CHARGED_SHOT_DISTANCE,
-  CHARGED_SHOT_WARD_DISTANCE,
   CURSE_COST,
   CURSE_TURNS,
   effectiveOwner,
@@ -85,7 +84,6 @@ import {
   getPiercingShotTargets,
   getRecklessSwingTargets,
   getWhirlwindTargets,
-  getHealTargets,
   getLegalPowerMoves,
   getPickpocketTargets,
   getBackstabTargets,
@@ -97,20 +95,21 @@ import {
   getWarpathTargets,
   getWildHuntTargets,
   WILD_HUNT_FREEZE_TURNS,
-  isBlessed,
-  isBulwarked,
   isCursed,
   isHamstrung,
+  isProtected,
+  isWalled,
   isWarded,
   NECRO_CHARGE_CAP,
   possessorOf,
   PUSH_DISTANCE,
-  PUSH_WARD_DISTANCE,
   rageFor,
   RECKLESS_SELF_KNOCKBACK,
   SACRIFICE_COST,
   THRALL_TURNS,
   VANISH_COST,
+  VIGIL_COST,
+  wallUpkeepFor,
   type PlayerClass,
   type PowerAction,
   type PowerMove,
@@ -194,18 +193,6 @@ const MK_STD_NECRO_CAPTURE_SCALE = 2.5;
  *  thralls already in). */
 const MK_STD_NECRO_HUNT = 65;
 
-/** What a capture that only WOUNDS a blessed stone is worth to the standard
- *  tier, plus a per-tile scale on the victim's progress: below a kill's
- *  400+, but a real objective — the blow strips a blessing the enemy paid
- *  BLESS_COST for, pays the standard charge, staggers the stone back, and
- *  above all makes the stone MORTAL again (breaking the blessing on an
- *  advanced runner is the only way to ever stop it, hence the progress
- *  scale). Only ever non-zero in cleric matchups (vitality is empty
- *  otherwise), so the six pre-cleric matchups' scoring is byte-identical,
- *  same rand() draws and all. */
-const MK_STD_WOUND_VALUE = 160;
-const MK_STD_WOUND_PER_TILE = 8;
-
 /** Same shape of scoring bot.ts uses for a plain move, extended with the
  *  power-derived capture sets (bonus snipe / charge sweep) so a Master
  *  Killer move that happens to snipe or sweep scores appropriately higher
@@ -213,9 +200,12 @@ const MK_STD_WOUND_PER_TILE = 8;
  *  necromancer levers above; their defaults are exact no-ops, so a call
  *  that doesn't pass them (every non-necromancer call site) scores
  *  byte-identically to the pre-necromancer formula, same rand() draws and
- *  all. `power` feeds the wound split (a blessed victim survives its
- *  capture and pays no charge — see MK_STD_WOUND_VALUE); omitted or with
- *  an empty vitality map it is an exact no-op too. */
+ *  all. `power` is now UNUSED (2026-09-17): the wound split it used to
+ *  feed (MK_STD_WOUND_VALUE, a blessed victim surviving as a "wound") is
+ *  retired — a walled (blessed) stone can't be captured at all any more,
+ *  so every capture in `m.captures`/`bonusCaptures` is already an
+ *  outright kill. Kept as a parameter (every call site still passes it)
+ *  rather than rippling a signature change through both call sites. */
 function scoreMove(
   state: GameState,
   m: PowerMove,
@@ -227,10 +217,9 @@ function scoreMove(
   huntPerTarget = 0,
   power?: PowerState,
 ): number {
+  void power;
   let score = 0;
-  const allCaptures = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
-  const wounds = power ? allCaptures.filter((id) => isBlessed(power, id)) : [];
-  const kills = wounds.length > 0 ? allCaptures.filter((id) => !wounds.includes(id)) : allCaptures;
+  const kills = [...m.captures, ...m.bonusCaptures, ...extraCaptures];
 
   if (m.causesWin) score += 1000;
   if (kills.length > 0) {
@@ -245,15 +234,6 @@ function scoreMove(
     // 28 -> 25%: a bargained kill still shrinks the army and delays the
     // runner, so declining those shots only lets the warlock race.)
     score += (400 + victimProgress * 10 + (kills.length - 1) * 150) * captureScale;
-  }
-  // captureScale rides the wound value too: for the necromancer (2.5) a
-  // break isn't just tempo — it re-arms the class's whole kill economy
-  // (the NEXT hit on that stone pays the bounty and marks the corpse), so
-  // the hunt must price it like the setup step it is. Exact no-op for
-  // every class whose scale is 1.
-  for (const id of wounds) {
-    const pos = state.tokens.find((t) => t.id === id)?.position ?? 0;
-    score += (MK_STD_WOUND_VALUE + MK_STD_WOUND_PER_TILE * pos) * captureScale;
   }
   if (m.landsOnShield) score += 250 + shieldExtra;
   if (m.to === PATH_LENGTH_PER_PLAYER) score += 300;
@@ -297,17 +277,14 @@ function scoreMove(
  *  for normal captures, scaled down a bit since it costs a charge and (for
  *  the non-collision case) doesn't remove the token outright.
  *
- *  A warded target costs the same PUSH_WARD_COST as a normal push (both are
- *  1), but travels PUSH_WARD_DISTANCE instead of PUSH_DISTANCE — same price,
- *  bigger effect. Sending it home strips Ward permanently (scored well above
- *  a normal send-home); even the non-collision case is worth a bit more
- *  than an equivalent normal push, since the longer knockback is more likely
- *  to shove the target out of the contested zone entirely or hand Ward off
- *  to a different token. */
+ *  RETIRED 2026-09-17: the Ward-tier pierce (PUSH_WARD_COST/DISTANCE, a
+ *  bigger knockback for the same price) is gone — getPushTargets now
+ *  excludes every protected stone (isProtected) outright, so a targetId
+ *  reaching this function is never warded and always travels PUSH_DISTANCE. */
 function scorePush(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  void power;
   const target = state.tokens.find((t) => t.id === targetId)!;
-  const warded = isWarded(state, power, target);
-  const distance = warded ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
+  const distance = PUSH_DISTANCE;
   const rawTo = target.position - distance;
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo,
@@ -316,19 +293,10 @@ function scorePush(state: GameState, power: PowerState, targetId: number, rand: 
   let score: number;
   if (sendsHome) {
     score = 350 + target.position * 8;
-    if (warded) score += 250; // sending a Warded token home is still a big win — removes Ward from play entirely
   } else {
     // Soft-push baseline scales with the ACTUAL distance moved — 180 per
-    // tile, chosen so this reduces to the exact pre-existing formula for a
-    // normal (unwarded) push: PUSH_DISTANCE=1 -> 180*1=180, byte-for-byte
-    // unchanged from before this fix. This replaces the old flat "+60 if
-    // warded" bonus, which assumed a warded soft-push always repositions
-    // the target meaningfully; now that PUSH_WARD_DISTANCE can legitimately
-    // be 0 (a mechanical no-op against a Warded target — spends the charge,
-    // target doesn't move at all), the bonus must scale down to zero too,
-    // or the bot repeats the exact "flat bonus quietly out-competes a
-    // strictly-better plain move" bug already fixed once each for
-    // scoreBulwark and scoreChargedShot in this file.
+    // tile: PUSH_DISTANCE=1 -> 180*1=180, byte-for-byte unchanged from
+    // before the Ward-tier retirement above.
     score = 180 * distance + target.position * 8;
   }
   score += rand() * 20;
@@ -351,9 +319,12 @@ function scorePush(state: GameState, power: PowerState, targetId: number, rand: 
  *  Push's shorter PUSH_DISTANCE often can't reach — clears the bar to beat
  *  an ordinary move or a Push. */
 function scoreChargedShot(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  void power;
   const target = state.tokens.find((t) => t.id === targetId)!;
-  const warded = isWarded(state, power, target);
-  const rawTo = target.position - (warded ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE);
+  // RETIRED 2026-09-17: same story as scorePush — getChargedShotTargets now
+  // excludes every protected stone outright, so the Ward-tier distance
+  // (CHARGED_SHOT_WARD_DISTANCE) never applies here any more.
+  const rawTo = target.position - CHARGED_SHOT_DISTANCE;
   const collides = state.tokens.some(
     (t) => t.id !== targetId && t.owner === target.owner && t.position === rawTo,
   );
@@ -393,11 +364,11 @@ function scoreUltimateStrike(state: GameState, targetId: number, rand: () => num
  *  batch-random-master-killer-games.ts). For a Rogue that is especially
  *  costly: Vanish is its ONLY defensive tool, so wasting ~85% of casts made the
  *  class look far weaker than it plays with the ability used defensively. The
- *  gate is the same one scoreReinforcedBulwark/scoreBless/scoreHeal already use
- *  (bulwarkFacesThreat's own doc records that adding it FLIPPED every
- *  second-charge Bulwark design from tanking the Warrior to improving it), and
- *  matches how a human uses a react-to-danger shield: cast it when a stone is
- *  actually reachable, not on spec.
+ *  gate is the same one scoreBless/scoreVigil already use (bulwarkFacesThreat's
+ *  own doc records that adding it FLIPPED every second-charge Bulwark design
+ *  from tanking the Warrior to improving it), and matches how a human uses a
+ *  react-to-danger shield: cast it when a stone is actually reachable, not on
+ *  spec.
  *
  *  The negative floor (score starts at -40) is kept underneath the gate as a
  *  second line of defense, and is itself the fix for an earlier real bug — a
@@ -415,11 +386,24 @@ function scoreUltimateStrike(state: GameState, targetId: number, rand: () => num
  *  threat gate now in front, the floor mostly matters as a tiebreak among
  *  genuinely-threatened tokens (well-advanced ones, position 12+, pull back
  *  toward/above zero) — occasional insurance on a valuable token when nothing
- *  better is on offer, not a default action. */
-function scoreBulwark(state: GameState, targetId: number, rand: () => number): number {
+ *  better is on offer, not a default action.
+ *
+ *  MK_WALL_STACK_PENALTY (2026-09-17, the wall rework): every wall already up
+ *  bleeds its owner WALL_BLEED/turn, so a Warrior piling a second or third one
+ *  on is buying upkeep it may not be able to sustain, not free insurance — the
+ *  penalty makes the bot prefer walling its MOST threatened stone once, not
+ *  stacking them reflexively. */
+const MK_WALL_STACK_PENALTY = 15;
+
+function ownWallCount(state: GameState, power: PowerState, owner: PlayerId): number {
+  return Object.keys(power.walls).filter((id) => state.tokens.find((t) => t.id === Number(id))?.owner === owner)
+    .length;
+}
+
+function scoreBulwark(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
   if (!bulwarkFacesThreat(state, target)) return -Infinity;
-  let score = -40 + target.position * 3;
+  let score = -40 + target.position * 3 - MK_WALL_STACK_PENALTY * ownWallCount(state, power, target.owner);
   score += rand() * 20;
   return score;
 }
@@ -449,26 +433,6 @@ function bulwarkFacesThreat(state: GameState, target: { position: number; owner:
   );
 }
 
-/** Score Reinforced Bulwark — the 2-charge, full-bank Bulwark that lasts
- *  and saves twice as long (see BULWARK_REINFORCED_TURNS). Requires a live
- *  threat (see bulwarkFacesThreat), then the same negative floor as
- *  scoreBulwark with steeper position scaling (5/tile vs 3) because doubled
- *  durability is worth most on the token with the most invested — and
- *  nothing else, so spending the whole bank still has to EARN its slot over
- *  a plain move/Charge, the same discipline scoreChargedShot applies to
- *  Archer's own full-bank spend. Scaling swept at 4/5/6 per tile, 30000
- *  games each: 5 gave the best combined Warrior matchup distance-from-50
- *  (aw 50.9-51.6/48.4-49.1, mw 54.7-55.0/45.0-45.3, fire rate 0.4-1.1/g);
- *  4 under-used it (0.28-0.79/g, aw 48.1), 6 was flat-to-worse on aw
- *  (48.4) for no mw gain beyond noise. */
-function scoreReinforcedBulwark(state: GameState, targetId: number, rand: () => number): number {
-  const target = state.tokens.find((t) => t.id === targetId)!;
-  if (!bulwarkFacesThreat(state, target)) return -Infinity;
-  let score = -40 + target.position * 5;
-  score += rand() * 20;
-  return score;
-}
-
 /** Score Rogue's Vanish. Vanish IS Bulwark's mechanic under a Rogue cast (see
  *  VANISH_COST), and it is scored with the SAME threat-gated, negative-floor
  *  discipline scoreBulwark uses — a Rogue vanishes a stone that's actually in
@@ -487,8 +451,8 @@ function scoreReinforcedBulwark(state: GameState, targetId: number, rand: () => 
  *  a correctness/identity property that helps a human Rogue, not a tempo the
  *  AI should spend turns chasing. Kept as its own function (not folded back
  *  into scoreBulwark) purely to hold this finding at the call site. */
-function scoreVanish(state: GameState, targetId: number, rand: () => number): number {
-  return scoreBulwark(state, targetId, rand);
+function scoreVanish(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  return scoreBulwark(state, power, targetId, rand);
 }
 
 /** Score Re-flip: only worth it when the CURRENT flip is bad — zero, or a
@@ -532,13 +496,14 @@ function scoreReflip(currentMoveCount: number, flip: number, rand: () => number)
  *  bounty the blast deliberately doesn't pay); soft shoves modest. First
  *  rework-pass values — sweep against the bars. */
 function scoreCorpseExplosion(state: GameState, power: PowerState, victims: number[], rand: () => number): number {
-  const mover = state.currentPlayer;
+  void power;
   let score = 0;
   for (const id of victims) {
     const t = state.tokens.find((tok) => tok.id === id)!;
-    // Lethal blast (2026-09-13): every unprotected victim is a send-home; a
-    // blessed one is only wounded, worth roughly a Push's break.
-    score += isBlessed(power, t.id) ? 140 : 380 + t.position * 8;
+    // Lethal blast: every victim is a send-home — getCorpseExplosionTargets
+    // already excludes anything protected (walled/warded/vanished/shield
+    // tile), so there is no wound tier left to price separately.
+    score += 380 + t.position * 8;
   }
   // Desecration forfeits the corpse Revive would have raised — when the
   // body is still banked. Since the grave split (PowerState.grave) the
@@ -588,29 +553,37 @@ function scoreExhume(rand: () => number): number {
 /** Score Cleric's Bless — a TURN-KEEPING cast (applyBless's contract), so
  *  this is not "instead of the move" but "before it": any winning score
  *  just fires the cast first and the loop re-decides with the same flip.
- *  The discipline the file's thrice-fixed defensive-overspend bug demands
- *  is therefore about MANA, not tempo: a threatened stone (the same
- *  bulwarkFacesThreat window) is the premium buy — the very next enemy
- *  landing pays them nothing — while a quiet bless on an advanced stone
- *  is a modest race-insurance purchase that only fires when the mana has
- *  no better use pending. */
+ *  RETIRED the old quiet branch (2026-09-17, the wall rework): a Bless now
+ *  RAISES A WALL, which bleeds WALL_BLEED every turn it's up — the old
+ *  "40 + pos*4, always fire on a quiet advanced stone" branch is exactly
+ *  the "small flat positive out-competes real board progress" bug this
+ *  file's discipline (scoreBulwark's history note) warns against, except
+ *  now it's a recurring mana furnace instead of a one-time waste. Same
+ *  threat gate as scoreBulwark/scoreVigil: cast it when the wall would
+ *  actually stop something THIS turn. */
 function scoreBless(state: GameState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
-  let score = bulwarkFacesThreat(state, target) ? 220 + target.position * 5 : 40 + target.position * 4;
+  if (!bulwarkFacesThreat(state, target)) return -Infinity;
+  let score = 220 + target.position * 5;
   score += rand() * 20;
   return score;
 }
 
-/** Score Cleric's Heal — a TURN-ENDING cast (unlike Bless; see
- *  HEAL_COST's doc), so it pays the full tempo price and gets the full
- *  tempo discipline: under live threat the mend is worth a move (the
- *  incoming kill becomes a wound again — priced near a capture, below a
- *  win); quiet mends fall to the file's standard negative-floor rule so
- *  they only fire on a well-advanced stone when nothing better is on
- *  offer. */
-function scoreHeal(state: GameState, targetId: number, rand: () => number): number {
-  const target = state.tokens.find((t) => t.id === targetId)!;
-  let score = bulwarkFacesThreat(state, target) ? 300 + target.position * 5 : -30 + target.position * 3;
+/** Score Cleric's Vigil (2026-09-17, replaces Heal under the wall rework):
+ *  no target — canCastVigil already gates it to "at least one wall up and
+ *  the bank can afford it," but that's not enough on its own (same lesson
+ *  as scoreBulwark's history note): waiving upkeep on a SINGLE wall is
+ *  worse than just paying it (VIGIL_COST is the same as WALL_BLEED's
+ *  usual bill), so Vigil is worthless until the Cleric is juggling 2+
+ *  walls, and even then it's only worth the turn it costs when the bank
+ *  can't already cover next turn's total bill on its own — the bailout,
+ *  not a reflexive turn-keeper. STARTING VALUES, not yet sim-tuned. */
+function scoreVigil(state: GameState, power: PowerState, mover: PlayerId, rand: () => number): number {
+  const wallCount = ownWallCount(state, power, mover);
+  if (wallCount < 2) return -Infinity;
+  const bankAfterCast = power.charges[mover] - VIGIL_COST;
+  if (bankAfterCast >= wallCount * wallUpkeepFor(power, mover)) return -Infinity; // next turn's bill is already covered
+  let score = 200 + 40 * wallCount;
   score += rand() * 20;
   return score;
 }
@@ -637,15 +610,16 @@ function scoreBenediction(poolSize: number, rand: () => number): number {
  *  positive reflexively out-competing a genuine capture chance every
  *  single turn. STARTING VALUES, not yet sim-tuned. */
 /** Score Rogue's Backstab (restored 2026-09-13): a guaranteed hit, scored
- *  like Blink Strike/Warpath's guaranteed capture — EXCEPT a Cleric-blessed
- *  target only wounds (a charge back and the shelter denied, but the stone
- *  survives), priced closer to a soft push than a kill. Costs half the
- *  4-bank, so it competes with Pickpocket + Vanish for the same mana; the
- *  bar it clears is a real capture's. STARTING VALUES, not yet sim-tuned. */
+ *  like Blink Strike/Warpath's guaranteed capture. RETIRED the wound tier
+ *  2026-09-17 — getBackstabTargets now excludes every protected target
+ *  outright (isProtected), so a target reaching this function is always a
+ *  real kill. Costs half the 4-bank, so it competes with Pickpocket +
+ *  Vanish for the same mana; the bar it clears is a real capture's.
+ *  STARTING VALUES, not yet sim-tuned. */
 function scoreBackstab(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
+  void power;
   const target = state.tokens.find((t) => t.id === targetId)!;
-  const wounds = isBlessed(power, targetId);
-  return (wounds ? 260 : 460) + target.position * 10 + rand() * 20;
+  return 460 + target.position * 10 + rand() * 20;
 }
 
 function scorePickpocket(power: PowerState, foe: PlayerId, rand: () => number): number {
@@ -693,10 +667,6 @@ const MK_SACRIFICE_PER_TILE = 34;
  *  victim's own per-tile value, so trading a deep runner for a shallow one
  *  always loses. Only a genuinely valuable target justifies the ritual. */
 const MK_SACRIFICE_COST_PER_TILE = 40;
-/** Nothing else in the kit reaches a Warded stone; a Blessed one would only
- *  be wounded by a mortal hit, paying the cleric's engine nothing. */
-const MK_SACRIFICE_WARDED_BONUS = 140;
-const MK_SACRIFICE_BLESSED_BONUS = 90;
 /** Giving up the warlock's LAST on-board stone hands the foe a free board. */
 const MK_SACRIFICE_LAST_STONE_PENALTY = 400;
 
@@ -730,17 +700,18 @@ function scoreCurse(state: GameState, power: PowerState, targetId: number, rand:
 }
 
 /** Score Warlock's Sacrifice — the full-bank, turn-ending trade: the
- *  warlock's own LEAD RUNNER for a guaranteed kill through Ward and
- *  Blessing. Priced as a capture MINUS the real cost of the stone given,
- *  and that cost dominates by design (MK_SACRIFICE_COST_PER_TILE exceeds
- *  MK_SACRIFICE_PER_TILE): applySacrifice always spends the MOST-advanced
- *  on-board stone, so trading down is always a loss and the cast only
- *  clears the bar when the target is worth more than the runner given —
- *  which is what stopped it being an infinite attrition engine (see
- *  applySacrifice's doc for the before/after numbers). The premium cases
- *  are exactly the ones no other tool reaches: a Warded target (the whole
- *  reason the pierce exists) and a Blessed one (a normal hit would only
- *  wound it and pay the cleric's engine nothing). */
+ *  warlock's own LEAD RUNNER for a guaranteed kill. RETIRED its Ward/
+ *  Blessing pierce 2026-09-17 (walls are absolute now, and Ward stopped
+ *  being pierceable by anything below an ultimate too) — getSacrificeTargets
+ *  excludes every protected stone outright, the same identity loss
+ *  Backstab and Reckless Swing take (recorded risk: watch Warlock <45 in
+ *  the C1 grid). Priced as a capture MINUS the real cost of the stone
+ *  given, and that cost dominates by design (MK_SACRIFICE_COST_PER_TILE
+ *  exceeds MK_SACRIFICE_PER_TILE): applySacrifice always spends the
+ *  MOST-advanced on-board stone, so trading down is always a loss and the
+ *  cast only clears the bar when the target is worth more than the runner
+ *  given — which is what stopped it being an infinite attrition engine
+ *  (see applySacrifice's doc for the before/after numbers). */
 function scoreSacrifice(state: GameState, power: PowerState, targetId: number, rand: () => number): number {
   const mover = state.currentPlayer;
   const target = state.tokens.find((t) => t.id === targetId)!;
@@ -753,8 +724,6 @@ function scoreSacrifice(state: GameState, power: PowerState, targetId: number, r
   // own capture shape — minus the progress the ritual throws away.
   let score =
     MK_SACRIFICE_FLOOR + MK_SACRIFICE_PER_TILE * target.position - MK_SACRIFICE_COST_PER_TILE * cost;
-  if (isWarded(state, power, target)) score += MK_SACRIFICE_WARDED_BONUS; // nothing else in the kit touches it
-  if (isBlessed(power, targetId)) score += MK_SACRIFICE_BLESSED_BONUS; // a mortal hit would merely wound
   // Giving up the warlock's LAST on-board stone hands the foe a free board
   // — never worth a single kill.
   if (mine.length === 1) score -= MK_SACRIFICE_LAST_STONE_PENALTY;
@@ -890,9 +859,6 @@ const MK_RECKLESS_RECOIL_PER_TILE = 18;
 /** Recoiling all the way home is a whole stone's progress gone — priced as
  *  its own event rather than extrapolating the per-tile term. */
 const MK_RECKLESS_SELF_HOME_PENALTY = 260;
-/** The premium case: nothing else the barbarian owns can touch a Bulwarked
- *  or Vanished stone, so those are exactly what this is for. */
-const MK_RECKLESS_PIERCE_BONUS = 120;
 /** Whirlwind's base — the full bank for a capture plus scatter. */
 const MK_WHIRLWIND_FLOOR = 120;
 /** Per stone the spin actually catches (captured or shoved). */
@@ -902,7 +868,10 @@ const MK_WHIRLWIND_PER_VICTIM = 95;
  *  halves are priced explicitly against each other so the bot takes the
  *  trade when the target is worth more than the ground, and declines when
  *  it isn't (notably: swinging with a deep runner to kill a shallow stone
- *  is a losing trade, and the recoil term says so). */
+ *  is a losing trade, and the recoil term says so). RETIRED its wall
+ *  pierce 2026-09-17 (walls are absolute now) — getRecklessSwingTargets
+ *  excludes every protected victim outright, so there is no premium tier
+ *  left to price; recorded identity loss, same story as Sacrifice's. */
 function scoreRecklessSwing(
   state: GameState,
   power: PowerState,
@@ -918,7 +887,6 @@ function scoreRecklessSwing(
   let score = MK_RECKLESS_FLOOR + MK_RECKLESS_PER_TILE * victim.position;
   score -= MK_RECKLESS_RECOIL_PER_TILE * Math.min(swinger.position, RECKLESS_SELF_KNOCKBACK);
   if (swinger.position - RECKLESS_SELF_KNOCKBACK < 0) score -= MK_RECKLESS_SELF_HOME_PENALTY;
-  if (isBulwarked(power, victim)) score += MK_RECKLESS_PIERCE_BONUS; // the one tool that reaches it
   return score + rand() * 20;
 }
 
@@ -1154,15 +1122,12 @@ function pickStandardPowerAction(
   if (cls === "warrior" && charges >= 1) {
     const bulwarkTargets = getBulwarkTargets(state, power, mover);
     for (const targetId of bulwarkTargets) {
-      const score = scoreBulwark(state, targetId, rand);
+      const score = scoreBulwark(state, power, targetId, rand);
       if (score > bestScore) {
         bestScore = score;
         best = { kind: "bulwark", tokenId: targetId };
       }
     }
-    // Reinforced Bulwark: the full-bank cast, offered alongside the plain
-    // one — same target pool, its own threat-gated scoring.
-    // Reinforced Bulwark retired 2026-09-13 (BULWARK_REINFORCED_RETIRED).
   }
 
   if (cls === "necromancer") {
@@ -1211,11 +1176,11 @@ function pickStandardPowerAction(
         best = { kind: "bless", targetTokenId: targetId };
       }
     }
-    for (const targetId of getHealTargets(state, power, mover)) {
-      const score = scoreHeal(state, targetId, rand);
+    if (canCastVigil(state, power, mover)) {
+      const score = scoreVigil(state, power, mover, rand);
       if (score > bestScore) {
         bestScore = score;
-        best = { kind: "heal", targetTokenId: targetId };
+        best = { kind: "vigil" };
       }
     }
     if (power.ultimateReady[mover]) {
@@ -1258,7 +1223,7 @@ function pickStandardPowerAction(
     // own doc for the simulation that rejected that idea.
     if (charges >= VANISH_COST) {
       for (const targetId of getVanishTargets(state, power, mover)) {
-        const score = scoreVanish(state, targetId, rand);
+        const score = scoreVanish(state, power, targetId, rand);
         if (score > bestScore) {
           bestScore = score;
           best = { kind: "vanish", tokenId: targetId };
@@ -1447,7 +1412,6 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   if (cls === "warrior" && charges >= 1) {
     const bulwarkTargets = getBulwarkTargets(state, power, mover);
     for (const id of bulwarkTargets) out.push({ kind: "bulwark", tokenId: id });
-    // Reinforced Bulwark retired 2026-09-13 (BULWARK_REINFORCED_RETIRED).
   }
   if (cls === "necromancer" && getReviveSpawnTile(state, power, mover) !== null) {
     // One candidate, no payload — the corpse determines everything.
@@ -1463,7 +1427,7 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
   }
   if (cls === "cleric") {
     for (const id of getBlessTargets(state, power, mover)) out.push({ kind: "bless", targetTokenId: id });
-    for (const id of getHealTargets(state, power, mover)) out.push({ kind: "heal", targetTokenId: id });
+    if (canCastVigil(state, power, mover)) out.push({ kind: "vigil" });
     if (power.ultimateReady[mover] && getBenedictionTargets(state, power, mover).length > 0) {
       out.push({ kind: "benediction" });
     }
@@ -1635,25 +1599,10 @@ const MK_EVAL_EXHUME_HELD = 20;
  *  simulated thrall (same-flip follow-up + MK_EVAL_THRALL) carries the
  *  real value. */
 const MK_EVAL_REVIVE_BIAS = 20;
-/** Cleric (2026-07-21): a live blessing on an own on-board stone. Priced
- *  above MK_EVAL_BULWARK's 12 — it never expires and denies the attacker
- *  the kill's whole economy — but well under a capture's swing, so hard
- *  spends the bank on one only when the position justifies it (the
- *  threat-discount below carries the real defensive value). */
-const MK_EVAL_BLESSED = 20;
-/** A wounded stone: mostly a Heal option — small, so hard actually mends
- *  when threatened rather than hoarding the mana. */
-const MK_EVAL_WOUNDED = 4;
-/** How much of the normal capture-threat penalty a BLESSED token still
- *  pays: it survives the first hit, so its exposure is real but heavily
- *  discounted (the attacker must spend two turns, and the first pays them
- *  nothing). Not zero — a blessed stone deep in enemy reach still ties
- *  down the Heal budget. */
-const MK_EVAL_BLESSED_THREAT_SCALE = 0.4;
 /** Warlock (2026-07-26): a live Curse of Chains on an own on-board stone,
  *  at full duration. CURSE_SLOW tiles stolen from every move that stone
- *  makes for CURSE_TURNS — priced above MK_EVAL_BULWARK's insurance (this
- *  is realized tempo loss, not a contingency) but below a blessing's
+ *  makes for CURSE_TURNS — priced above MK_EVAL_WALL's insurance (this
+ *  is realized tempo loss, not a contingency) but below a wall's
  *  outright denied kill. Decays with the remaining turns, so hard sees the
  *  chains loosening. */
 const MK_EVAL_CURSED = 16;
@@ -1671,9 +1620,20 @@ const MK_EVAL_HAMSTRUNG = 34;
 const MK_EVAL_RAGE = 26;
 /** Live shield-streak progress toward that ultimate, per landing banked. */
 const MK_EVAL_STREAK = 12;
-/** An active Bulwark on an own token — insurance, real but modest (it
- *  expires on its own; see BULWARK_TURNS). */
-const MK_EVAL_BULWARK = 12;
+/** A live wall (Bulwark or Blessing) on an own token, FACING A THREAT —
+ *  the one-ply search only cares about protection it can actually cash in
+ *  this position, the same reasoning bulwarkFacesThreat gates the standard
+ *  tier's cast on. Unlike the old expiring Bulwark this insurance is
+ *  absolute (nothing below an ultimate reaches it) but it isn't free — see
+ *  MK_EVAL_WALL_UPKEEP. STARTING VALUE, not yet sim-tuned. */
+const MK_EVAL_WALL = 14;
+/** Per wall an own token is currently holding, charged against MK_EVAL_WALL
+ *  every ply: the one-ply search never simulates tickWallUpkeepForNewTurn,
+ *  so without this term a wall reads as pure free insurance and hard walls
+ *  on sight. Sized below WALL_BLEED's real per-turn cost on purpose — the
+ *  search only sees one ply of it, not the recurring bill. STARTING VALUE,
+ *  not yet sim-tuned. */
+const MK_EVAL_WALL_UPKEEP = 6;
 /** A certain win outranks any expectation sum (max weighted contribution of
  *  a probabilistic win is < 1 · MK_WIN_VALUE). */
 const MK_WIN_VALUE = 1_000_000;
@@ -1721,36 +1681,37 @@ function mkEvalSide(state: GameState, power: PowerState, player: PlayerId): numb
     if (
       tile.isContested &&
       tile.type !== "shield" &&
-      !isWarded(state, power, t) &&
-      !isBulwarked(power, t)
+      !isProtected(state, power, t)
     ) {
       // Dying to a necromancer pays their full soul bounty and banks a
       // corpse — exposure to one is priced up (MK_EVAL_NECRO_PREY_SCALE).
       // Dying to a rogue drains a mana too (Larceny) — a smaller version
-      // of the same idea (MK_EVAL_ROGUE_PREY_SCALE). A BLESSED token's
-      // exposure is discounted instead: it survives the first hit
-      // (MK_EVAL_BLESSED_THREAT_SCALE).
+      // of the same idea (MK_EVAL_ROGUE_PREY_SCALE). No partial-discount
+      // tier left for a walled token any more (2026-09-17): isProtected
+      // already excludes it from this whole branch outright — a wall's
+      // protection is all-or-nothing now, not a survive-the-first-hit
+      // discount.
       const preyScale =
         power.classes[foe] === "necromancer"
           ? MK_EVAL_NECRO_PREY_SCALE
           : power.classes[foe] === "rogue"
             ? MK_EVAL_ROGUE_PREY_SCALE
             : 1;
-      const threatScale = preyScale * (isBlessed(power, t.id) ? MK_EVAL_BLESSED_THREAT_SCALE : 1);
       for (const e of state.tokens) {
         if (effectiveOwner(power, e) === player || e.position < 0 || e.position >= PATH_LENGTH_PER_PLAYER)
           continue;
         const gap = t.position - e.position;
         if (gap >= 1 && gap <= 4) {
           score -=
-            (threatScale * (MK_EVAL_THREAT_BASE + MK_EVAL_THREAT_PER_TILE * t.position) * FLIP_WEIGHTS[gap]) /
+            (preyScale * (MK_EVAL_THREAT_BASE + MK_EVAL_THREAT_PER_TILE * t.position) * FLIP_WEIGHTS[gap]) /
             FLIP_WEIGHT_TOTAL;
         }
       }
     }
-    if (isBulwarked(power, t)) score += MK_EVAL_BULWARK;
-    if (power.vitality[t.id] === "blessed") score += MK_EVAL_BLESSED;
-    if (power.vitality[t.id] === "wounded") score += MK_EVAL_WOUNDED;
+    if (isWalled(power, t)) {
+      if (bulwarkFacesThreat(state, t)) score += MK_EVAL_WALL;
+      score -= MK_EVAL_WALL_UPKEEP;
+    }
     // Curse of Chains on one of MY stones is a real, ongoing tax — this is
     // the term that lets hard's one-ply search see the hex at all (its
     // payoff otherwise lands entirely past the horizon; see mkCurseValue).
@@ -1895,10 +1856,11 @@ function mkReflipValue(state: GameState, power: PowerState, me: PlayerId): numbe
  *  flip stays live, no re-roll), so its value is the best same-flip
  *  follow-up on the post-cast board — mkReviveValue's exact shape, and the
  *  same trap it exists to avoid: mkValueAfterAction's own-turn arm would
- *  average over a fresh flip the mover never gets. (Heal ends the turn and
- *  values through the normal mkSimulate path.) The spent mana is priced by
- *  MK_EVAL_CHARGE, the blessing by MK_EVAL_BLESSED and the threat discount
- *  — so hard blesses when the exchange plus the follow-up beats holding. */
+ *  average over a fresh flip the mover never gets. (Vigil ends the turn
+ *  and values through the normal mkSimulate path, same as Heal used to.)
+ *  The spent mana is priced by MK_EVAL_CHARGE, the wall it raises by
+ *  MK_EVAL_WALL (once it faces a threat) — so hard blesses when the
+ *  exchange plus the follow-up beats holding. */
 function mkBlessingValue(
   state: GameState,
   power: PowerState,
@@ -2075,7 +2037,7 @@ function mkSimulate(
     case "warpath":
       return applyWarpath(state, power, c.targetTokenId, mover);
     case "bulwark":
-      return applyBulwark(state, power, c.tokenId, mover, c.reinforced ?? false);
+      return applyBulwark(state, power, c.tokenId, mover);
     case "revive":
       return applyRevive(state, power, mover);
     case "corpseExplosion":
@@ -2084,8 +2046,8 @@ function mkSimulate(
       return applyExhume(state, power, c.targetTokenId, mover);
     case "bless":
       return applyBless(state, power, c.targetTokenId, mover);
-    case "heal":
-      return applyHeal(state, power, c.targetTokenId, mover);
+    case "vigil":
+      return applyVigil(state, power, mover);
     case "benediction":
       return applyBenediction(state, power, mover);
     case "vanish":

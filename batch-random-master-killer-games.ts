@@ -27,7 +27,7 @@ import {
   applyCorpseExplosion,
   applyExhume,
   applyGrandHeist,
-  applyHeal,
+  applyVigil,
   applyPickpocket,
   applyPowerMove,
   applyPush,
@@ -62,6 +62,8 @@ import {
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
   tickThrallForNewTurn,
+  tickWallUpkeepForNewTurn,
+  tickVanishForNewTurn,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -91,8 +93,12 @@ interface GameResult {
     blinkStrike: number;
     warpath: number;
     bulwark: number;
-    bulwarkReinforced: number; // full-bank Reinforced Bulwark casts (subset of bulwark)
+    bulwarkReinforced: number; // RETIRED (BULWARK_REINFORCED_RETIRED) — always 0, kept for shape
     bulwarkBlock: number;
+    wallsRaised: number; // new walls raised this game (Bulwark + Bless + Benediction), the wallLife denominator
+    wallTurns: number; // sum, over every own-turn tick, of walls still up AFTER that turn's upkeep — wallLife = wallTurns/wallsRaised
+    wallsDropped: number; // walls that fell because their owner couldn't pay wallUpkeepFor
+    bleed: number; // total mana actually paid to wallUpkeepFor, summed over the game
     revive: number; // full-soul-bank Revive casts (thralls raised)
     corpseExplosion: number; // 2-soul blasts (the corpse's cheap spend)
     explosionSendsHome: number; // blast victims sent all the way home
@@ -101,7 +107,7 @@ interface GameResult {
     thrallExpired: number; // thralls that crumbled at full duration (vs being killed)
     exhume: number;
     bless: number; // Cleric Bless casts
-    heal: number; // Cleric Heal casts
+    vigil: number; // Cleric Vigil casts (replaces Heal under the wall rework)
     benediction: number; // Benediction ultimates fired
     wound: number; // blessings broken (captures/knockbacks absorbed as wounds)
     mend: number; // stones mended by Sanctified Ground shield landings
@@ -181,6 +187,22 @@ function takeTurn(
   // Inspiration expiry, same slot: a faded stone moves at its true speed.
   power = tickInspireForNewTurn(state, power).power;
   power = tickDarkBargainForNewTurn(power);
+  // Wall upkeep + Vanish countdown, same slot as room-engine's
+  // commitTurnFlip: after the other ticks, before move generation, so a
+  // wall dropped for non-payment unprotects that stone THIS turn's move
+  // list. wallsDropped/bleed feed the sweep's wallLife/wallDrop-g/bleed-g
+  // reads (Spec D).
+  const upkeepResult = tickWallUpkeepForNewTurn(state, power);
+  power = upkeepResult.power;
+  const wallTick: Partial<GameResult["usage"]> = {
+    ...(upkeepResult.paid > 0 ? { bleed: upkeepResult.paid } : {}),
+    ...(upkeepResult.droppedTokenIds.length > 0 ? { wallsDropped: upkeepResult.droppedTokenIds.length } : {}),
+  };
+  const ownWallsAfterUpkeep = Object.keys(power.walls).filter(
+    (id) => state.tokens.find((t) => t.id === Number(id))?.owner === mover,
+  ).length;
+  if (ownWallsAfterUpkeep > 0) wallTick.wallTurns = ownWallsAfterUpkeep;
+  power = tickVanishForNewTurn(state, power).power;
   let moves = getLegalPowerMoves(state, power, flip);
   // Warrior Bulwark: tick the mover's own countdown, and consume any
   // Bulwark this exact flip's moves reveal as blocked for the opponent —
@@ -276,9 +298,10 @@ function takeTurn(
   // out to be — Bulwark blocks revealed along the way, plus any Revives the
   // loop applied (they really happened even if the turn then dead-ends).
   const turnUsage: Partial<GameResult["usage"]> = {
+    ...wallTick,
     ...(bulwarkBlockedThisTurn ? { bulwarkBlock: 1 } : {}),
     ...(revives > 0 ? { revive: revives } : {}),
-    ...(blessCasts > 0 ? { bless: blessCasts } : {}),
+    ...(blessCasts > 0 ? { bless: blessCasts, wallsRaised: blessCasts } : {}),
     ...(pickpocketCasts > 0 ? { pickpocket: pickpocketCasts } : {}),
     ...(curseCasts > 0 ? { curse: curseCasts } : {}),
     ...(snareCasts > 0 ? { snare: snareCasts } : {}),
@@ -412,13 +435,13 @@ function takeTurn(
       };
     }
     case "bulwark": {
-      const r = applyBulwark(state, power, action.tokenId, mover, action.reinforced ?? false);
+      const r = applyBulwark(state, power, action.tokenId, mover);
       return {
         state: r.state,
         power: r.power,
         flips,
         sweepSize: 0,
-        usage: { ...turnUsage, bulwark: 1, ...(action.reinforced ? { bulwarkReinforced: 1 } : {}) },
+        usage: { ...turnUsage, bulwark: 1, wallsRaised: 1 },
       };
     }
     case "corpseExplosion": {
@@ -441,13 +464,26 @@ function takeTurn(
       const r = applyExhume(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, exhume: 1 } };
     }
-    case "heal": {
-      const r = applyHeal(state, power, action.targetTokenId, mover);
-      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, heal: 1 } };
+    case "vigil": {
+      const r = applyVigil(state, power, mover);
+      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, vigil: 1 } };
     }
     case "benediction": {
       const r = applyBenediction(state, power, mover);
-      return { state: r.state, power: r.power, flips, sweepSize: 0, usage: { ...turnUsage, benediction: 1 } };
+      return {
+        state: r.state,
+        power: r.power,
+        flips,
+        sweepSize: 0,
+        usage: {
+          ...turnUsage,
+          benediction: 1,
+          // Summed, not overwritten: a Cleric can Bless (turn-keeping) some
+          // number of times before finally Benedicting the same turn, and
+          // turnUsage.wallsRaised already carries that earlier count.
+          ...(r.blessedTokenIds.length > 0 ? { wallsRaised: (turnUsage.wallsRaised ?? 0) + r.blessedTokenIds.length } : {}),
+        },
+      };
     }
     case "vanish": {
       const r = applyVanish(state, power, action.tokenId, mover);
@@ -602,6 +638,10 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     bulwark: 0,
     bulwarkReinforced: 0,
     bulwarkBlock: 0,
+    wallsRaised: 0,
+    wallTurns: 0,
+    wallsDropped: 0,
+    bleed: 0,
     revive: 0,
     corpseExplosion: 0,
     explosionSendsHome: 0,
@@ -610,7 +650,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     thrallExpired: 0,
     exhume: 0,
     bless: 0,
-    heal: 0,
+    vigil: 0,
     benediction: 0,
     wound: 0,
     mend: 0,
@@ -664,6 +704,12 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.bulwark) usage.bulwark++;
     if (r.usage.bulwarkReinforced) usage.bulwarkReinforced++;
     if (r.usage.bulwarkBlock) usage.bulwarkBlock++;
+    // Wall counters arrive as counts (several walls can be raised/dropped,
+    // or several turns' upkeep paid, within one takeTurn call).
+    usage.wallsRaised += r.usage.wallsRaised ?? 0;
+    usage.wallTurns += r.usage.wallTurns ?? 0;
+    usage.wallsDropped += r.usage.wallsDropped ?? 0;
+    usage.bleed += r.usage.bleed ?? 0;
     // Revives arrive as counts, not flags (the non-turn-ending loop shape),
     // so add rather than the boolean ++ style.
     usage.revive += r.usage.revive ?? 0;
@@ -674,7 +720,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.thrallExpired) usage.thrallExpired++;
     if (r.usage.exhume) usage.exhume++;
     if (r.usage.bless) usage.bless++;
-    if (r.usage.heal) usage.heal++;
+    if (r.usage.vigil) usage.vigil++;
     if (r.usage.benediction) usage.benediction++;
     // Wounds/mends arrive as counts (several can land in one move).
     usage.wound += r.usage.wound ?? 0;
@@ -772,6 +818,11 @@ for (const [a, b] of matchups) {
   const avgBulwark = mean(results.map((r) => r.usage.bulwark));
   const avgBulwarkReinforced = mean(results.map((r) => r.usage.bulwarkReinforced));
   const avgBulwarkBlock = mean(results.map((r) => r.usage.bulwarkBlock));
+  const totalWallsRaised = results.reduce((a, r) => a + r.usage.wallsRaised, 0);
+  const totalWallTurns = results.reduce((a, r) => a + r.usage.wallTurns, 0);
+  const wallLife = totalWallsRaised > 0 ? totalWallTurns / totalWallsRaised : 0;
+  const avgWallsDropped = mean(results.map((r) => r.usage.wallsDropped));
+  const avgBleed = mean(results.map((r) => r.usage.bleed));
   const avgRevive = mean(results.map((r) => r.usage.revive));
   const avgExplosion = mean(results.map((r) => r.usage.corpseExplosion));
   const avgExplosionHome = mean(results.map((r) => r.usage.explosionSendsHome));
@@ -780,7 +831,7 @@ for (const [a, b] of matchups) {
   const avgThrallExpired = mean(results.map((r) => r.usage.thrallExpired));
   const avgExhume = mean(results.map((r) => r.usage.exhume));
   const avgBless = mean(results.map((r) => r.usage.bless));
-  const avgHeal = mean(results.map((r) => r.usage.heal));
+  const avgVigil = mean(results.map((r) => r.usage.vigil));
   const avgBenediction = mean(results.map((r) => r.usage.benediction));
   const avgWound = mean(results.map((r) => r.usage.wound));
   const avgMend = mean(results.map((r) => r.usage.mend));
@@ -819,10 +870,11 @@ for (const [a, b] of matchups) {
       `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  blink/g=${avgBlink.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
       `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
       `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}` +
+      `  wallLife=${wallLife.toFixed(2)}  wallDrop/g=${avgWallsDropped.toFixed(2)}  bleed/g=${avgBleed.toFixed(2)}` +
       `  revive/g=${avgRevive.toFixed(2)}  explode/g=${avgExplosion.toFixed(3)}  explodeHome/g=${avgExplosionHome.toFixed(3)}` +
       `  thrallKill/g=${avgThrallKill.toFixed(3)}  corpseDeny/g=${avgCorpseDeny.toFixed(3)}` +
       `  thrallExpire/g=${avgThrallExpired.toFixed(3)}  exhume/g=${avgExhume.toFixed(4)}` +
-      `  bless/g=${avgBless.toFixed(2)}  heal/g=${avgHeal.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
+      `  bless/g=${avgBless.toFixed(2)}  vigil/g=${avgVigil.toFixed(2)}  benediction/g=${avgBenediction.toFixed(4)}` +
       `  wound/g=${avgWound.toFixed(2)}  mend/g=${avgMend.toFixed(2)}` +
       `  pickpocket/g=${avgPickpocket.toFixed(2)}  vanish/g=${avgVanish.toFixed(2)}  backstab/g=${avgBackstab.toFixed(2)}  grandHeist/g=${avgGrandHeist.toFixed(4)}` +
       `  curse/g=${avgCurse.toFixed(2)}  sacrifice/g=${avgSacrifice.toFixed(3)}` +

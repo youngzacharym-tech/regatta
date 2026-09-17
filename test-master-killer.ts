@@ -12,16 +12,12 @@ import { BOARD_LAYOUT, PATH_LENGTH_PER_PLAYER, type GameState, type PlayerId, ty
 import {
   BLESS_COST,
   BLESSING_CAP,
-  BULWARK_REINFORCED_SAVES,
-  BULWARK_REINFORCED_TURNS,
   BULWARK_TURNS,
   CHARGE_CAP,
   ESCAPE_CHARGES,
   CHARGED_SHOT_COST,
-  BULWARK_REINFORCED_COST,
   CHARGE_SWEEP_CAP,
   CHARGED_SHOT_DISTANCE,
-  CHARGED_SHOT_WARD_DISTANCE,
   CORPSE_EXPLOSION_COST,
   CURSE_COST,
   CURSE_SLOW,
@@ -47,14 +43,12 @@ import {
   TRAP_BOUNTY,
   TRAP_KNOCKBACK,
   WILD_HUNT_FREEZE_TURNS,
-  HEAL_COST,
+  VIGIL_COST,
   NECRO_CHARGE_CAP,
   PICKPOCKET_COST,
   PICKPOCKET_RETIRED,
   PICKPOCKET_STEAL,
   PUSH_DISTANCE,
-  PUSH_WARD_COST,
-  PUSH_WARD_DISTANCE,
   REFLIPS_PER_TURN,
   REFLIP_COST,
   REVIVE_COST,
@@ -64,6 +58,10 @@ import {
   ULTIMATE_STREAK,
   VANISH_COST,
   VANISH_TURNS,
+  WALL_BLEED,
+  WALL_BLEED_MIN,
+  HOLD_THE_LINE_DISCOUNT,
+  wallUpkeepFor,
   applyBless,
   applyBenediction,
   applyBlinkStrike,
@@ -97,16 +95,16 @@ import {
   applyWarpath,
   breakShieldStreak,
   canReflipAgain,
-  consumeBulwarkBlocks,
+  canCastVigil,
+  canHoldWall,
   effectiveOwner,
-  applyHeal,
+  applyVigil,
   getBenedictionTargets,
   getBlessTargets,
   getBlinkStrikeTargets,
   getBulwarkBlockedIds,
   getBulwarkTargets,
   getGrandHeistTargets,
-  getHealTargets,
   getChargedShotTargets,
   getCorpseExplosionTargets,
   getCurseTargets,
@@ -136,16 +134,20 @@ import {
   isCursed,
   isHamstrung,
   isInspired,
+  isProtected,
+  isVanished,
+  isWalled,
   isWarded,
   rageFor,
   ragedToken,
   resetTurnFlags,
-  tickBulwarkExpiry,
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
   tickCurseForNewTurn,
   tickHamstringForNewTurn,
   tickDarkBargainForNewTurn,
+  tickWallUpkeepForNewTurn,
+  tickVanishForNewTurn,
   DARK_BARGAIN_RETREAT,
   DARK_BARGAIN_LANDING_ONLY,
   BLOOD_PACT_CHARGES,
@@ -319,9 +321,9 @@ function check(name: string, cond: boolean, detail?: string) {
 // ---------------------------------------------------------------------------
 {
   const s = state("p2", { 0: 6, 4: 4 }); // p1 sits on contested 6; p2 could try to land there
-  // Attacker (p2) is deliberately NOT a warrior here — a warrior is the one
-  // class that's SUPPOSED to break through a ward (see the Ward Breaker
-  // scenario below); this test isolates the "everyone else stays blocked" half.
+  // No class pierces Ward any more (Ward Breaker retired 2026-09-17 — see
+  // the dedicated section just below this one); this test just picks an
+  // arbitrary non-mage attacker to keep the fixture simple.
   const pwWarded = power({ p1: "mage", p2: "archer" }, { p1: CHARGE_CAP });
   const movesBlocked = getLegalPowerMoves(s, pwWarded, 2); // p2 token at 4, flip 2 -> to 6
   const blocked = movesBlocked.find((mv) => mv.tokenId === 4 && mv.to === 6);
@@ -387,41 +389,47 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Ward Breaker: breaks a ward and captures — WITHOUT any follow-up
-//    protection (the old transient-safety "ward counter" was removed on
-//    2026-07-17, Kasen's fix list: it played like an undocumented ward)
+// 5. Warrior's Hold the Line (passive, replaces Ward Breaker 2026-09-17):
+//    a discount on wallUpkeepFor for a wall the Warrior himself holds,
+//    floored at WALL_BLEED_MIN — a discount, never free. Ward Breaker
+//    itself is fully retired: a Warrior no longer pierces Ward, or anything
+//    else below an ultimate — breaksWard stays on the wire but is always
+//    false now (see PowerMove's doc).
 // ---------------------------------------------------------------------------
 {
-  // p1 warrior token 0 at 4; p2 mage token 4 at 6, p2 at full charge (warded).
+  const pwWarrior = power({ p1: "warrior" });
+  const pwOther = power({ p1: "cleric" });
+  check(
+    "Hold the Line: a Warrior's own wall is charged wallUpkeepFor at the discounted rate",
+    wallUpkeepFor(pwWarrior, "p1") === Math.max(WALL_BLEED_MIN, WALL_BLEED - HOLD_THE_LINE_DISCOUNT),
+  );
+  check(
+    "Hold the Line: every other class pays the full WALL_BLEED, no discount at all",
+    wallUpkeepFor(pwOther, "p1") === WALL_BLEED,
+  );
+  check(
+    "Hold the Line: the discount can never push the price below WALL_BLEED_MIN",
+    Math.max(WALL_BLEED_MIN, WALL_BLEED - HOLD_THE_LINE_DISCOUNT) >= WALL_BLEED_MIN,
+  );
+
+  // REGRESSION (Ward Breaker's retirement): a Warrior landing on a Warded
+  // enemy is now blocked exactly like every other class — no pierce left.
   const s = state("p1", { 0: 4, 4: 6 });
   const pw = power({ p1: "warrior", p2: "mage" }, { p2: CHARGE_CAP });
   const moves = getLegalPowerMoves(s, pw, 2); // 4 -> 6
   const m = moves.find((mv) => mv.tokenId === 0 && mv.to === 6);
-  check("Ward Breaker: landing on a warded enemy is legal for a Warrior", !!m);
-  check("Ward Breaker: captures the warded enemy", !!m && m.captures.includes(4));
-  check("Ward Breaker: flags breaksWard", !!m && m.breaksWard === true);
-
-  const r1 = applyPowerMove(s, pw, m!, "p1");
-  // REGRESSION (safety removal): the Warrior's landing token must be
-  // capturable right back on the opponent's next turn — no lingering
-  // protection of any kind. p2's remaining mage token at 4 flips a 2 onto
-  // the Warrior now sitting at 6 (contested — same physical tile).
-  const s2: GameState = {
-    ...r1.state,
-    tokens: r1.state.tokens.map((t) => (t.id === 5 ? { ...t, position: 4 } : t)),
-  };
-  const movesBack = getLegalPowerMoves(s2, r1.power, 2); // p2's turn after the capture
-  const mBack = movesBack.find((mv) => mv.tokenId === 5 && mv.to === 6);
   check(
-    "Ward Breaker: the capturing Warrior gains NO protection — it can be captured right back",
-    !!mBack && mBack.captures.includes(0),
-    JSON.stringify(movesBack),
+    "Ward Breaker RETIRED: a Warrior's landing on a Warded enemy is no longer legal",
+    m === undefined,
+    JSON.stringify(moves),
   );
 }
 
 // ---------------------------------------------------------------------------
-// 6. Charge: sweeps intermediate captures (including warded ones — the
-//    sweep pierces Ward same as Ward Breaker), stops at shield tiles,
+// 6. Charge: sweeps intermediate captures, stops at shield tiles and any
+//    other protected stone (RETIRED 2026-09-17: the sweep used to pierce
+//    Ward same as Ward Breaker; walls being absolute swept that pierce
+//    away too — one isProtected check now, same as the landing tile),
 //    refuses when its own token blocks the lane
 // ---------------------------------------------------------------------------
 {
@@ -461,16 +469,17 @@ function check(name: string, cond: boolean, detail?: string) {
     JSON.stringify(mShield),
   );
 
-  // A warded intermediate enemy IS swept — Ward Breaker's whole identity
-  // is "Warriors pierce Ward," so the sweep shouldn't quietly disagree with
-  // that just because the token is mid-lane instead of the landing tile.
+  // RETIRED 2026-09-17: a warded intermediate enemy is NOT swept any more
+  // — Ward Breaker's old pierce ("Warriors pierce Ward, mid-lane or not")
+  // retired with it, and one isProtected check now governs the sweep, same
+  // as the landing tile.
   const sWard = state("p1", { 0: 4, 4: 6 });
   const pwWard = power({ p1: "warrior", p2: "mage" }, { p1: 1, p2: CHARGE_CAP });
   const movesWard = getLegalPowerMoves(sWard, pwWard, 4);
   const mWard = movesWard.find((mv) => mv.tokenId === 0 && mv.to === 8);
   check(
-    "Charge: DOES sweep a warded intermediate enemy",
-    !!mWard && mWard.chargeSweepCaptures.includes(4),
+    "Charge: does NOT sweep a warded intermediate enemy any more",
+    !!mWard && !mWard.chargeSweepCaptures.includes(4),
     JSON.stringify(mWard),
   );
 
@@ -578,78 +587,36 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Push vs Ward: Archer can target a warded token (costs PUSH_WARD_COST,
-//    same as a normal push) and knocks it back PUSH_WARD_DISTANCE instead
-//    of PUSH_DISTANCE — same price, bigger effect.
+// 9. Push vs Ward (RETIRED pierce, 2026-09-17): walls are absolute now, and
+//    that swept Ward's old distance-tier pierce away with them — a Warded
+//    token is excluded from getPushTargets outright, the same isProtected
+//    check every other pool uses. No special cost, no bigger knockback:
+//    Ward simply blocks Push like it blocks a normal capture.
 // ---------------------------------------------------------------------------
 {
   // p2 mage's only on-board token (id4) is trivially most-advanced -> warded.
   const s = state("p1", { 4: 6 });
-
-  const pwPoor = power({ p1: "archer", p2: "mage" }, { p1: PUSH_WARD_COST - 1, p2: CHARGE_CAP });
+  const pw = power({ p1: "archer", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
+  check("Push: sanity — id4 is genuinely warded", isWarded(s, pw, s.tokens.find((t) => t.id === 4)!));
   check(
-    "Push: a warded target is NOT offered when the Archer can't afford PUSH_WARD_COST",
-    !getPushTargets(s, pwPoor, "p1").includes(4),
+    "Push: a warded target is NOT a legal Push target at all, at any bank",
+    !getPushTargets(s, pw, "p1").includes(4),
   );
 
-  const pwRich = power({ p1: "archer", p2: "mage" }, { p1: PUSH_WARD_COST, p2: CHARGE_CAP });
+  // The instant Ward hands off (a second on-board mage stone outranks it),
+  // the formerly-warded token is a completely ordinary Push target again —
+  // no lingering distance/cost tier, no residue from ever having been warded.
+  const sHandoff = state("p1", { 4: 6, 5: 9 }); // id5 now most-advanced -> warded; id4 unwarded
+  const pwHandoff = power({ p1: "archer", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
+  check("Push: sanity — Ward handed off to the more-advanced stone", isWarded(sHandoff, pwHandoff, sHandoff.tokens.find((t) => t.id === 5)!));
   check(
-    "Push: a warded target IS offered once the Archer can afford PUSH_WARD_COST",
-    getPushTargets(s, pwRich, "p1").includes(4),
+    "Push: the now-unwarded token is a legal target, knocked back the ordinary PUSH_DISTANCE",
+    getPushTargets(sHandoff, pwHandoff, "p1").includes(4),
   );
-
-  const r = applyPush(s, pwRich, 4, "p1");
-  check(
-    "Push: costs PUSH_WARD_COST against a warded target, not 1",
-    r.power.charges.p1 === PUSH_WARD_COST - PUSH_WARD_COST,
-    `left with ${r.power.charges.p1} charges`,
-  );
-
-  // Soft push (no collision): a warded target travels PUSH_WARD_DISTANCE,
-  // not PUSH_DISTANCE. Here it's still the mage's only on-board token
-  // afterward, so it's STILL most-advanced/warded — a non-collision push
-  // doesn't strip Ward by itself, it just costs (more) tempo now.
-  const sSoft = state("p1", { 4: 8, 5: 3 }); // id4 most-advanced/warded; id5 far behind
-  const rSoft = applyPush(sSoft, pwRich, 4, "p1");
-  const movedSoft = rSoft.state.tokens.find((t) => t.id === 4)!;
-  check(
-    "Push: a warded target travels PUSH_WARD_DISTANCE, not PUSH_DISTANCE",
-    movedSoft.position === 8 - PUSH_WARD_DISTANCE,
-    `landed at ${movedSoft.position}`,
-  );
-  check(
-    "Push: a soft push against a warded token can still land it as most-advanced -> still warded",
-    isWarded(rSoft.state, rSoft.power, movedSoft),
-  );
-
-  // The bigger knockback's real payoff: even WITHOUT a collision, a warded
-  // token near the front of the contested zone can be shoved clean out of
-  // it and back into its own private lane (tile 3) — forcing it to
-  // re-cross the entire 8-tile contested zone again, not just lose a step.
-  const sBoundary = state("p1", { 4: 5 }); // id4 alone on board, warded, at the 2nd contested tile
-  const rBoundary = applyPush(sBoundary, pwRich, 4, "p1");
-  const movedBoundary = rBoundary.state.tokens.find((t) => t.id === 4)!;
-  check(
-    "Push: PUSH_WARD_DISTANCE can knock a warded token clean out of the contested zone",
-    movedBoundary.position === 5 - PUSH_WARD_DISTANCE,
-    `landed at ${movedBoundary.position}`,
-  );
-
-  // Collision push: id4 (warded) is knocked into id5 (same owner) and bounces
-  // to reserve — Ward is now permanently gone from id4 (reserved tokens are
-  // never warded) and fully hands off to id5, the mage's only remaining
-  // on-board token. This is the real, hard answer to a lone warded rusher.
-  const sHard = state("p1", { 4: 6, 5: 6 - PUSH_WARD_DISTANCE }); // id4 warded @6; id5 sits at the push's landing tile
-  check("Push: sanity — id4 is warded before the push", isWarded(sHard, pwRich, sHard.tokens.find((t) => t.id === 4)!));
-  const rHard = applyPush(sHard, pwRich, 4, "p1");
-  const movedHard = rHard.state.tokens.find((t) => t.id === 4)!;
-  const survivor = rHard.state.tokens.find((t) => t.id === 5)!;
-  check("Push: a warded token can be knocked to reserve just like any other target", movedHard.position === -1);
-  check("Push: a reserved token is never warded, even freshly post-push", !isWarded(rHard.state, rHard.power, movedHard));
-  check(
-    "Push: Ward fully hands off to the mage's remaining on-board token once the warded one is reserved",
-    isWarded(rHard.state, rHard.power, survivor),
-  );
+  const r = applyPush(sHandoff, pwHandoff, 4, "p1");
+  const moved = r.state.tokens.find((t) => t.id === 4)!;
+  check("Push: ordinary knockback is PUSH_DISTANCE, no Ward-tier distance left to apply", moved.position === 6 - PUSH_DISTANCE);
+  check("Push: the still-warded stone (id5) stays out of the pool", !getPushTargets(sHandoff, pwHandoff, "p1").includes(5));
 }
 
 // ---------------------------------------------------------------------------
@@ -763,10 +730,10 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Rain of Arrows: grants one charge like any capturing action", rS.power.charges.p1 === 1, `got ${rS.power.charges.p1}`);
   check("Rain of Arrows: ends the turn", rS.state.currentPlayer === "p2" && rS.state.extraTurn === false);
   check("Rain of Arrows: breaks a live shield streak", applyRainOfArrows(sCast, { ...ready, shieldStreak: { p1: 2, p2: 0 } }, 4, "p1").power.shieldStreak.p1 === 0);
-  const rB = applyRainOfArrows(sCast, { ...power({ p1: "archer", p2: "warrior" }), ultimateReady: { p1: true, p2: false }, bulwarked: { 4: 3 } }, 4, "p1");
-  check("Rain of Arrows: kills through Bulwark and clears the entry", rB.state.tokens.find((t) => t.id === 4)!.position === -1 && rB.power.bulwarked[4] === undefined);
-  const rBl = applyRainOfArrows(sCast, { ...power({ p1: "archer", p2: "cleric" }), ultimateReady: { p1: true, p2: false }, vitality: { 4: "blessed" } }, 4, "p1");
-  check("Rain of Arrows: kills a blessed stone outright and clears its vitality", rBl.state.tokens.find((t) => t.id === 4)!.position === -1 && rBl.power.vitality[4] === undefined);
+  const rB = applyRainOfArrows(sCast, { ...power({ p1: "archer", p2: "warrior" }), ultimateReady: { p1: true, p2: false }, walls: { 4: "bulwark" } }, 4, "p1");
+  check("Rain of Arrows: kills through a wall and clears it", rB.state.tokens.find((t) => t.id === 4)!.position === -1 && rB.power.walls[4] === undefined);
+  const rBl = applyRainOfArrows(sCast, { ...power({ p1: "archer", p2: "cleric" }), ultimateReady: { p1: true, p2: false }, walls: { 4: "blessing" } }, 4, "p1");
+  check("Rain of Arrows: kills a blessed stone outright and clears its wall", rBl.state.tokens.find((t) => t.id === 4)!.position === -1 && rBl.power.walls[4] === undefined);
   // An ultimate: the Warlock's Dark Bargain does not answer it.
   const sWl = state("p1", { 0: 5, 4: 8, 6: 3 });
   const rWl = applyRainOfArrows(sWl, { ...power({ p1: "archer", p2: "warlock" }), ultimateReady: { p1: true, p2: false } }, 4, "p1");
@@ -956,14 +923,13 @@ function check(name: string, cond: boolean, detail?: string) {
 
 // ---------------------------------------------------------------------------
 // 14. Warrior's Bulwark: a second charge-spend active. Unlike every other
-//     power action, the mover taps ONE OF THEIR OWN on-board tokens. Full
-//     immunity to a normal capture/Snipe and a Charge sweep (folded into
-//     isProtected/isBulwarked); a Push can still knock it around, just
-//     never send it all the way home; every ultimate — Rain of Arrows,
-//     Blink Strike, AND Warpath — punches straight through it (2026-07-17,
-//     Kasen's fix list dropped the old Bulwark-blocks-ultimates rule).
-//     Expires after BULWARK_TURNS of the Bulwarked player's own turns, OR
-//     the instant it actually blocks something, whichever comes first.
+//     power action, the mover taps ONE OF THEIR OWN on-board tokens.
+//     RAISES A WALL (2026-09-17, the wall rework) — full immunity to
+//     EVERYTHING below an ultimate (normal capture/Snipe, a Charge sweep,
+//     AND Push, folded into isProtected/isWalled). No countdown, no saves:
+//     a wall stays up until either an ultimate pierces it (and clears it
+//     off the captured token, see clearWallsOnReserveTrip) or its owner
+//     can't pay wallUpkeepFor it on their own next turn (section 14b).
 // ---------------------------------------------------------------------------
 {
   // --- Legal targeting -------------------------------------------------
@@ -977,10 +943,10 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Bulwark: an escaped own token is not a legal target", !targets.includes(2), JSON.stringify(targets));
     check("Bulwark: an enemy token is never a legal target", !targets.includes(4), JSON.stringify(targets));
 
-    const pwBulwarked: PowerState = { ...pw, bulwarked: { 0: 2 } };
+    const pwWalled: PowerState = { ...pw, walls: { 0: "bulwark" } };
     check(
-      "Bulwark: an already-Bulwarked token is excluded from re-targeting",
-      !getBulwarkTargets(s, pwBulwarked, "p1").includes(0),
+      "Bulwark: an already-walled token is excluded from re-targeting",
+      !getBulwarkTargets(s, pwWalled, "p1").includes(0),
     );
   }
 
@@ -995,9 +961,9 @@ function check(name: string, cond: boolean, detail?: string) {
     const r = applyBulwark(s, pw, 0, "p1");
     check("Bulwark: spends exactly one charge", r.power.charges.p1 === 1, `got ${r.power.charges.p1}`);
     check(
-      "Bulwark: flags the target with BULWARK_TURNS remaining",
-      r.power.bulwarked[0] === BULWARK_TURNS,
-      `got ${JSON.stringify(r.power.bulwarked)}`,
+      "Bulwark: raises a 'bulwark' wall on the target, no countdown attached",
+      r.power.walls[0] === "bulwark",
+      `got ${JSON.stringify(r.power.walls)}`,
     );
     check("Bulwark: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
   }
@@ -1005,17 +971,17 @@ function check(name: string, cond: boolean, detail?: string) {
   // --- Blocks a normal capturing move -------------------------------------
   {
     const s = state("p1", { 0: 4, 4: 6 });
-    const pw: PowerState = { ...power({ p1: "archer", p2: "warrior" }), bulwarked: { 4: 3 } };
+    const pw: PowerState = { ...power({ p1: "archer", p2: "warrior" }), walls: { 4: "bulwark" } };
     const moves = getLegalPowerMoves(s, pw, 2); // token0: 4 -> 6
     const blocked = moves.find((mv) => mv.tokenId === 0 && mv.to === 6);
-    check("Bulwark: blocks a normal capturing move onto the Bulwarked token", blocked === undefined, JSON.stringify(moves));
+    check("Bulwark: blocks a normal capturing move onto the walled token", blocked === undefined, JSON.stringify(moves));
 
-    // Sanity: the exact same setup captures fine without Bulwark.
+    // Sanity: the exact same setup captures fine without a wall.
     const pwNo = power({ p1: "archer", p2: "warrior" });
     const movesNo = getLegalPowerMoves(s, pwNo, 2);
     const openMove = movesNo.find((mv) => mv.tokenId === 0 && mv.to === 6);
     check(
-      "Bulwark: sanity — the same move captures normally without Bulwark",
+      "Bulwark: sanity — the same move captures normally without a wall",
       !!openMove && openMove.captures.includes(4),
     );
   }
@@ -1023,33 +989,49 @@ function check(name: string, cond: boolean, detail?: string) {
   // --- Blocks a Charge sweep -----------------------------------------------
   {
     const s = state("p1", { 0: 4, 4: 6 });
-    const pw: PowerState = { ...power({ p1: "warrior" }, { p1: 1 }), bulwarked: { 4: 3 } };
+    const pw: PowerState = { ...power({ p1: "warrior" }, { p1: 1 }), walls: { 4: "bulwark" } };
     const moves = getLegalPowerMoves(s, pw, 4); // token0: 4 -> 8, enemy4 mid-lane at 6
     const m = moves.find((mv) => mv.tokenId === 0 && mv.to === 8);
     check("Bulwark: Charge is still available (lane clear)", !!m && m.chargeAvailable === true, JSON.stringify(m));
     check(
-      "Bulwark: blocks the Charge sweep capture of the Bulwarked token",
+      "Bulwark: blocks the Charge sweep capture of the walled token",
       !!m && !m.chargeSweepCaptures.includes(4),
       JSON.stringify(m),
     );
   }
 
-  // --- Blink Strike pierces Bulwark (2026-07-17) ---------------------------
+  // --- Push: no interaction at all with a walled target ---------------------
+  // (2026-09-17: walls are absolute — Push used to still land a soft, non-
+  // home shove on a Bulwarked token; that partial carve-out is retired along
+  // with the countdown. isProtected excludes it from getPushTargets outright.)
+  {
+    const sSoft = state("p1", { 4: 8 }); // p2's only on-board token, alone -> no collision even so
+    const pw: PowerState = { ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }), walls: { 4: "bulwark" } };
+    check("Bulwark: NOT a legal Push target at all, even a clean non-collision shove", !getPushTargets(sSoft, pw, "p1").includes(4));
+
+    const pwNoWall = power({ p1: "archer", p2: "warrior" }, { p1: 1 });
+    check(
+      "Bulwark: sanity — the identical push IS legal without a wall",
+      getPushTargets(sSoft, pwNoWall, "p1").includes(4),
+    );
+  }
+
+  // --- Blink Strike pierces Bulwark (2026-07-17; still true post-rework) ---
   {
     const s = state("p1", { 0: 5, 4: 8 });
     const base = power({ p1: "mage" });
-    const pw: PowerState = { ...base, ultimateReady: { ...base.ultimateReady, p1: true }, bulwarked: { 4: 3 } };
+    const pw: PowerState = { ...base, ultimateReady: { ...base.ultimateReady, p1: true }, walls: { 4: "bulwark" } };
     const targets = getBlinkStrikeTargets(s, pw, "p1");
-    check("Bulwark: a Bulwarked token IS a legal Blink Strike target (ultimates pierce)", targets.includes(4), JSON.stringify(targets));
+    check("Bulwark: a walled token IS a legal Blink Strike target (ultimates pierce)", targets.includes(4), JSON.stringify(targets));
 
     const r = applyBlinkStrike(s, pw, 4, "p1");
-    check("Bulwark: Blink Strike captures the Bulwarked token", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Bulwark: Blink Strike captures the walled token", r.state.tokens.find((t) => t.id === 4)!.position === -1);
     // Leak regression (same bug class as the old Rain of Arrows fix): the
-    // captured token's Bulwark entry must not survive the trip to reserve.
+    // captured token's wall must not survive the trip to reserve.
     check(
-      "Bulwark: Blink Strike clears the captured token's bulwarked entry",
-      r.power.bulwarked[4] === undefined,
-      JSON.stringify(r.power.bulwarked),
+      "Bulwark: Blink Strike clears the captured token's wall",
+      r.power.walls[4] === undefined,
+      JSON.stringify(r.power.walls),
     );
   }
 
@@ -1057,127 +1039,67 @@ function check(name: string, cond: boolean, detail?: string) {
   {
     const sTarget = state("p1", { 0: 4, 4: 9 });
     const baseW = power({ p1: "warrior" });
-    const pwTarget: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, bulwarked: { 4: 3 } };
+    const pwTarget: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, walls: { 4: "bulwark" } };
     check(
-      "Bulwark: a Bulwarked token IS a legal Warpath primary target (ultimates pierce)",
+      "Bulwark: a walled token IS a legal Warpath primary target (ultimates pierce)",
       getWarpathTargets(sTarget, pwTarget, "p1").includes(4),
     );
 
-    // Sweep victim Bulwarked (the primary target itself is unprotected) —
-    // the sweep takes it anyway, and its Bulwark entry clears with it.
-    const sSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between, Bulwarked); target enemy5 at 9
-    const pwSweep: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, bulwarked: { 4: 3 } };
+    // Sweep victim walled (the primary target itself is unprotected) — the
+    // sweep takes it anyway, and its wall clears with it.
+    const sSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between, walled); target enemy5 at 9
+    const pwSweep: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, walls: { 4: "bulwark" } };
     const r = applyWarpath(sSweep, pwSweep, 5, "p1");
-    check("Bulwark: a Bulwarked token in Warpath's path IS swept", r.state.tokens.find((t) => t.id === 4)!.position === -1);
-    check("Bulwark: the swept Bulwarked id appears in sweptTokenIds", r.sweptTokenIds.includes(4));
+    check("Bulwark: a walled token in Warpath's path IS swept", r.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check("Bulwark: the swept walled id appears in sweptTokenIds", r.sweptTokenIds.includes(4));
     check("Bulwark: the primary target is still captured", r.state.tokens.find((t) => t.id === 5)!.position === -1);
     check(
-      "Bulwark: Warpath clears the swept token's bulwarked entry",
-      r.power.bulwarked[4] === undefined,
-      JSON.stringify(r.power.bulwarked),
+      "Bulwark: Warpath clears the swept token's wall",
+      r.power.walls[4] === undefined,
+      JSON.stringify(r.power.walls),
     );
   }
 
   // --- Rain of Arrows pierces Bulwark (always has; cast form since 2026-09-16)
   {
-    const s = state("p1", { 0: 6, 4: 9 }); // enemy4 at 9, Bulwarked
-    const seeded: PowerState = { ...power({ p1: "archer" }), ultimateReady: { p1: true, p2: false }, bulwarked: { 4: 3 } };
-    check("Bulwark: a Bulwarked stone is still in Rain of Arrows' pool", getRainOfArrowsTargets(s, seeded, "p1").includes(4));
+    const s = state("p1", { 0: 6, 4: 9 }); // enemy4 at 9, walled
+    const seeded: PowerState = { ...power({ p1: "archer" }), ultimateReady: { p1: true, p2: false }, walls: { 4: "bulwark" } };
+    check("Bulwark: a walled stone is still in Rain of Arrows' pool", getRainOfArrowsTargets(s, seeded, "p1").includes(4));
     const r = applyRainOfArrows(s, seeded, 4, "p1");
     check("Bulwark: Rain of Arrows bypasses Bulwark (same rule as every ultimate now)", r.state.tokens.find((t) => t.id === 4)!.position === -1);
   }
 
-  // --- Push: soft knockback still lands, send-home is blocked ---------------
+  // --- getBulwarkBlockedIds: announcement-only now (2026-09-17) -------------
+  // A wall no longer expires or gets consumed by blocking something — it
+  // falls only when its owner can't pay wallUpkeepFor it (section 14b) — so
+  // this function is a pure read, computed by diffing the real move lists
+  // against the same lists with every wall/Vanish switched off. It still
+  // exists purely to tell the client "that would have connected."
   {
-    const sSoft = state("p1", { 4: 8 }); // p2's only on-board token, alone -> no collision
-    const pw: PowerState = { ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }), bulwarked: { 4: 3 } };
-    check("Bulwark: a soft (non-home) push target IS legal", getPushTargets(sSoft, pw, "p1").includes(4));
-    const rSoft = applyPush(sSoft, pw, 4, "p1");
-    const moved = rSoft.state.tokens.find((t) => t.id === 4)!;
-    check(
-      "Bulwark: a soft push against a Bulwarked token still knocks it back PUSH_DISTANCE",
-      moved.position === 8 - PUSH_DISTANCE,
-      `landed at ${moved.position}`,
-    );
-
-    const sHome = state("p1", { 4: 6, 5: 6 - PUSH_DISTANCE }); // own-token collision at the landing tile
-    const pwHome: PowerState = { ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }), bulwarked: { 4: 3 } };
-    check("Bulwark: a send-home push target is NOT legal", !getPushTargets(sHome, pwHome, "p1").includes(4));
-
-    const pwNoBulwark = power({ p1: "archer", p2: "warrior" }, { p1: 1 });
-    check(
-      "Bulwark: sanity — the identical send-home push IS legal without Bulwark",
-      getPushTargets(sHome, pwNoBulwark, "p1").includes(4),
-    );
-  }
-
-  // --- Expiry countdown ------------------------------------------------------
-  {
-    const s = state("p1", { 0: 4 });
-
-    const pwOne: PowerState = { ...power({ p1: "warrior" }), bulwarked: { 0: 1 } };
-    check(
-      "Bulwark: expires (clears) once its countdown reaches 0",
-      tickBulwarkExpiry(s, pwOne, "p1").bulwarked[0] === undefined,
-    );
-
-    const pwTwo: PowerState = { ...power({ p1: "warrior" }), bulwarked: { 0: 2 } };
-    const afterTick = tickBulwarkExpiry(s, pwTwo, "p1");
-    check("Bulwark: decrements by exactly 1 per tick when not yet expiring", afterTick.bulwarked[0] === 1, `got ${afterTick.bulwarked[0]}`);
-
-    // Ticking a DIFFERENT player's turn-start must not touch this token.
-    const afterOtherTick = tickBulwarkExpiry(s, pwTwo, "p2");
-    check("Bulwark: ticking the OTHER player's turn leaves this token's countdown untouched", afterOtherTick.bulwarked[0] === 2);
-
-    // A full BULWARK_TURNS-tick countdown lands exactly at expiry, not off-by-one.
-    let running: PowerState = { ...power({ p1: "warrior" }), bulwarked: { 0: BULWARK_TURNS } };
-    for (let i = 0; i < BULWARK_TURNS; i++) running = tickBulwarkExpiry(s, running, "p1");
-    check(
-      `Bulwark: expires after exactly BULWARK_TURNS (${BULWARK_TURNS}) of the Bulwarked player's own turns`,
-      running.bulwarked[0] === undefined,
-    );
-  }
-
-  // --- Consumed the instant it blocks something -----------------------------
-  {
-    // A normal move that WOULD capture this exact flip -> reported, and
-    // consuming clears the flag (computed by diffing real vs Bulwark-off
-    // move lists — see getBulwarkBlockedIds's doc comment).
     const s = state("p1", { 0: 4, 4: 6 });
-    const pw: PowerState = { ...power({ p1: "warrior", p2: "warrior" }), bulwarked: { 4: 3 } };
+    const pw: PowerState = { ...power({ p1: "warrior", p2: "warrior" }), walls: { 4: "bulwark" } };
     const blocked = getBulwarkBlockedIds(s, pw, 2); // token0: 4 -> 6, would capture 4
     check("Bulwark: getBulwarkBlockedIds reports the token this flip would have captured", blocked.includes(4), JSON.stringify(blocked));
-    check("Bulwark: consumeBulwarkBlocks clears the flag", consumeBulwarkBlocks(pw, blocked).bulwarked[4] === undefined);
-    check("Bulwark: consumeBulwarkBlocks is a no-op given an empty list", consumeBulwarkBlocks(pw, []) === pw);
-
-    // tickBulwarkForNewTurn does tick-then-consume in one call, for the
-    // ATTACKER's fresh-flip hook (referee.ts/api/ws.ts call this once per
-    // turn-start).
-    const combo = tickBulwarkForNewTurn(s, pw, 2);
-    check("Bulwark: tickBulwarkForNewTurn reports the same blocked id", combo.blockedIds.includes(4));
-    check("Bulwark: tickBulwarkForNewTurn's returned power has it cleared", combo.power.bulwarked[4] === undefined);
-
-    // An unrelated flip (can't reach the Bulwarked token at all) leaves it untouched.
-    const sFar = state("p1", { 0: 0, 4: 6 });
-    const pwFar: PowerState = { ...power({ p1: "warrior", p2: "warrior" }), bulwarked: { 4: 3 } };
-    const comboFar = tickBulwarkForNewTurn(sFar, pwFar, 1);
     check(
-      "Bulwark: an unrelated flip does not consume an untouched Bulwark",
-      comboFar.power.bulwarked[4] === 3,
-      JSON.stringify(comboFar.power.bulwarked),
+      "Bulwark: getBulwarkBlockedIds is a pure read — the wall itself is untouched",
+      getBulwarkBlockedIds(s, pw, 2) !== undefined && pw.walls[4] === "bulwark",
     );
 
-    // Re-flip's own hook detects a block too, without an extra expiry tick
-    // (tickBulwarkForReflip never touches the countdown, only consumption).
+    // tickBulwarkForNewTurn/tickBulwarkForReflip are now pure pass-throughs
+    // over the same read (kept for room-engine/sim call-site compat) —
+    // neither one mutates the wall either.
+    const combo = tickBulwarkForNewTurn(s, pw, 2);
+    check("Bulwark: tickBulwarkForNewTurn reports the same blocked id", combo.blockedIds.includes(4));
+    check("Bulwark: tickBulwarkForNewTurn's returned power still has the wall up", combo.power.walls[4] === "bulwark");
     const comboReflip = tickBulwarkForReflip(s, pw, 2);
-    check("Bulwark: tickBulwarkForReflip also detects and consumes a block", comboReflip.power.bulwarked[4] === undefined);
+    check("Bulwark: tickBulwarkForReflip reports the same, and is equally a no-op on the wall", comboReflip.blockedIds.includes(4) && comboReflip.power.walls[4] === "bulwark");
 
     // Charge-sweep-only threat: doesn't count as "blocked" unless the mover
     // can actually afford to spend a charge on Charge this turn.
     const sSweepOnly = state("p1", { 0: 4, 4: 6 }); // token0: 4 -> 8 (flip 4); enemy4 mid-lane at 6 only
     const pwSweepNoCharge: PowerState = {
       ...power({ p1: "warrior", p2: "warrior" }, { p1: 0 }),
-      bulwarked: { 4: 3 },
+      walls: { 4: "bulwark" },
     };
     check(
       "Bulwark: a Charge-sweep-only threat is NOT 'blocked' when the mover has 0 charges",
@@ -1185,250 +1107,150 @@ function check(name: string, cond: boolean, detail?: string) {
     );
     const pwSweepWithCharge: PowerState = {
       ...power({ p1: "warrior", p2: "warrior" }, { p1: 1 }),
-      bulwarked: { 4: 3 },
+      walls: { 4: "bulwark" },
     };
     check(
       "Bulwark: a Charge-sweep threat DOES count as blocked once the mover can afford Charge",
       getBulwarkBlockedIds(sSweepOnly, pwSweepWithCharge, 4).includes(4),
     );
 
-    // Send-home Push immunity is a STATIC property, never a save-consuming
-    // "block" (2026-07-20, Kasen's field report — the old reveal-time
-    // accounting let a full-bank archer melt a Reinforced Bulwark by
-    // standing in range; see getBulwarkBlockedIds's doc). The target simply
-    // never enters the pool, and no save is spent at any charge level.
-    const sPushOnly = state("p1", { 4: 6, 5: 6 - PUSH_DISTANCE }); // p2 token4 Bulwarked; own-token collision at the landing tile
+    // Push immunity is a STATIC property (isProtected excludes the target
+    // from the pool outright) — never a "block" getBulwarkBlockedIds needs
+    // to report, at any charge level.
+    const sPushOnly = state("p1", { 4: 6, 5: 6 - PUSH_DISTANCE }); // p2 token4 walled; own-token collision at the landing tile
     const pwPushWithCharge: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
-      bulwarked: { 4: 3 },
+      walls: { 4: "bulwark" },
     };
     check(
-      "Bulwark: send-home Push immunity keeps the target out of the pool",
+      "Bulwark: Push immunity keeps the target out of the pool",
       !getPushTargets(sPushOnly, pwPushWithCharge, "p1").includes(4),
     );
     check(
-      "Bulwark: send-home Push immunity is static — never a save-consuming block",
+      "Bulwark: Push immunity is static — never something getBulwarkBlockedIds reports",
       !getBulwarkBlockedIds(sPushOnly, pwPushWithCharge, 1).includes(4),
     );
   }
 }
 
 // ---------------------------------------------------------------------------
-// 14b. Reinforced Bulwark: the Warrior's full-bank (CHARGE_CAP) cast —
-//      everything about the plain Bulwark doubled: 2x cost, 2x lifetime
-//      (BULWARK_REINFORCED_TURNS), 2x saves (BULWARK_REINFORCED_SAVES).
-//      Same target pool, same protection semantics while up (isBulwarked
-//      doesn't distinguish), same turn-ending cast — only cost, countdown,
-//      and how consumption resolves differ.
+// 14b. The wall system's upkeep tick (WALL_BLEED, 2026-09-17) + Vanish's
+//      own countdown tick + the Barbarian's canHoldWall guardrail. Every
+//      wall costs its owner wallUpkeepFor it on their own next turn-start,
+//      front (most-advanced) stone first — "the front holds longest" — and
+//      an unaffordable one DROPS (unprotecting that stone THIS turn, not a
+//      save-consuming block). wallGrace waives exactly one wall's payment
+//      first, same front-first order, before any charge is spent.
 // ---------------------------------------------------------------------------
 {
-  // --- The cast: cost, countdown, saves, turn end ---------------------------
+  // --- Pays when affordable, wall stays up ----------------------------------
   {
     const s = state("p1", { 0: 5 });
-    const pw = power({ p1: "warrior" }, { p1: CHARGE_CAP });
-    const r = applyBulwark(s, pw, 0, "p1", true);
-    check("Reinforced Bulwark: spends BULWARK_REINFORCED_COST, not the whole bank", r.power.charges.p1 === CHARGE_CAP - BULWARK_REINFORCED_COST, `got ${r.power.charges.p1}`);
-    check(
-      "Reinforced Bulwark: flags the target with BULWARK_REINFORCED_TURNS remaining",
-      r.power.bulwarked[0] === BULWARK_REINFORCED_TURNS,
-      `got ${JSON.stringify(r.power.bulwarked)}`,
-    );
-    check(
-      "Reinforced Bulwark: banks BULWARK_REINFORCED_SAVES capture-blocks",
-      r.power.bulwarkSaves[0] === BULWARK_REINFORCED_SAVES,
-      `got ${JSON.stringify(r.power.bulwarkSaves)}`,
-    );
-    check("Reinforced Bulwark: ends the turn, same as the plain cast", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
-    check(
-      "Reinforced Bulwark: sanity — the doubling is real (2x turns, 2x saves vs plain)",
-      BULWARK_REINFORCED_TURNS === 2 * BULWARK_TURNS && BULWARK_REINFORCED_SAVES === 2,
-    );
-
-    // The plain cast stays byte-identical: 1 charge, BULWARK_TURNS, NO
-    // bulwarkSaves entry (a missing entry means "1 block" everywhere).
-    const rPlain = applyBulwark(s, pw, 0, "p1");
-    check("Reinforced Bulwark: a plain cast still spends exactly one charge", rPlain.power.charges.p1 === CHARGE_CAP - 1);
-    check("Reinforced Bulwark: a plain cast still lasts BULWARK_TURNS", rPlain.power.bulwarked[0] === BULWARK_TURNS);
-    check(
-      "Reinforced Bulwark: a plain cast writes NO bulwarkSaves entry",
-      rPlain.power.bulwarkSaves[0] === undefined,
-      JSON.stringify(rPlain.power.bulwarkSaves),
-    );
-
-    // Already-Bulwarked tokens stay excluded from re-targeting, reinforced
-    // or not — no stacking a reinforcement onto a live Bulwark.
-    check(
-      "Reinforced Bulwark: a reinforced token is excluded from re-targeting",
-      !getBulwarkTargets(r.state, r.power, "p1").includes(0),
-    );
+    const pw: PowerState = { ...power({ p1: "warrior" }, { p1: CHARGE_CAP }), walls: { 0: "bulwark" } };
+    const r = tickWallUpkeepForNewTurn(s, pw);
+    check("Wall upkeep: pays wallUpkeepFor exactly", r.paid === wallUpkeepFor(pw, "p1"), `paid ${r.paid}`);
+    check("Wall upkeep: charges a real cost", r.power.charges.p1 === CHARGE_CAP - wallUpkeepFor(pw, "p1"));
+    check("Wall upkeep: the wall survives", r.power.walls[0] === "bulwark");
+    check("Wall upkeep: nothing dropped", r.droppedTokenIds.length === 0, JSON.stringify(r.droppedTokenIds));
   }
 
-  // --- Consumption: survives its first save, fades on the second ------------
-  {
-    // p2's token 4 is reinforced-Bulwarked; p1's flip would capture it.
-    const s = state("p1", { 0: 4, 4: 6 });
-    const pw: PowerState = {
-      ...power({ p1: "warrior", p2: "warrior" }),
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    const blocked = getBulwarkBlockedIds(s, pw, 2); // token0: 4 -> 6 would capture 4
-    check("Reinforced Bulwark: a blocked capture is reported, same as plain", blocked.includes(4), JSON.stringify(blocked));
-
-    const afterFirst = consumeBulwarkBlocks(pw, blocked);
-    check(
-      "Reinforced Bulwark: SURVIVES its first save — bulwarked entry stays",
-      afterFirst.bulwarked[4] === BULWARK_REINFORCED_TURNS,
-      JSON.stringify(afterFirst.bulwarked),
-    );
-    check(
-      "Reinforced Bulwark: the first save spends one banked block",
-      afterFirst.bulwarkSaves[4] === BULWARK_REINFORCED_SAVES - 1,
-      JSON.stringify(afterFirst.bulwarkSaves),
-    );
-    // A Bulwark-blocked landing is dropped from the move list entirely
-    // (getLegalPowerMoves `continue`s on it) — so "still protecting" means
-    // no move capturing token 4 exists, same assertion shape section 14
-    // uses for the plain cast.
-    check(
-      "Reinforced Bulwark: still protecting after the first save (capture still illegal)",
-      getLegalPowerMoves(s, afterFirst, 2).find((m) => m.captures.includes(4)) === undefined,
-    );
-
-    const afterSecond = consumeBulwarkBlocks(afterFirst, [4]);
-    check("Reinforced Bulwark: fades on its second save — bulwarked entry cleared", afterSecond.bulwarked[4] === undefined);
-    check("Reinforced Bulwark: the spent saves entry is cleared with it", afterSecond.bulwarkSaves[4] === undefined);
-
-    // A PLAIN Bulwark (no saves entry) is still consumed by its first block.
-    const pwPlain: PowerState = { ...power({ p1: "warrior", p2: "warrior" }), bulwarked: { 4: BULWARK_TURNS } };
-    const afterPlain = consumeBulwarkBlocks(pwPlain, [4]);
-    check("Reinforced Bulwark: a plain Bulwark is still consumed by its FIRST block", afterPlain.bulwarked[4] === undefined);
-  }
-
-  // --- Expiry: the countdown clears the unused saves with it ----------------
+  // --- Drops when unaffordable, unprotecting the stone this turn -----------
   {
     const s = state("p1", { 0: 5 });
-    const pwOne: PowerState = {
-      ...power({ p1: "warrior" }),
-      bulwarked: { 0: 1 },
-      bulwarkSaves: { 0: BULWARK_REINFORCED_SAVES },
-    };
-    const expired = tickBulwarkExpiry(s, pwOne, "p1");
-    check("Reinforced Bulwark: expiry clears the bulwarked entry", expired.bulwarked[0] === undefined);
-    check("Reinforced Bulwark: expiry clears the unused saves entry too", expired.bulwarkSaves[0] === undefined);
-
-    // A full BULWARK_REINFORCED_TURNS countdown lands exactly at expiry.
-    let running: PowerState = {
-      ...power({ p1: "warrior" }),
-      bulwarked: { 0: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 0: BULWARK_REINFORCED_SAVES },
-    };
-    for (let i = 0; i < BULWARK_REINFORCED_TURNS; i++) running = tickBulwarkExpiry(s, running, "p1");
-    check(
-      `Reinforced Bulwark: expires after exactly BULWARK_REINFORCED_TURNS (${BULWARK_REINFORCED_TURNS}) of the caster's own turns`,
-      running.bulwarked[0] === undefined && running.bulwarkSaves[0] === undefined,
-    );
+    const poor = Math.max(0, wallUpkeepFor(power({ p1: "warrior" }), "p1") - 1);
+    const pw: PowerState = { ...power({ p1: "warrior" }, { p1: poor }), walls: { 0: "bulwark" } };
+    const r = tickWallUpkeepForNewTurn(s, pw);
+    check("Wall upkeep: pays nothing when it can't afford the bill", r.paid === 0, `paid ${r.paid}`);
+    check("Wall upkeep: drops the unaffordable wall", r.power.walls[0] === undefined, JSON.stringify(r.power.walls));
+    check("Wall upkeep: reports the dropped id", r.droppedTokenIds.includes(0), JSON.stringify(r.droppedTokenIds));
+    check("Wall upkeep: an unaffordable spend is never partial — the bank is untouched", r.power.charges.p1 === poor);
   }
 
-  // --- Protection semantics while up (2026-07-17, Kasen's fix list) --------
+  // --- Most-advanced-first: funds run out, the FRONT wall survives ----------
   {
-    // Ultimates pierce a reinforced Bulwark same as a plain one...
-    const base = power({ p1: "mage", p2: "warrior" }, { p1: 0 });
-    const s = state("p1", { 0: 8, 4: 6 });
-    const pwUlt: PowerState = {
-      ...base,
-      ultimateReady: { ...base.ultimateReady, p1: true },
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    check(
-      "Reinforced Bulwark: IS a legal Blink Strike target (ultimates pierce, plain or reinforced)",
-      getBlinkStrikeTargets(s, pwUlt, "p1").includes(4),
-    );
-
-    // ...but a plain Push can't touch it AT ALL — not even the soft shove a
-    // plain Bulwark still allows. This is fix 1 from the 2026-07-17 list:
-    // "archer's push doesn't affect reinforced bulwark."
-    const sSoft = state("p1", { 0: 4, 4: 8 }); // push 8 -> 7 would be a clean soft shove
-    const pwSoft: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    check("Reinforced Bulwark: NOT a legal Push target, even for a soft shove", !getPushTargets(sSoft, pwSoft, "p1").includes(4));
-    // Sanity: the same soft shove IS legal against a merely-plain Bulwark.
-    const pwPlain: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
-      bulwarked: { 4: BULWARK_TURNS },
-    };
-    check("Reinforced Bulwark: sanity — the same soft Push IS legal against a plain Bulwark", getPushTargets(sSoft, pwPlain, "p1").includes(4));
-
-    const sHome = state("p1", { 4: 0 }); // push 0 -> -1: send-home
-    const pwHome: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: 1 }),
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    check("Reinforced Bulwark: a send-home Push target is still NOT legal", !getPushTargets(sHome, pwHome, "p1").includes(4));
-
-    // "Charged shot moves reinforced bulwark back": the soft Charged Shot
-    // IS still legal against a reinforced Bulwark — it's the one Archer
-    // tool that reaches it — while a send-home Charged Shot stays blocked.
-    const sShotSoft = state("p1", { 4: 11 }); // 11 - CHARGED_SHOT_DISTANCE = 7, on-board, no collision
-    const pwShot: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    check(
-      "Reinforced Bulwark: a soft Charged Shot IS legal — the tool that still moves it",
-      getChargedShotTargets(sShotSoft, pwShot, "p1").includes(4),
-    );
-    const rShot = applyChargedShot(sShotSoft, pwShot, 4, "p1");
-    check(
-      `Reinforced Bulwark: the Charged Shot knocks it back CHARGED_SHOT_DISTANCE (${CHARGED_SHOT_DISTANCE})`,
-      rShot.state.tokens.find((t) => t.id === 4)!.position === 11 - CHARGED_SHOT_DISTANCE,
-      `landed at ${rShot.state.tokens.find((t) => t.id === 4)!.position}`,
-    );
-    check(
-      "Reinforced Bulwark: the Bulwark survives the soft Charged Shot (no capture happened)",
-      rShot.power.bulwarked[4] !== undefined && rShot.power.bulwarkSaves[4] === BULWARK_REINFORCED_SAVES,
-    );
-    // Target at contested 6; its landing (6 - CHARGED_SHOT_DISTANCE = 2, its
-    // own lane) is occupied by its own teammate -> collision -> send-home.
-    const sShotHome = state("p1", { 4: 6, 5: 6 - CHARGED_SHOT_DISTANCE });
-    const pwShotHome: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    check(
-      "Reinforced Bulwark: a send-home Charged Shot is still NOT legal",
-      !getChargedShotTargets(sShotHome, pwShotHome, "p1").includes(4),
-    );
+    const cost = wallUpkeepFor(power({ p1: "warrior" }), "p1");
+    const s = state("p1", { 0: 9, 1: 5 }); // id0 more advanced than id1
+    const pw: PowerState = { ...power({ p1: "warrior" }, { p1: cost }), walls: { 0: "bulwark", 1: "bulwark" } };
+    const r = tickWallUpkeepForNewTurn(s, pw);
+    check("Wall upkeep: the front (most-advanced) wall is paid first and survives", r.power.walls[0] === "bulwark");
+    check("Wall upkeep: the rear wall drops once the bank runs dry", r.power.walls[1] === undefined);
+    check("Wall upkeep: only the rear id is reported dropped", r.droppedTokenIds.length === 1 && r.droppedTokenIds[0] === 1, JSON.stringify(r.droppedTokenIds));
   }
 
-  // --- Rain of Arrows still pierces, and a reserve trip clears the saves ----
+  // --- wallGrace waives exactly one wall's payment, front-first ------------
   {
-    // Same judgment-call fixture as section 14's Rain of Arrows check, with
-    // a REINFORCED Bulwark on the sole candidate: the ultimate still
-    // punches through, and the captured token's bulwarked AND bulwarkSaves
-    // entries must both clear (no free re-entry protection later).
-    const s = state("p1", { 0: 6, 4: 9 }); // enemy4 at 9, reinforced-Bulwarked
-    const base = power({ p1: "archer", p2: "warrior" });
-    const pw: PowerState = {
-      ...base,
-      ultimateReady: { p1: true, p2: false },
-      bulwarked: { 4: BULWARK_REINFORCED_TURNS },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
-    };
-    const r = applyRainOfArrows(s, pw, 4, "p1");
+    const cost = wallUpkeepFor(power({ p1: "warrior" }), "p1");
+    const s = state("p1", { 0: 9, 1: 5 });
+    const base = power({ p1: "warrior" }, { p1: cost }); // just enough for ONE paid wall
+    const pw: PowerState = { ...base, walls: { 0: "bulwark", 1: "bulwark" }, wallGrace: { ...base.wallGrace, p1: 1 } };
+    const r = tickWallUpkeepForNewTurn(s, pw);
+    // Only ONE wall's worth is actually charged (the rear one) — the front
+    // is waived by grace, not paid, so total paid equals a single cost,
+    // not two.
+    check("Wall upkeep: grace waives the front wall's payment", r.power.walls[0] === "bulwark" && r.paid === cost, `paid ${r.paid}, cost ${cost}`);
+    check("Wall upkeep: the rear wall is paid for out of the now-untouched bank", r.power.walls[1] === "bulwark");
+    check("Wall upkeep: nothing dropped — grace plus the bank covered both", r.droppedTokenIds.length === 0);
+    check("Wall upkeep: the spent grace turn is consumed", r.power.wallGrace.p1 === 0);
+  }
+
+  // --- Only the mover's OWN walls tick; an empty wall list is a no-op ------
+  {
+    const s = state("p1", { 0: 5, 4: 6 });
+    const pw: PowerState = { ...power({ p1: "warrior", p2: "warrior" }, { p1: 0 }), walls: { 4: "bulwark" } };
+    const r = tickWallUpkeepForNewTurn(s, pw);
+    check("Wall upkeep: the OTHER player's wall is untouched on this player's tick", r.power.walls[4] === "bulwark" && r.paid === 0 && r.droppedTokenIds.length === 0);
+
+    const pwEmpty = power({ p1: "warrior" });
+    const rEmpty = tickWallUpkeepForNewTurn(s, pwEmpty);
+    check("Wall upkeep: a mover with no walls is an exact no-op (same power reference)", rEmpty.power === pwEmpty && rEmpty.paid === 0);
+  }
+
+  // --- Vanish's own tick: fixed countdown, no upkeep, no grace --------------
+  {
+    const s = state("p1", { 0: 5 });
+    const pw: PowerState = { ...power({ p1: "rogue" }, { p1: 0 }), vanished: { 0: 2 } };
+    const r1 = tickVanishForNewTurn(s, pw);
+    check("Vanish tick: decrements by exactly 1, no charge cost at all", r1.power.vanished[0] === 1 && r1.power.charges.p1 === 0);
+    check("Vanish tick: not yet expired", r1.expiredTokenIds.length === 0);
+    const r2 = tickVanishForNewTurn(s, r1.power);
+    check("Vanish tick: expires (clears) at 0, reported in expiredTokenIds", r2.power.vanished[0] === undefined && r2.expiredTokenIds.includes(0));
+
+    const sFar = state("p1", { 0: 5, 4: 6 });
+    const pwOther: PowerState = { ...power({ p1: "rogue", p2: "rogue" }), vanished: { 4: 2 } };
+    const rOther = tickVanishForNewTurn(sFar, pwOther);
+    check("Vanish tick: the OTHER player's vanished stone is untouched on this player's tick", rOther.power.vanished[4] === 2);
+  }
+
+  // --- Barbarian canHoldWall: the glass cannon can NEVER hold a wall --------
+  {
+    const s = state("p1", { 0: 5, 1: 8 });
+    const token0 = s.tokens.find((t) => t.id === 0)!;
+    const pwBarb = power({ p1: "barbarian" }, { p1: CHARGE_CAP });
+    check("Barbarian: canHoldWall is false for a barbarian's own token", !canHoldWall(pwBarb, token0));
+    const pwWarrior = power({ p1: "warrior" }, { p1: CHARGE_CAP });
+    check("Barbarian: sanity — canHoldWall is true for every other class", canHoldWall(pwWarrior, token0));
+
+    // Defensive guardrail, not just a unit check on the predicate: every
+    // wall-granting pool (Bulwark's shown here; Bless/Benediction share the
+    // same guard) must exclude a barbarian's own stone even if some future
+    // ability tried to hand him one.
     check(
-      "Reinforced Bulwark: Rain of Arrows still bypasses it (same judgment call as plain)",
-      r.state.tokens.find((t) => t.id === 4)!.position === -1,
+      "Barbarian: getBulwarkTargets excludes his own token outright",
+      !getBulwarkTargets(s, pwBarb, "p1").includes(0),
     );
-    check("Reinforced Bulwark: the captured token's bulwarked entry is cleared", r.power.bulwarked[4] === undefined);
-    check("Reinforced Bulwark: the captured token's saves entry is cleared with it", r.power.bulwarkSaves[4] === undefined);
+    check(
+      "Barbarian: getBlessTargets excludes his own token outright too (same shared guard)",
+      !getBlessTargets(s, pwBarb, "p1").includes(0),
+    );
+
+    // A shield TILE still protects him — canHoldWall is about the PAID kind
+    // of protection specifically, not every form of it.
+    const sShield = state("p1", { 0: 7, 4: 4 }); // tile 7 is a shield tile; enemy in flip reach
+    const pwBarbShield = power({ p1: "barbarian", p2: "archer" }, { p1: 0, p2: CHARGE_CAP });
+    check(
+      "Barbarian: a shield tile still protects him even though he can never hold a wall",
+      isProtected(sShield, pwBarbShield, sShield.tokens.find((t) => t.id === 0)!),
+    );
   }
 }
 
@@ -1486,47 +1308,30 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- Legality: Bulwark blocks a target ONLY if THIS distance would send
-  //     it home — using Charged Shot's OWN collision math, not Push's -----
+  // --- Legality: a wall blocks a Charged Shot target OUTRIGHT (2026-09-17:
+  //     walls are absolute — this used to be conditional on THIS distance's
+  //     own collision math sending the target home; that soft/hard split
+  //     is retired, see the dedicated "Walls are absolute" block below for
+  //     the full soft-and-hard coverage). ------------------------------
   {
-    // Soft knockback: no collision at CHARGED_SHOT_DISTANCE, target stays on
-    // the board -> Bulwark does NOT block it (same "soft push" carve-out as
-    // Push's own Bulwark interaction, just computed with this ability's own
-    // distance).
-    const posSoft = 11; // contested-zone ceiling — landing at posSoft-CHARGED_SHOT_DISTANCE always >= 6 for distance <= 5
-    const sSoft = state("p1", { 4: posSoft });
-    const pwSoft: PowerState = {
-      ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
-      bulwarked: { 4: 3 },
-    };
-    check(
-      "Charged Shot: sanity — this fixture's landing stays on the board (no collision)",
-      posSoft - CHARGED_SHOT_DISTANCE >= 0,
-    );
-    check(
-      "Charged Shot: a Bulwarked target IS legal when THIS distance leaves it on the board",
-      getChargedShotTargets(sSoft, pwSoft, "p1").includes(4),
-    );
-
-    // Own-token collision at the exact landing tile -> sent home -> Bulwark blocks it.
     const posHome = 9;
     const landingHome = posHome - CHARGED_SHOT_DISTANCE;
     check("Charged Shot: sanity — this fixture's landing tile is a valid placement", landingHome >= 0);
     const sHome = state("p1", { 4: posHome, 5: landingHome });
     const pwHome: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
-      bulwarked: { 4: 3 },
+      walls: { 4: "bulwark" },
     };
     check(
-      "Charged Shot: a Bulwarked target is NOT legal when THIS distance would send it home",
+      "Charged Shot: a walled target is NOT legal, even where this distance would send it home",
       !getChargedShotTargets(sHome, pwHome, "p1").includes(4),
     );
 
-    // Sanity: the identical send-home shot IS legal without Bulwark.
-    const pwHomeNoBulwark = power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP });
+    // Sanity: the identical send-home shot IS legal without a wall.
+    const pwHomeNoWall = power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP });
     check(
-      "Charged Shot: sanity — the identical send-home shot IS legal without Bulwark",
-      getChargedShotTargets(sHome, pwHomeNoBulwark, "p1").includes(4),
+      "Charged Shot: sanity — the identical send-home shot IS legal without a wall",
+      getChargedShotTargets(sHome, pwHomeNoWall, "p1").includes(4),
     );
   }
 
@@ -1603,17 +1408,10 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Charged Shot: extraTurn flag is false after a partial shove", rPartial.state.extraTurn === false);
   }
 
-  // --- A Warded target is a LEGAL Charged Shot target, at
-  //     CHARGED_SHOT_WARD_DISTANCE instead of CHARGED_SHOT_DISTANCE. (Changed
-  //     2026-07-16 per Kasen's requested strength ordering — push-vs-ward <
-  //     push-vs-normal < charged-vs-ward < charged-vs-normal, see
-  //     PUSH_WARD_DISTANCE's doc for the full context. Previously a Warded
-  //     target was fully excluded from getChargedShotTargets, no
-  //     affordability escape hatch — that was ITSELF the prior session's fix
-  //     for archer-vs-mage overshooting archer-favored, so this reopens that
-  //     lever; CHARGED_SHOT_WARD_DISTANCE is the new dedicated re-tune knob
-  //     for it, scoped to Mage matchups by construction since isWarded is
-  //     never true otherwise.) ------------------------------------------
+  // --- Charged Shot vs Ward (RETIRED pierce, 2026-09-17): walls are
+  //     absolute now, and Ward's old distance-tier pierce retired with
+  //     them — a Warded target is excluded from getChargedShotTargets
+  //     outright, the same isProtected check every other pool uses. ------
   {
     // p2 mage's only on-board token (id4) is trivially most-advanced -> warded.
     const posWard = 8;
@@ -1623,22 +1421,13 @@ function check(name: string, cond: boolean, detail?: string) {
       "Charged Shot vs Ward: sanity — the target really is warded",
       isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!),
     );
-
     check(
-      "Charged Shot: a Warded target IS a legal target (Ward changes distance, not legality)",
-      getChargedShotTargets(sWard, pwWard, "p1").includes(4),
+      "Charged Shot: a Warded target is NOT a legal target at all",
+      !getChargedShotTargets(sWard, pwWard, "p1").includes(4),
     );
 
-    const rWard = applyChargedShot(sWard, pwWard, 4, "p1");
-    const movedWard = rWard.state.tokens.find((t) => t.id === 4)!;
-    check(
-      "Charged Shot vs Ward: knocks back exactly CHARGED_SHOT_WARD_DISTANCE, not CHARGED_SHOT_DISTANCE",
-      movedWard.position === posWard - CHARGED_SHOT_WARD_DISTANCE,
-      `landed at ${movedWard.position}, expected ${posWard - CHARGED_SHOT_WARD_DISTANCE}`,
-    );
-
-    // Meanwhile, an UNwarded enemy (mage's charges below cap) still uses the
-    // unwarded, stronger distance — confirms the branch is isWarded-specific.
+    // An UNwarded enemy (mage's charges below cap) is a completely ordinary
+    // target, knocked back CHARGED_SHOT_DISTANCE — the only tier left.
     const pwUnwarded = power({ p1: "archer", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP - 1 });
     check(
       "Charged Shot: an unwarded enemy (charges below cap) is a legal target",
@@ -1647,78 +1436,40 @@ function check(name: string, cond: boolean, detail?: string) {
     const rUnwarded = applyChargedShot(sWard, pwUnwarded, 4, "p1");
     const movedUnwarded = rUnwarded.state.tokens.find((t) => t.id === 4)!;
     check(
-      "Charged Shot vs an unwarded target: knocks back CHARGED_SHOT_DISTANCE, the stronger tier",
+      "Charged Shot vs an unwarded target: knocks back CHARGED_SHOT_DISTANCE, the only tier left",
       movedUnwarded.position === posWard - CHARGED_SHOT_DISTANCE,
       `landed at ${movedUnwarded.position}, expected ${posWard - CHARGED_SHOT_DISTANCE}`,
     );
   }
 
-  // --- Kasen's requested strength ordering holds as a standing invariant:
-  //     push-vs-ward < push-vs-normal < charged-vs-ward < charged-vs-normal.
-  //     A cheap regression guard against ever silently drifting out of order
-  //     again while retuning any one of the four values. ------------------
-  {
-    check(
-      "Strength order: push-vs-ward < push-vs-normal",
-      PUSH_WARD_DISTANCE < PUSH_DISTANCE,
-      `PUSH_WARD_DISTANCE=${PUSH_WARD_DISTANCE}, PUSH_DISTANCE=${PUSH_DISTANCE}`,
-    );
-    check(
-      "Strength order: push-vs-normal < charged-vs-ward",
-      PUSH_DISTANCE < CHARGED_SHOT_WARD_DISTANCE,
-      `PUSH_DISTANCE=${PUSH_DISTANCE}, CHARGED_SHOT_WARD_DISTANCE=${CHARGED_SHOT_WARD_DISTANCE}`,
-    );
-    check(
-      "Strength order: charged-vs-ward < charged-vs-normal",
-      CHARGED_SHOT_WARD_DISTANCE < CHARGED_SHOT_DISTANCE,
-      `CHARGED_SHOT_WARD_DISTANCE=${CHARGED_SHOT_WARD_DISTANCE}, CHARGED_SHOT_DISTANCE=${CHARGED_SHOT_DISTANCE}`,
-    );
-  }
-
-  // --- Charged Shot's send-home immunity: static, never save-consuming
-  //     (2026-07-20, Kasen's field report — the old reveal-time accounting
-  //     melted a Reinforced Bulwark one save per flip against a camped
-  //     full-bank archer, no shot ever fired; see getBulwarkBlockedIds) ----
+  // --- Walls are absolute against Charged Shot too — no soft-shove
+  //     exception left (unlike the old reveal-time save accounting, a wall
+  //     never melts from being targeted: it simply isn't in the pool). ----
   {
     const posHome = 9;
     const sChargedShotOnly = state("p1", { 4: posHome, 5: posHome - CHARGED_SHOT_DISTANCE });
     const pwAtCap: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
-      bulwarked: { 4: 3 },
-      bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES },
+      walls: { 4: "bulwark" },
     };
     check(
-      "Bulwark: a would-send-home Charged Shot keeps the target out of the pool",
+      "Walls: a walled target is out of Charged Shot's pool even with a clean (non-collision) landing",
       !getChargedShotTargets(sChargedShotOnly, pwAtCap, "p1").includes(4),
     );
-    check(
-      "Bulwark: Charged Shot send-home immunity is static — never a save-consuming block",
-      !getBulwarkBlockedIds(sChargedShotOnly, pwAtCap, 1).includes(4),
-    );
-    // The melt regression itself: three archer flips at full bank, no shot
-    // fired — the Reinforced Bulwark must not lose a single save.
-    let pw = pwAtCap;
-    for (let i = 0; i < 3; i++) pw = tickBulwarkForReflip(sChargedShotOnly, pw, 1).power;
-    check(
-      "Reinforced Bulwark: does NOT melt from a camped full-bank archer",
-      pw.bulwarked[4] !== undefined && pw.bulwarkSaves[4] === BULWARK_REINFORCED_SAVES,
-      JSON.stringify({ bulwarked: pw.bulwarked, saves: pw.bulwarkSaves }),
-    );
-    // A SOFT shove stays available: same shot with a clear landing is in
-    // the pool (the tool that still moves a reinforced stone).
     const sSoft = state("p1", { 4: posHome });
+    const pwSoft: PowerState = { ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }), walls: { 4: "bulwark" } };
     check(
-      "Bulwark: a soft Charged Shot shove is still offered against a reinforced stone",
-      getChargedShotTargets(sSoft, pwAtCap, "p1").includes(4),
+      "Walls: a walled target is out of the pool for a soft shove too — no partial exception",
+      !getChargedShotTargets(sSoft, pwSoft, "p1").includes(4),
     );
   }
 
-  // --- REGRESSION (2026-07-17): an ultimate-ready threat never counts as a
-  //     Bulwark block — ultimates pierce Bulwark, so nothing was blocked and
-  //     no save may be spent. (Guards against reintroducing the deleted
-  //     Blink-Strike/Warpath branches in getBulwarkBlockedIds.) -------------
+  // --- REGRESSION (2026-07-17, still true under the wall rework): an
+  //     ultimate-ready threat never counts as a wall BLOCK — ultimates
+  //     pierce a wall, so nothing was blocked and getBulwarkBlockedIds
+  //     (announcement-only now) must not report it. ------------------------
   {
-    // p2's Bulwarked token at 9 is out of reach of any normal capture/Push
+    // p2's walled token at 9 is out of reach of any normal capture/Push
     // (p1's only token is far behind at 4 with a flip of 1 -> to 5), but a
     // ready Blink Strike could take it — that must NOT read as "blocked."
     const sUltThreat = state("p1", { 0: 4, 4: 9 });
@@ -1726,10 +1477,10 @@ function check(name: string, cond: boolean, detail?: string) {
     const pwUltReady: PowerState = {
       ...baseUlt,
       ultimateReady: { ...baseUlt.ultimateReady, p1: true },
-      bulwarked: { 4: 3 },
+      walls: { 4: "bulwark" },
     };
     check(
-      "Bulwark: a ready ultimate's reach never counts as a block (it pierces instead)",
+      "Walls: a ready ultimate's reach never counts as a block (it pierces instead)",
       !getBulwarkBlockedIds(sUltThreat, pwUltReady, 1).includes(4),
       JSON.stringify(getBulwarkBlockedIds(sUltThreat, pwUltReady, 1)),
     );
@@ -1904,22 +1655,25 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- The dead feel no magic: a thrall's capture pierces Ward -----------
+  // --- RETIRED 2026-09-17: "the dead feel no magic," the thrall's old Ward
+  //     pierce, is gone along with Ward Breaker and the Blessed Blade —
+  //     walls are absolute and Ward stopped being pierceable by anything
+  //     below an ultimate. A thrall is now blocked by Ward exactly like a
+  //     living stone. ------------------------------------------------------
   {
     // p2 is a mage at full cap; their most-advanced FREE token is warded.
-    // p1's thrall stands one tile behind it: the thrall's capture is legal
-    // and flagged as a ward break; p1's own (living) token is still blocked.
+    // p1's thrall stands one tile behind it: the thrall's landing is no
+    // longer legal, same as it would be for a living stone.
     const pw: PowerState = {
       ...power({ p1: "necromancer", p2: "mage" }, { p2: CHARGE_CAP }),
       thrall: { p1: { tokenId: 4, turnsLeft: 2 }, p2: null },
     };
     const s = state("p1", { 0: 5, 4: 7, 5: 9 });
-    check("Ward pierce: the target is genuinely warded", isWarded(s, pw, s.tokens.find((t) => t.id === 5)!));
+    check("Ward pierce RETIRED: the target is genuinely warded", isWarded(s, pw, s.tokens.find((t) => t.id === 5)!));
     const pierce = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 9);
-    check("Ward pierce: the thrall's capture is legal", !!pierce && pierce.captures.includes(5), JSON.stringify(pierce));
-    check("Ward pierce: announced as a ward break", !!pierce && pierce.breaksWard === true);
+    check("Ward pierce RETIRED: the thrall's landing is no longer legal", pierce === undefined, JSON.stringify(pierce));
     const living = getLegalPowerMoves(s, pw, 4).find((mv) => mv.tokenId === 0 && mv.to === 9);
-    check("Ward pierce: the necromancer's LIVING stones stay blocked", living === undefined, JSON.stringify(living));
+    check("Ward pierce RETIRED: the necromancer's LIVING stones stay blocked too", living === undefined, JSON.stringify(living));
   }
 
   // --- Corpse Explosion: the 2-soul GRAVE spend (2026-09-16 split) -------
@@ -1963,8 +1717,8 @@ function check(name: string, cond: boolean, detail?: string) {
       grave: { p1: 8, p2: null },
     };
     check("Explosion: Ward turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 8 }), pwWard, "p1").includes(5));
-    const pwBul: PowerState = { ...ready, bulwarked: { 5: 2 } };
-    check("Explosion: Bulwark turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 8 }), pwBul, "p1").includes(5));
+    const pwBul: PowerState = { ...ready, walls: { 5: "bulwark" } };
+    check("Explosion: a wall turns the blast", !getCorpseExplosionTargets(state("p1", { 5: 8 }), pwBul, "p1").includes(5));
 
     // Apply: lethal (2026-09-13) — the victim goes home, flat cost, desecration.
     const sApply = state("p1", { 5: 8, 6: 9 }); // 5 stands on the grave; 6 one tile out is safe at radius 0
@@ -2159,20 +1913,21 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Exhume: walks back past occupied tiles", r2.returnedTo === EXHUME_RETURN_POSITION - 2, `landed ${r2.returnedTo}`);
 
     // A Bulwark cast before the token escaped must not ride back with it.
-    const pwB: PowerState = { ...pw, bulwarked: { 4: 2 }, bulwarkSaves: { 4: BULWARK_REINFORCED_SAVES } };
+    const pwB: PowerState = { ...pw, walls: { 4: "bulwark" } };
     const r3 = applyExhume(s, pwB, 4, "p1");
     check(
-      "Exhume: strips a stale Bulwark on the way back",
-      r3.power.bulwarked[4] === undefined && r3.power.bulwarkSaves[4] === undefined,
+      "Exhume: strips a stale wall on the way back",
+      r3.power.walls[4] === undefined,
     );
   }
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: Bless / Heal target pools and casts
+// Cleric: Bless (raises a wall) / Vigil (banks upkeep grace) target pools
+// and casts — replaces the old Bless/Heal pair under the wall rework.
 // ---------------------------------------------------------------------------
 {
-  // Bless pool: own on-board stones with no vitality entry, full bank only.
+  // Bless pool: own on-board stones with no live wall, full bank only.
   const s = state("p1", { 0: 5, 1: 2, 4: 8 });
   const pwBroke = power({ p1: "cleric" }, { p1: BLESS_COST - 1 });
   check("Bless: empty pool below the full bank", getBlessTargets(s, pwBroke, "p1").length === 0);
@@ -2182,9 +1937,9 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Bless: own on-board stones eligible (contested and private lane alike)", pool.includes(0) && pool.includes(1));
   check("Bless: reserve and enemy stones excluded", !pool.includes(2) && !pool.includes(4));
 
-  const pwBlessed: PowerState = { ...pw, vitality: { 0: "blessed", 1: "wounded" } };
-  const pool2 = getBlessTargets(s, pwBlessed, "p1");
-  check("Bless: already-blessed and wounded stones excluded (Heal's job)", !pool2.includes(0) && !pool2.includes(1));
+  const pwWalled: PowerState = { ...pw, walls: { 0: "blessing" } };
+  const pool2 = getBlessTargets(s, pwWalled, "p1");
+  check("Bless: an already-walled stone is excluded from re-targeting", !pool2.includes(0));
 
   // A stone possessed AGAINST the cleric is not theirs to bless.
   const pwPoss: PowerState = {
@@ -2193,137 +1948,99 @@ function check(name: string, cond: boolean, detail?: string) {
   };
   check("Bless: a stone possessed against the cleric is excluded", !getBlessTargets(s, pwPoss, "p1").includes(0));
 
-  // The cast: spends the mana, flags the stone, KEEPS the turn (Revive's
-  // contract — no streak interaction, no board movement).
+  // The cast: spends the mana, raises a "blessing" wall, KEEPS the turn
+  // (Revive's contract — no streak interaction, no board movement).
   const pwStreak: PowerState = { ...pw, shieldStreak: { p1: 2, p2: 0 } };
   const r = applyBless(s, pwStreak, 0, "p1");
   check("Bless: spends BLESS_COST", r.power.charges.p1 === 0);
-  check("Bless: flags the stone blessed", r.power.vitality[0] === "blessed");
+  check("Bless: raises a 'blessing' wall on the target", r.power.walls[0] === "blessing");
   check("Bless: keeps the turn (Revive's contract)", r.state.currentPlayer === "p1");
   check("Bless: leaves the shield streak alone", r.power.shieldStreak.p1 === 2);
   check("Bless: moves no tokens", r.state.tokens.find((t) => t.id === 0)!.position === 5);
 
-  // Heal pool: wounded stones only, HEAL_COST affordability baked in.
-  const pwW: PowerState = { ...power({ p1: "cleric" }, { p1: HEAL_COST }), vitality: { 0: "wounded", 1: "blessed" } };
-  const healPool = getHealTargets(s, pwW, "p1");
-  check("Heal: wounded stones only", healPool.includes(0) && !healPool.includes(1) && healPool.length === 1);
-  const pwWBroke: PowerState = { ...pwW, charges: { p1: 0, p2: 0 } };
-  check("Heal: empty pool when unaffordable", getHealTargets(s, pwWBroke, "p1").length === 0);
+  // Vigil (replaces Heal): needs at least one live wall, VIGIL_COST
+  // affordability baked in; ENDS the turn (unlike Bless — the tempo price
+  // VIGIL_COST's doc records) and grants a turn of wallGrace, not a target.
+  check("Vigil: not castable with zero walls up, even with mana", !canCastVigil(s, power({ p1: "cleric" }, { p1: VIGIL_COST }), "p1"));
+  const pwV: PowerState = { ...power({ p1: "cleric" }, { p1: VIGIL_COST }), walls: { 0: "blessing" } };
+  check("Vigil: castable once a wall is up and it's affordable", canCastVigil(s, pwV, "p1"));
+  const pwVBroke: PowerState = { ...pwV, charges: { p1: 0, p2: 0 } };
+  check("Vigil: not castable unaffordable, even with a wall up", !canCastVigil(s, pwVBroke, "p1"));
 
-  const rh = applyHeal(s, pwW, 0, "p1");
-  check("Heal: mends wounded back to blessed", rh.power.vitality[0] === "blessed");
-  check("Heal: spends HEAL_COST", rh.power.charges.p1 === 0);
-  check("Heal: ends the turn (the mend pays tempo — unlike Bless)", rh.state.currentPlayer === "p2");
+  const rv = applyVigil(s, pwV, "p1");
+  check("Vigil: spends VIGIL_COST", rv.power.charges.p1 === 0);
+  check("Vigil: banks one turn of wallGrace", rv.power.wallGrace.p1 === 1);
+  check("Vigil: the wall itself is untouched by the cast", rv.power.walls[0] === "blessing");
+  check("Vigil: ends the turn (the tempo price Bless doesn't pay)", rv.state.currentPlayer === "p2");
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: the wound split on the landing-capture path
+// Cleric: a blessed (walled) stone is uncapturable below an ultimate
+// (RETIRED 2026-09-17: the wound split — a blessed victim surviving a
+// landing/Snipe/sweep/Push/Charged Shot/blast hit as "wounded," with the
+// blessed blade piercing Ward and Larceny/the soul bounty skipping a wound
+// — is gone entirely. A Blessing is a WALL now: isProtected excludes it
+// from every one of those pools outright, the same absolute immunity
+// section 14 already established for Bulwark. This section is the
+// Cleric-flavored confirmation, not a re-litigation of section 14's
+// general coverage.)
 // ---------------------------------------------------------------------------
 {
-  // p2 archer at 6 flips 2 -> lands on 8 where p1 cleric's BLESSED stone
-  // stands. Legality is unchanged (blessing is not protection) — the move
-  // still lists the capture — but resolution wounds instead of kills.
+  // Landing capture: no longer even a legal move.
   const s = state("p2", { 0: 8, 4: 6 });
-  const pw: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "blessed" } };
+  const pw: PowerState = { ...power({ p1: "cleric", p2: "archer" }), walls: { 0: "blessing" } };
   const moves = getLegalPowerMoves(s, pw, 2);
   const m = moves.find((mv) => mv.tokenId === 4 && mv.to === 8);
-  check("Wound: blessed enemy is still a legal capture target", !!m && m.captures.includes(0), JSON.stringify(m));
+  check("Walls: a blessed enemy is no longer a legal landing-capture target at all", m === undefined, JSON.stringify(moves));
 
-  const r = applyPowerMove(s, pw, m!, "p2");
-  const victim = r.state.tokens.find((t) => t.id === 0)!;
-  check("Wound: blessed victim survives (not in reserve)", victim.position !== -1);
-  check("Wound: landing victim staggers back to the nearest free tile", victim.position === 7, `at ${victim.position}`);
-  check("Wound: vitality downgrades to wounded", r.power.vitality[0] === "wounded");
-  check("Wound: reported in the wounded list with its landing", r.wounded.length === 1 && r.wounded[0].tokenId === 0 && r.wounded[0].to === 7);
-  check("Wound: attacker occupies the landing tile", r.state.tokens.find((t) => t.id === 4)!.position === 8);
-  check("Wound: breaking the blessing pays the standard charge", r.power.charges.p2 === 1);
+  // Snipe: excluded from the bonus-capture pool the same way.
+  const sSnipe = state("p2", { 0: 9, 4: 6 });
+  const mSnipe = getLegalPowerMoves(sSnipe, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
+  check("Walls: a blessed stone is never a Snipe bonus capture", !mSnipe.bonusCaptures.includes(0));
 
-  // Stagger-back walks past occupied tiles — 7 held by the victim's own
-  // sibling, so the retreat continues to 6... which the ATTACKER vacated
-  // (it moved 6 -> 8), so 6 is free.
-  const s2 = state("p2", { 0: 8, 1: 7, 4: 6 });
-  const m2 = getLegalPowerMoves(s2, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
-  const r2 = applyPowerMove(s2, pw, m2, "p2");
-  check("Wound: stagger walks past an occupied tile", r2.state.tokens.find((t) => t.id === 0)!.position === 6, `at ${r2.state.tokens.find((t) => t.id === 0)!.position}`);
+  // Charge sweep: excluded from the sweep pool too.
+  const sSweep = state("p2", { 0: 5, 4: 4 });
+  const pwSweep: PowerState = { ...power({ p1: "cleric", p2: "warrior" }, { p2: 1 }), walls: { 0: "blessing" } };
+  const mSweep = getLegalPowerMoves(sSweep, pwSweep, 2).find((mv) => mv.tokenId === 4 && mv.to === 6)!;
+  check("Walls: a blessed enemy is never swept by Charge", !mSweep.chargeSweepCaptures.includes(0));
 
-  // A WOUNDED (blessing already broken) stone dies for real, entry cleared.
-  const pwW: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "wounded" } };
-  const m3 = getLegalPowerMoves(s, pwW, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
-  const r3 = applyPowerMove(s, pwW, m3, "p2");
-  check("Wound: a wounded stone is killed for real", r3.state.tokens.find((t) => t.id === 0)!.position === -1);
-  check("Wound: the dead stone's vitality entry clears", r3.power.vitality[0] === undefined);
-  check("Wound: a real kill still pays the capture charge", r3.power.charges.p2 === 1);
+  // Necromancer landing on a blessed stone: no move at all, so trivially no
+  // bounty and no corpse — the old "wound denies income" test collapses to
+  // this single legality check now.
+  const pwNecro: PowerState = { ...power({ p1: "cleric", p2: "necromancer" }), walls: { 0: "blessing" } };
+  const mNecro = getLegalPowerMoves(s, pwNecro, 2).find((mv) => mv.tokenId === 4 && mv.to === 8);
+  check("Walls: a necromancer can't even attempt the landing — no bounty, no corpse, ever", mNecro === undefined);
 
-  // The retreat can leave the contested row into the victim's own private
-  // lane — and a cross-owner numeric match there is NOT a collision: p2's
-  // token 6 sits at ITS OWN private tile 3, a different physical square
-  // from p1's tile 3, so the wounded stone still retreats 4 -> 3.
-  const s4 = state("p2", { 0: 4, 5: 2, 6: 3 });
-  const pw4: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "blessed" } };
-  const m4 = getLegalPowerMoves(s4, pw4, 2).find((mv) => mv.tokenId === 5 && mv.to === 4);
-  check("Wound: setup — p2 archer can land on tile 4", !!m4 && m4!.captures.includes(0));
-  const r4 = applyPowerMove(s4, pw4, m4!, "p2");
-  check(
-    "Wound: retreat crosses into the victim's own private lane, ignoring cross-owner numeric matches",
-    r4.state.tokens.find((t) => t.id === 0)!.position === 3,
-    `at ${r4.state.tokens.find((t) => t.id === 0)!.position}`,
-  );
+  // Push / Charged Shot: excluded from their target pools outright — no
+  // "soft shove still lands" carve-out left (see section 14's own coverage
+  // for the general case; this just confirms Blessing shares it).
+  const sPush = state("p1", { 0: 6, 4: 9 });
+  const pwPush: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: 1 }), walls: { 4: "blessing" } };
+  check("Walls: a blessed stone is not a legal Push target at all", !getPushTargets(sPush, pwPush, "p1").includes(4));
+  const pwShot: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: CHARGE_CAP }), walls: { 4: "blessing" } };
+  check("Walls: a blessed stone is not a legal Charged Shot target at all", !getChargedShotTargets(sPush, pwShot, "p1").includes(4));
+
+  // Corpse Explosion: excluded from the blast radius's victim pool.
+  const pwBlast: PowerState = {
+    ...power({ p1: "necromancer", p2: "cleric" }, { p1: CORPSE_EXPLOSION_COST }),
+    corpse: { p1: { tokenId: 6, tile: 6 }, p2: null },
+    grave: { p1: 6, p2: null },
+    walls: { 4: "blessing" },
+  };
+  check("Walls: a blessed stone is excluded from Corpse Explosion's blast pool", !getCorpseExplosionTargets(state("p1", { 4: 6 }), pwBlast, "p1").includes(4));
+
+  // Larceny: with nothing to capture, the Rogue's drain never fires either
+  // — the old "a wound pays no Larceny" case collapses to "no move exists."
+  const sLarc = state("p1", { 0: 4, 4: 6 });
+  const pwLarc: PowerState = { ...power({ p1: "rogue", p2: "cleric" }, { p2: 2 }), walls: { 4: "blessing" } };
+  const mLarc = getLegalPowerMoves(sLarc, pwLarc, 2).find((mv) => mv.tokenId === 0 && mv.to === 6);
+  check("Walls: Larceny's own target is unreachable too — no move, no drain", mLarc === undefined);
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: wounds from Snipe, Charge sweep, and the no-charge-for-wounds rule
-// ---------------------------------------------------------------------------
-{
-  // Snipe a blessed target: it wounds and HOLDS its tile (never on the
-  // landing tile by construction).
-  const s = state("p2", { 0: 9, 4: 6 });
-  const pw: PowerState = { ...power({ p1: "cleric", p2: "archer" }), vitality: { 0: "blessed" } };
-  const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
-  check("Wound/Snipe: blessed target still sniped", m.bonusCaptures.includes(0));
-  const r = applyPowerMove(s, pw, m, "p2");
-  const victim = r.state.tokens.find((t) => t.id === 0)!;
-  check("Wound/Snipe: sniped blessed stone holds its tile", victim.position === 9);
-  check("Wound/Snipe: wounded, not dead", r.power.vitality[0] === "wounded");
-  check("Wound/Snipe: a wound-only move still pays the standard charge", r.power.charges.p2 === 1);
-
-  // Charge sweep over a blessed enemy: wounded in place; a mortal enemy in
-  // the same sweep dies and pays the (single) capture charge.
-  const s2 = state("p2", { 0: 7 - 1, 4: 4 }); // p1 blessed at 6; warrior at 4 charges to 8? lane 5,6,7 — 7 is shield...
-  void s2;
-  const s3 = state("p2", { 0: 5, 4: 4 });
-  const pwW: PowerState = { ...power({ p1: "cleric", p2: "warrior" }, { p2: 1 }), vitality: { 0: "blessed" } };
-  const m3 = getLegalPowerMoves(s3, pwW, 2).find((mv) => mv.tokenId === 4 && mv.to === 6)!;
-  check("Wound/sweep: blessed enemy still listed in the sweep", m3.chargeSweepCaptures.includes(0));
-  const r3 = applyCharge(s3, pwW, m3, "p2");
-  const swept = r3.state.tokens.find((t) => t.id === 0)!;
-  check("Wound/sweep: swept blessed stone wounded in place", swept.position === 5 && r3.power.vitality[0] === "wounded");
-  check("Wound/sweep: charge spent, wound pays the standard charge back", r3.power.charges.p2 === 1);
-}
-
-// ---------------------------------------------------------------------------
-// Cleric: wounds deny the necromancer's corpse and bounty
-// ---------------------------------------------------------------------------
-{
-  // Necromancer lands on a blessed cleric stone: wound — no soul bounty,
-  // no corpse marker. Only a FULL kill feeds the graveyard.
-  const s = state("p2", { 0: 8, 4: 6 });
-  const pw: PowerState = { ...power({ p1: "cleric", p2: "necromancer" }), vitality: { 0: "blessed" } };
-  const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
-  const r = applyPowerMove(s, pw, m, "p2");
-  check("Wound/necro: a wound pays the generic charge, never the bounty", r.power.charges.p2 === 1);
-  check("Wound/necro: no corpse marked", r.power.corpse.p2 === null);
-  check("Wound/necro: victim wounded, not killed", r.power.vitality[0] === "wounded" && r.state.tokens.find((t) => t.id === 0)!.position !== -1);
-
-  // Same landing against a WOUNDED stone: full kill, full bounty, corpse.
-  const pwW: PowerState = { ...power({ p1: "cleric", p2: "necromancer" }), vitality: { 0: "wounded" } };
-  const mW = getLegalPowerMoves(s, pwW, 2).find((mv) => mv.tokenId === 4 && mv.to === 8)!;
-  const rW = applyPowerMove(s, pwW, mW, "p2");
-  check("Wound/necro: killing a wounded stone pays the full bounty", rW.power.charges.p2 === SOUL_BOUNTY_CHARGES);
-  check("Wound/necro: and marks the corpse", rW.power.corpse.p2?.tokenId === 0 && rW.power.corpse.p2?.tile === 8);
-}
-
-// ---------------------------------------------------------------------------
-// Cleric: ultimates pierce the blessing
+// Cleric: ultimates still pierce the wall (Rain of Arrows / Blink Strike /
+// Warpath) — unchanged in spirit from the old "ultimates pierce the
+// blessing," renamed for the wall vocabulary.
 // ---------------------------------------------------------------------------
 {
   // Rain of Arrows (banked cast) kills a blessed stone for real.
@@ -2331,12 +2048,12 @@ function check(name: string, cond: boolean, detail?: string) {
   const pw: PowerState = {
     ...power({ p1: "cleric", p2: "archer" }),
     ultimateReady: { p1: false, p2: true },
-    vitality: { 0: "blessed" },
+    walls: { 0: "blessing" },
   };
   check("Pierce: setup — the blessed stone is in the pool", getRainOfArrowsTargets(s, pw, "p2").includes(0));
   const r = applyRainOfArrows(s, pw, 0, "p2");
   check("Pierce: Rain of Arrows kills a blessed stone outright", r.state.tokens.find((t) => t.id === 0)!.position === -1);
-  check("Pierce: the dead stone's vitality entry clears", r.power.vitality[0] === undefined);
+  check("Pierce: the dead stone's wall clears", r.power.walls[0] === undefined);
   check("Pierce: the ultimate is spent", r.power.ultimateReady.p2 === false);
 
   // Blink Strike: same pierce.
@@ -2344,216 +2061,131 @@ function check(name: string, cond: boolean, detail?: string) {
   const pw2: PowerState = {
     ...power({ p1: "cleric", p2: "mage" }),
     ultimateReady: { p1: false, p2: true },
-    vitality: { 0: "blessed" },
+    walls: { 0: "blessing" },
   };
   check("Pierce: Blink Strike lists the blessed stone", getBlinkStrikeTargets(s2, pw2, "p2").includes(0));
   const r2 = applyBlinkStrike(s2, pw2, 0, "p2");
-  check("Pierce: Blink Strike kills through the blessing", r2.state.tokens.find((t) => t.id === 0)!.position === -1 && r2.power.vitality[0] === undefined);
+  check("Pierce: Blink Strike kills through the blessing", r2.state.tokens.find((t) => t.id === 0)!.position === -1 && r2.power.walls[0] === undefined);
 
   // Warpath: primary AND swept blessed stones both die.
   const s3 = state("p2", { 0: 9, 1: 7 + 1, 4: 5, 5: 11 });
   const pw3: PowerState = {
     ...power({ p1: "cleric", p2: "warrior" }),
     ultimateReady: { p1: false, p2: true },
-    vitality: { 0: "blessed", 1: "blessed" },
+    walls: { 0: "blessing", 1: "blessing" },
   };
   const r3 = applyWarpath(s3, pw3, 0, "p2");
   check("Pierce: Warpath primary blessed target dies", r3.state.tokens.find((t) => t.id === 0)!.position === -1);
   check("Pierce: Warpath swept blessed target dies too", r3.state.tokens.find((t) => t.id === 1)!.position === -1 && r3.sweptTokenIds.includes(1));
-  check("Pierce: both vitality entries clear", r3.power.vitality[0] === undefined && r3.power.vitality[1] === undefined);
+  check("Pierce: both walls clear", r3.power.walls[0] === undefined && r3.power.walls[1] === undefined);
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: blessing absorbs knockback send-homes (Push / Charged Shot / blast)
+// Cleric: Sanctified Ground (a shield landing banks wallGrace) + Benediction
+// (walls the whole army with a grace turn) — reworked 2026-09-17: the old
+// "mend a wounded stone back to blessed" version retired with the wound
+// split; both now grant the SAME wallGrace field Vigil spends from.
 // ---------------------------------------------------------------------------
 {
-  // Push that WOULD send home (collision behind): blessed target is wounded
-  // and holds its ground; the pusher gets no refund.
-  const s = state("p1", { 0: 6, 4: 8, 5: 7 }); // p2's 4 at 8, its own 5 at 7 -> push collides
-  const pw: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: 1 }), vitality: { 4: "blessed" } };
-  check("Absorb/Push: blessed stone is still a push target", getPushTargets(s, pw, "p1").includes(4));
-  const r = applyPush(s, pw, 4, "p1");
-  const target = r.state.tokens.find((t) => t.id === 4)!;
-  check("Absorb/Push: target holds its ground", target.position === 8);
-  check("Absorb/Push: wounded, not sent home", r.power.vitality[4] === "wounded");
-  check("Absorb/Push: reported", r.woundedTokenId === 4);
-  check("Absorb/Push: breaking the blessing refunds the charge", r.power.charges.p1 === 1);
-
-  // A soft shove (free tile behind) displaces a blessed stone normally.
-  const s2 = state("p1", { 0: 6, 4: 9 });
-  const r2 = applyPush(s2, pw, 4, "p1");
-  check("Absorb/Push: soft shove still moves a blessed stone", r2.state.tokens.find((t) => t.id === 4)!.position === 8);
-  check("Absorb/Push: blessing intact through a soft shove", r2.power.vitality[4] === "blessed");
-  check("Absorb/Push: no wound reported on a soft shove", r2.woundedTokenId === null);
-
-  // A WOUNDED stone pushed home dies and loses its entry.
-  const pwW: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: 1 }), vitality: { 4: "wounded" } };
-  const rW = applyPush(s, pwW, 4, "p1");
-  check("Absorb/Push: a wounded stone still dies to a send-home", rW.state.tokens.find((t) => t.id === 4)!.position === -1);
-  check("Absorb/Push: its entry clears", rW.power.vitality[4] === undefined);
-  check("Absorb/Push: the kill refunds as usual", rW.power.charges.p1 === 1);
-
-  // Charged Shot send-home vs blessed: absorbed the same way.
-  const s3 = state("p1", { 0: 6, 4: 6 + CHARGED_SHOT_DISTANCE - 3, 5: 0 });
-  void s3;
-  const sC = state("p1", { 0: 11, 4: 3 + CHARGED_SHOT_DISTANCE }); // underflow-adjacent: 4 at 3+4=7? shield... pick plain positions
-  void sC;
-  // Simple: target at position 2 (own lane) is off the contested row —
-  // Charged Shot pool needs contested. Use target at 4: knockback 4 -> 0
-  // via CHARGED_SHOT_DISTANCE=4, landing 0 is its own lane (free) — soft.
-  // For a send-home use a target at 4 with distance 4 -> 0 occupied by its
-  // own sibling.
-  const s4 = state("p1", { 0: 6, 4: 4, 5: 0 });
-  const pw4: PowerState = { ...power({ p1: "archer", p2: "cleric" }, { p1: CHARGE_CAP }), vitality: { 4: "blessed" } };
-  check("Absorb/Shot: blessed stone targetable", getChargedShotTargets(s4, pw4, "p1").includes(4));
-  const r4 = applyChargedShot(s4, pw4, 4, "p1");
-  check("Absorb/Shot: blessed target wounded in place", r4.state.tokens.find((t) => t.id === 4)!.position === 4 && r4.power.vitality[4] === "wounded");
-  check("Absorb/Shot: cost spent, break refunds one", r4.power.charges.p1 === CHARGE_CAP - CHARGED_SHOT_COST + 1);
-  check("Absorb/Shot: reported", r4.woundedTokenId === 4);
-
-  // Corpse Explosion: a blessed victim standing on the grave is wounded in
-  // place instead of going home; a mortal one still dies (radius 0: the
-  // grave holds one stone, so the two cases are two blasts).
-  const pw6: PowerState = {
-    ...power({ p1: "necromancer", p2: "cleric" }, { p1: CORPSE_EXPLOSION_COST }),
-    corpse: { p1: { tokenId: 6, tile: 6 }, p2: null },
-    grave: { p1: 6, p2: null },
-    vitality: { 4: "blessed" },
-  };
-  const r6 = applyCorpseExplosion(state("p1", { 4: 6 }), pw6, "p1");
-  check("Absorb/Blast: blessed victim wounded in place", r6.state.tokens.find((t) => t.id === 4)!.position === 6 && r6.power.vitality[4] === "wounded");
-  check("Absorb/Blast: reported in woundedTokenIds, not sentHomeIds", r6.woundedTokenIds.includes(4) && !r6.sentHomeIds.includes(4));
-  const r6m = applyCorpseExplosion(state("p1", { 5: 6 }), pw6, "p1");
-  check("Absorb/Blast: mortal victim killed", r6m.state.tokens.find((t) => t.id === 5)!.position === -1 && r6m.sentHomeIds.includes(5));
-}
-
-// ---------------------------------------------------------------------------
-// Cleric: Sanctified Ground (shield landings mend) + Benediction
-// ---------------------------------------------------------------------------
-{
-  // Cleric lands on the shield tile with two wounded stones: both mend.
+  // Cleric lands on the shield tile: banks a turn of wallGrace.
   const s = state("p1", { 0: 6, 1: 4, 2: 5 });
-  const pw: PowerState = { ...power({ p1: "cleric" }), vitality: { 1: "wounded", 2: "wounded" } };
+  const pw: PowerState = { ...power({ p1: "cleric" }), walls: { 1: "blessing", 2: "blessing" } };
   const m = getLegalPowerMoves(s, pw, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
-  check("Mend: setup — shield landing", m.landsOnShield);
+  check("Sanctified Ground: setup — shield landing", m.landsOnShield);
   const r = applyPowerMove(s, pw, m, "p1");
-  check("Mend: all wounded stones return to blessed", r.power.vitality[1] === "blessed" && r.power.vitality[2] === "blessed");
-  check("Mend: reported", r.mendedTokenIds.length === 2 && r.mendedTokenIds.includes(1) && r.mendedTokenIds.includes(2));
-  check("Mend: shield landing still grants charge + extra turn", r.power.charges.p1 === 1 && r.state.currentPlayer === "p1");
+  check("Sanctified Ground: a shield landing banks one turn of wallGrace", r.power.wallGrace.p1 === 1);
+  check("Sanctified Ground: the walls themselves are untouched by the landing", r.power.walls[1] === "blessing" && r.power.walls[2] === "blessing");
+  check("Sanctified Ground: shield landing still grants charge + extra turn", r.power.charges.p1 === 1 && r.state.currentPlayer === "p1");
 
-  // A cleric-mirror shield landing mends only the MOVER's wounded stones.
-  const sM = state("p1", { 0: 6, 1: 4, 5: 9 });
-  const pwM: PowerState = { ...power({ p1: "cleric", p2: "cleric" }), vitality: { 1: "wounded", 5: "wounded" } };
-  const mM = getLegalPowerMoves(sM, pwM, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
-  const rM = applyPowerMove(sM, pwM, mM, "p1");
-  check("Mend: mirror — only the mover's stones mend", rM.power.vitality[1] === "blessed" && rM.power.vitality[5] === "wounded");
-
-  // A NON-cleric shield landing mends nothing.
-  const pwN: PowerState = { ...power({ p1: "archer", p2: "cleric" }), vitality: { 5: "wounded" } };
+  // A NON-cleric shield landing grants no grace at all.
+  const pwN: PowerState = { ...power({ p1: "archer", p2: "cleric" }) };
   const sN = state("p1", { 0: 6, 5: 9 });
   const mN = getLegalPowerMoves(sN, pwN, 1).find((mv) => mv.tokenId === 0 && mv.to === 7)!;
   const rN = applyPowerMove(sN, pwN, mN, "p1");
-  check("Mend: non-cleric landings mend nothing", rN.power.vitality[5] === "wounded" && rN.mendedTokenIds.length === 0);
+  check("Sanctified Ground: non-cleric landings grant no grace", rN.power.wallGrace.p1 === 0);
 
-  // Benediction: pool = every own on-board stone not already blessed;
-  // the cast blesses them all, spends the flag, ends the turn, and leaves
-  // the shield streak alone.
+  // Benediction: pool = every own on-board stone not already walled
+  // (canHoldWall too); the cast walls them all, spends the flag, ends the
+  // turn, leaves the shield streak alone, and banks a turn of grace.
   const sB = state("p1", { 0: 5, 1: 2, 2: 8 });
   const pwB: PowerState = {
     ...power({ p1: "cleric" }),
     ultimateReady: { p1: true, p2: false },
     shieldStreak: { p1: 2, p2: 0 },
-    vitality: { 2: "wounded", 0: "blessed" },
+    walls: { 0: "blessing" },
   };
   const poolB = getBenedictionTargets(sB, pwB, "p1");
-  check("Benediction: pool is the unblessed on-board army", poolB.includes(1) && poolB.includes(2) && !poolB.includes(0) && !poolB.includes(3));
+  check("Benediction: pool is the unwalled on-board army", poolB.includes(1) && poolB.includes(2) && !poolB.includes(0) && !poolB.includes(3));
   const rB = applyBenediction(sB, pwB, "p1");
-  check("Benediction: blesses the army", rB.power.vitality[1] === "blessed" && rB.power.vitality[2] === "blessed" && rB.power.vitality[0] === "blessed");
+  check("Benediction: walls the army", rB.power.walls[1] === "blessing" && rB.power.walls[2] === "blessing" && rB.power.walls[0] === "blessing");
   check("Benediction: spends the flag, ends the turn", rB.power.ultimateReady.p1 === false && rB.state.currentPlayer === "p2");
   check("Benediction: leaves the shield streak alone (ultimate rule)", rB.power.shieldStreak.p1 === 2);
-  check("Benediction: reports who it blessed", rB.blessedTokenIds.length === 2);
+  check("Benediction: reports who it walled", rB.blessedTokenIds.length === 2);
+  check("Benediction: banks a turn of wallGrace for the whole army", rB.power.wallGrace.p1 === 1);
 
-  // All-blessed army: empty pool = not castable.
-  const pwAll: PowerState = { ...pwB, vitality: { 0: "blessed", 1: "blessed", 2: "blessed" } };
+  // All-walled army: empty pool = not castable.
+  const pwAll: PowerState = { ...pwB, walls: { 0: "blessing", 1: "blessing", 2: "blessing" } };
   const sAll = state("p1", { 0: 5, 1: 2, 2: 8 });
   check("Benediction: empty pool when nothing would change", getBenedictionTargets(sAll, pwAll, "p1").length === 0);
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: the blessed blade pierces Ward
+// Cleric: BLESSING_CAP — the light shelters a bounded few at a time (the
+// bleed is the REAL cap now; BLESSING_CAP is the pool-side backstop)
 // ---------------------------------------------------------------------------
 {
-  // p1 cleric's BLESSED stone lands on the mage's warded (most-advanced,
-  // full-bank) stone: legal, captures, breaksWard — the Ward Breaker /
-  // thrall exception's third member.
-  const s = state("p1", { 0: 6, 4: 8 });
-  const pw: PowerState = { ...power({ p1: "cleric", p2: "mage" }, { p2: CHARGE_CAP }), vitality: { 0: "blessed" } };
-  check("Blessed blade: setup — target is warded", isWarded(s, pw, s.tokens.find((t) => t.id === 4)!));
-  const m = getLegalPowerMoves(s, pw, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
-  check("Blessed blade: a blessed stone may strike a Warded enemy", !!m && m!.captures.includes(4), JSON.stringify(m));
-  check("Blessed blade: the strike breaks the Ward", !!m && m!.breaksWard);
-
-  // The cleric's MORTAL stone is still blocked, and so is a WOUNDED one.
-  const pwMortal: PowerState = power({ p1: "cleric", p2: "mage" }, { p2: CHARGE_CAP });
-  const mMortal = getLegalPowerMoves(s, pwMortal, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
-  check("Blessed blade: a mortal stone is still Ward-blocked", !mMortal);
-  const pwWound: PowerState = { ...pwMortal, vitality: { 0: "wounded" } };
-  const mWound = getLegalPowerMoves(s, pwWound, 2).find((mv) => mv.tokenId === 0 && mv.to === 8);
-  check("Blessed blade: a wounded stone's light is broken — no pierce", !mWound);
-}
-
-// ---------------------------------------------------------------------------
-// Cleric: BLESSING_CAP — the light shelters two at a time
-// ---------------------------------------------------------------------------
-{
-  // Parametrized against BLESSING_CAP: the first CAP stones blessed, the
-  // rest mortal — the light is spoken for.
   const s = state("p1", { 0: 5, 1: 6, 2: 8, 3: 2 });
-  const atCap: Record<number, "blessed" | "wounded"> = {};
-  for (let id = 0; id < BLESSING_CAP; id++) atCap[id] = "blessed";
-  const pwAtCap: PowerState = { ...power({ p1: "cleric" }, { p1: BLESS_COST }), vitality: { ...atCap } };
+  const atCap: Record<number, "bulwark" | "blessing"> = {};
+  for (let id = 0; id < BLESSING_CAP; id++) atCap[id] = "blessing";
+  const pwAtCap: PowerState = { ...power({ p1: "cleric" }, { p1: BLESS_COST }), walls: { ...atCap } };
   check("Cap: Bless pool empties at BLESSING_CAP live blessings", getBlessTargets(s, pwAtCap, "p1").length === 0);
-  const pwOneDown: PowerState = { ...pwAtCap, vitality: { ...atCap, 0: "wounded" } };
-  check("Cap: a wounded entry frees a slot (broken light doesn't count)", getBlessTargets(s, pwOneDown, "p1").length > 0);
-  // Heal counts against the same cap: at cap, the wounded stone can't mend.
-  const pwHealBlocked: PowerState = {
-    ...power({ p1: "cleric" }, { p1: HEAL_COST }),
-    vitality: { ...atCap, [BLESSING_CAP]: "wounded" },
-  };
-  check("Cap: Heal pool empties at the cap too", getHealTargets(s, pwHealBlocked, "p1").length === 0);
+  const pwOneDown: PowerState = { ...pwAtCap, walls: Object.fromEntries(Object.entries(atCap).filter(([id]) => Number(id) !== 0)) };
+  check("Cap: dropping a wall frees a slot", getBlessTargets(s, pwOneDown, "p1").length > 0);
   // Benediction, the ultimate, exceeds the cap freely — its pool is every
-  // on-board stone not already blessed.
+  // on-board stone not already walled.
   const pwUlt: PowerState = { ...pwAtCap, ultimateReady: { p1: true, p2: false } };
   check("Cap: Benediction ignores the cap (ultimate)", getBenedictionTargets(s, pwUlt, "p1").length === 4 - BLESSING_CAP);
   // A cleric MIRROR: the foe's blessings never count against mine.
   const sM = state("p1", { 0: 5, 5: 9, 6: 10, 7: 8 });
-  const foeCap: Record<number, "blessed" | "wounded"> = {};
-  for (let id = 4; id < 4 + BLESSING_CAP; id++) foeCap[id] = "blessed";
-  const pwM: PowerState = { ...power({ p1: "cleric", p2: "cleric" }, { p1: BLESS_COST }), vitality: foeCap };
+  const foeCap: Record<number, "bulwark" | "blessing"> = {};
+  for (let id = 4; id < 4 + BLESSING_CAP; id++) foeCap[id] = "blessing";
+  const pwM: PowerState = { ...power({ p1: "cleric", p2: "cleric" }, { p1: BLESS_COST }), walls: foeCap };
   check("Cap: mirror — only my own blessings count", getBlessTargets(sM, pwM, "p1").includes(0));
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: blessing rides through escape and Exhume
+// Cleric: a wall clears on escape — Exhume drags back an unprotected stone
+// (RETIRED 2026-09-17: "blessing rides through escape and Exhume" — the
+// new escape-clears-wall fix (resolveTurn's escape branch) means a wall
+// never survives its own owner reaching home in the first place, so by the
+// time Exhume drags the token back it has nothing left to strip)
 // ---------------------------------------------------------------------------
 {
-  // An escaped blessed token dragged back by Exhume keeps its blessing —
-  // it never died; it came home in glory and got dragged back.
+  // A blessed stone that escapes has its wall cleared on the way home —
+  // same reserve-trip-shaped hygiene every other send-home path gets.
+  const sEscape = state("p1", { 0: 13 });
+  const pwEscape: PowerState = { ...power({ p1: "cleric" }), walls: { 0: "blessing" } };
+  const mEscape = getLegalPowerMoves(sEscape, pwEscape, 1).find((mv) => mv.tokenId === 0 && mv.to === PATH_LENGTH_PER_PLAYER)!;
+  const rEscape = applyPowerMove(sEscape, pwEscape, mEscape, "p1");
+  check("Walls: an escaping stone's own wall clears on the way home", rEscape.power.walls[0] === undefined);
+
+  // Exhume then drags that (now unwalled) stone back — no free protection
+  // rides along with it.
   const s = state("p2", { 0: PATH_LENGTH_PER_PLAYER });
   const pw: PowerState = {
     ...power({ p1: "cleric", p2: "necromancer" }),
     ultimateReady: { p1: false, p2: true },
-    vitality: { 0: "blessed" },
   };
   const r = applyExhume(s, pw, 0, "p2");
-  check("Exhume: a blessed returner keeps its blessing", r.power.vitality[0] === "blessed");
+  check("Exhume: an escaped-and-dragged-back stone has no wall to strip", r.power.walls[0] === undefined);
   check("Exhume: dragged to the return tile", r.state.tokens.find((t) => t.id === 0)!.position === EXHUME_RETURN_POSITION);
 }
 
 // ---------------------------------------------------------------------------
-// Rogue: Larceny — every REAL kill also drains the foe's bank; a wound
-// (blessed victim survives) pays nothing extra, and only a Rogue's own
-// captures trigger it at all
+// Rogue: Larceny — every REAL kill also drains the foe's bank; a target
+// that's protected (walled, per the Cleric section above) is unreachable
+// in the first place, so there's no "wound" case left to pay nothing —
+// and only a Rogue's own captures trigger the drain at all
 // ---------------------------------------------------------------------------
 {
   const s = state("p1", { 0: 4, 4: 6 });
@@ -2567,16 +2199,6 @@ function check(name: string, cond: boolean, detail?: string) {
     r.power.charges.p2 === 2 - ROGUE_STEAL_ON_CAPTURE,
     `got ${r.power.charges.p2}`,
   );
-
-  // Same setup, but the victim is blessed — a WOUND, not a kill. Larceny
-  // must not fire (wounds pay only the standard capture charge, same rule
-  // Necromancer's soul bounty already follows).
-  const pwBlessed: PowerState = { ...power({ p1: "rogue", p2: "archer" }, { p2: 2 }), vitality: { 4: "blessed" } };
-  const movesBlessed = getLegalPowerMoves(s, pwBlessed, 2);
-  const mBlessed = movesBlessed.find((mv) => mv.tokenId === 0 && mv.to === 6)!;
-  const rBlessed = applyPowerMove(s, pwBlessed, mBlessed, "p1");
-  check("Larceny: a WOUND does not drain the foe", rBlessed.power.charges.p2 === 2, `got ${rBlessed.power.charges.p2}`);
-  check("Larceny: sanity — the victim really was wounded, not killed", rBlessed.power.vitality[4] === "wounded");
 
   // A non-Rogue capturing the exact same shape must not drain the foe.
   const pwArcher = power({ p1: "archer", p2: "archer" }, { p2: 2 });
@@ -2628,13 +2250,13 @@ function check(name: string, cond: boolean, detail?: string) {
     getPickpocketTargets(s, pwWarded, "p1").length === 0,
   );
 
-  const pwBulwarked: PowerState = {
+  const pwWalled: PowerState = {
     ...power({ p1: "rogue", p2: "warrior" }, { p1: 1, p2: 2 }),
-    bulwarked: { 4: 3 },
+    walls: { 4: "bulwark" },
   };
   check(
-    "Pickpocket: retired — nothing offered against a Bulwarked enemy",
-    getPickpocketTargets(s, pwBulwarked, "p1").length === 0,
+    "Pickpocket: retired — nothing offered against a walled enemy",
+    getPickpocketTargets(s, pwWalled, "p1").length === 0,
   );
 
   const r = applyPickpocket(pw, "p1");
@@ -2656,15 +2278,14 @@ function check(name: string, cond: boolean, detail?: string) {
 // Rogue: Vanish — added 2026-07-22, replacing Backstab's slot entirely (the
 // shield-breaker rework lasted about as long as it took to sim it: a 23-42%
 // win rate everywhere, since the class lost its offensive equalizer and
-// gained too little back). Vanish is Bulwark's EXACT mechanic under a Rogue
-// cast (see VANISH_COST's doc) — it writes into the same power.bulwarked
-// map Warrior's Bulwark uses, so the underlying protection (blocks a plain
-// capture, blocks a Charge sweep, pierced only by ultimates, ticked down by
-// the same tickBulwarkExpiry) is already exhaustively covered by section
-// 14's Bulwark tests above and does NOT need re-proving here — this section
-// only checks Vanish's own target pool, its apply-path economy, and one
-// integration proof that the shared protection really does activate when
-// cast via the Rogue.
+// gained too little back). RETIRED sharing Bulwark's map 2026-09-17: Vanish
+// now lives in its OWN PowerState.vanished map — a fixed VANISH_TURNS dodge,
+// no upkeep, no grace, no ultimate-adjacent countdown quirks — while a wall
+// is a PAID, unbounded-duration thing that bleeds. Both fold into the same
+// isProtected check every pool uses, so the underlying protection (blocks a
+// plain capture, a Charge sweep, and now Push too — see below) is uniform
+// with section 14's Bulwark coverage; this section checks Vanish's own
+// target pool, its apply-path economy, and one integration proof.
 // ---------------------------------------------------------------------------
 {
   // --- Legal targeting (mirrors getBulwarkTargets' own tests) -----------
@@ -2677,9 +2298,9 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Vanish: an escaped own token is not a legal target", !targets.includes(2), JSON.stringify(targets));
     check("Vanish: an enemy token is never a legal target", !targets.includes(4), JSON.stringify(targets));
 
-    const pwVanished: PowerState = { ...pw, bulwarked: { 0: 2 } };
+    const pwVanished: PowerState = { ...pw, vanished: { 0: 2 } };
     check(
-      "Vanish: an already-protected token is excluded from re-targeting",
+      "Vanish: an already-vanished token is excluded from re-targeting",
       !getVanishTargets(s, pwVanished, "p1").includes(0),
     );
   }
@@ -2695,10 +2316,11 @@ function check(name: string, cond: boolean, detail?: string) {
       `got ${r.power.charges.p1}`,
     );
     check(
-      "Vanish: flags the target with VANISH_TURNS remaining",
-      r.power.bulwarked[0] === VANISH_TURNS,
-      `got ${JSON.stringify(r.power.bulwarked)}`,
+      "Vanish: flags the target with VANISH_TURNS remaining, in its OWN map",
+      r.power.vanished[0] === VANISH_TURNS,
+      `got ${JSON.stringify(r.power.vanished)}`,
     );
+    check("Vanish: never touches the walls map at all", r.power.walls[0] === undefined);
     check("Vanish: no board movement at all", r.state.tokens.find((t) => t.id === 0)!.position === 4);
     check("Vanish: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
     check("Vanish: breaks a live shield streak (never lands the mover on one)", (() => {
@@ -2709,30 +2331,25 @@ function check(name: string, cond: boolean, detail?: string) {
   }
 
   // --- Integration proof: a Vanished stone actually blocks a capture,
-  //     same as isBulwarked already guarantees for the Warrior's own cast —
-  //     this is the one place worth re-proving the reuse actually wired up
-  //     correctly rather than just trusting the shared field name. ---
+  //     via isProtected/isVanished, its own map read. ---
   {
     const s = state("p1", { 0: 4, 4: 6 });
-    const pw: PowerState = { ...power({ p1: "archer", p2: "rogue" }), bulwarked: { 4: 3 } };
+    const pw: PowerState = { ...power({ p1: "archer", p2: "rogue" }), vanished: { 4: 3 } };
     const moves = getLegalPowerMoves(s, pw, 2); // token0: 4 -> 6
     const blocked = moves.find((mv) => mv.tokenId === 0 && mv.to === 6);
     check("Vanish: a Vanished stone blocks a normal capturing move onto it", blocked === undefined, JSON.stringify(moves));
   }
 
-  // --- Vanish blocks Push (2026-07-25). Unlike a plain Warrior Bulwark — but
-  //     LIKE a Reinforced one — a Vanished Rogue stone has FULL Push-immunity,
-  //     not just the send-home case (see isVanished/getPushTargets). Push is
-  //     the Archer's primary answer to Rogue, so a soft-shoveable Vanish left
-  //     archer-vs-rogue with no defensive answer at all. Scoped to Rogue by
-  //     construction (power.classes[owner] === "rogue"), so a Warrior's own
-  //     plain Bulwark keeps its unchanged soft-push rule. ---
+  // --- Vanish blocks Push, same as every other protection now (2026-09-17:
+  //     walls went absolute too, so the old "Vanish gets full immunity,
+  //     Bulwark only blocks the send-home half" contrast is retired — BOTH
+  //     are full Push immunity now, via the same isProtected check). ---
   {
     const s = state("p1", { 0: 4, 4: 6 }); // p1 archer at 4, p2's stone at contested 6
     const base = power({ p1: "archer", p2: "rogue" }, { p1: CHARGE_CAP });
-    const pwVanished: PowerState = { ...base, bulwarked: { 4: VANISH_TURNS } };
+    const pwVanished: PowerState = { ...base, vanished: { 4: VANISH_TURNS } };
     check(
-      "Vanish blocks Push: a Vanished Rogue stone is NOT a legal Push target (full immunity)",
+      "Vanish blocks Push: a Vanished Rogue stone is NOT a legal Push target",
       !getPushTargets(s, pwVanished, "p1").includes(4),
       JSON.stringify(getPushTargets(s, pwVanished, "p1")),
     );
@@ -2741,16 +2358,15 @@ function check(name: string, cond: boolean, detail?: string) {
       getPushTargets(s, base, "p1").includes(4),
       JSON.stringify(getPushTargets(s, base, "p1")),
     );
-    // The SAME bulwarked flag on a Warrior's own stone is a plain Bulwark, not
-    // a Vanish — it must still allow the soft (non-home) shove, proving
-    // isVanished's Rogue scoping didn't leak into Warrior's tuned rule.
+    // A Warrior's plain Bulwark on the same tile is now EQUALLY absolute —
+    // no more soft-push carve-out to distinguish it from Vanish.
     const pwWarrior: PowerState = {
       ...power({ p1: "archer", p2: "warrior" }, { p1: CHARGE_CAP }),
-      bulwarked: { 4: 2 },
+      walls: { 4: "bulwark" },
     };
     check(
-      "Vanish blocks Push: a Warrior's plain Bulwark on the same tile still allows a soft push",
-      getPushTargets(s, pwWarrior, "p1").includes(4),
+      "Vanish blocks Push: a Warrior's Bulwark on the same tile is equally absolute now (no soft-push carve-out left)",
+      !getPushTargets(s, pwWarrior, "p1").includes(4),
       JSON.stringify(getPushTargets(s, pwWarrior, "p1")),
     );
   }
@@ -2758,15 +2374,22 @@ function check(name: string, cond: boolean, detail?: string) {
 
 
 // ---------------------------------------------------------------------------
-// Rogue: Backstab — a guaranteed hit that pierces Ward (by omission, same
-// idiom as Charged Shot) but respects Bulwark and the wound split — only
-// ultimates truly pierce Bulwark/Blessing, and Backstab deliberately isn't one
+// Rogue: Backstab — a guaranteed hit at range. RETIRED its Ward pierce
+// 2026-09-17 (walls are absolute now, and Ward stopped being pierceable by
+// anything below an ultimate too): getBackstabTargets is a single
+// isProtected check, same as every other non-ultimate strike — no more
+// "pierces Ward by simple omission," no more wound split (a real kill
+// every time it fires at all).
 // ---------------------------------------------------------------------------
 {
   const s = state("p1", { 0: 4, 4: 6 });
   const pw = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
   const targets = getBackstabTargets(s, pw, "p1");
-  check("Backstab: reaches a Warded enemy (pierces Ward by omission)", targets.includes(4), JSON.stringify(targets));
+  check(
+    "Backstab: RETIRED pierce — a Warded enemy is NOT a legal target any more",
+    !targets.includes(4),
+    JSON.stringify(targets),
+  );
 
   const pwBelow = power({ p1: "rogue", p2: "mage" }, { p1: BACKSTAB_COST - 1 });
   check("Backstab: no targets below its cost", getBackstabTargets(s, pwBelow, "p1").length === 0);
@@ -2774,24 +2397,24 @@ function check(name: string, cond: boolean, detail?: string) {
   const sShield = state("p1", { 0: 4, 4: 7 });
   check("Backstab: a target on a shield tile is not a legal target", !getBackstabTargets(sShield, pw, "p1").includes(4));
 
-  const pwBulwarked: PowerState = {
+  const pwWalled: PowerState = {
     ...power({ p1: "rogue", p2: "warrior" }, { p1: CHARGE_CAP }),
-    bulwarked: { 4: 3 },
+    walls: { 4: "bulwark" },
   };
   check(
-    "Backstab: a Bulwarked enemy is NOT a legal target (only ultimates pierce Bulwark)",
-    !getBackstabTargets(s, pwBulwarked, "p1").includes(4),
+    "Backstab: a walled enemy is NOT a legal target (only ultimates pierce a wall)",
+    !getBackstabTargets(s, pwWalled, "p1").includes(4),
   );
   const pwVanished: PowerState = {
     ...power({ p1: "rogue", p2: "rogue" }, { p1: CHARGE_CAP }),
-    bulwarked: { 4: 2 },
+    vanished: { 4: 2 },
   };
   check("Backstab: a Vanished enemy (rogue mirror) is NOT a legal target", !getBackstabTargets(s, pwVanished, "p1").includes(4));
 
   const sPrivate = state("p1", { 0: 4, 4: 1 });
   check("Backstab: a target outside the contested zone is never legal", getBackstabTargets(sPrivate, pw, "p1").length === 0);
 
-  // --- Apply: a real kill (unwarded, unblessed target) ---
+  // --- Apply: a real kill (the only outcome left — no wound tier) ---
   {
     const sKill = state("p1", { 0: 4, 4: 6 });
     const pwKill = power({ p1: "rogue", p2: "archer" }, { p1: CHARGE_CAP, p2: 1 });
@@ -2807,7 +2430,7 @@ function check(name: string, cond: boolean, detail?: string) {
       r.power.charges.p2 === Math.max(0, 1 - ROGUE_STEAL_ON_CAPTURE),
       `got ${r.power.charges.p2}`,
     );
-    check("Backstab: reports no wound", r.woundedTokenId === null);
+    check("Backstab: reports no wound (the field is kept for shape, always null now)", r.woundedTokenId === null);
     const sPact = state("p1", { 0: 4, 4: 6, 5: 1 }); // warlock's 5 waits behind in its own lane: a stand-in
     const pwPact = power({ p1: "rogue", p2: "warlock" }, { p1: CHARGE_CAP, p2: 0 });
     const rp = applyBackstab(sPact, pwPact, 4, "p1");
@@ -2829,38 +2452,6 @@ function check(name: string, cond: boolean, detail?: string) {
     const rl = applyBackstab(sPact, pwLit, 4, "p1");
     check("Backstab: a lit (inspired) victim loses the song on the reserve trip", rl.power.inspired[4] === undefined);
     check("Backstab: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
-  }
-
-  // --- Apply: pierces Ward for the real kill ---
-  {
-    const sWard = state("p1", { 0: 4, 4: 6 });
-    const pwWard = power({ p1: "rogue", p2: "mage" }, { p1: CHARGE_CAP, p2: CHARGE_CAP });
-    check(
-      "Backstab: sanity — the target really is warded",
-      isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!),
-    );
-    const r = applyBackstab(sWard, pwWard, 4, "p1");
-    check("Backstab: kills a Warded target outright", r.state.tokens.find((t) => t.id === 4)!.position === -1);
-  }
-
-  // --- Apply: a wound (blessed target) — survives, still refunds, but NO
-  //     Larceny drain (wounds pay the standard charge and nothing else) ---
-  {
-    const sWound = state("p1", { 0: 4, 4: 6 });
-    const pwWound: PowerState = {
-      ...power({ p1: "rogue", p2: "cleric" }, { p1: CHARGE_CAP, p2: 1 }),
-      vitality: { 4: "blessed" },
-    };
-    const r = applyBackstab(sWound, pwWound, 4, "p1");
-    check("Backstab: a Blessed target survives as a WOUND, not a kill", r.state.tokens.find((t) => t.id === 4)!.position === 6);
-    check("Backstab: the blessing breaks (vitality -> wounded)", r.power.vitality[4] === "wounded");
-    check(
-      "Backstab: still refunds 1 charge on a wound",
-      r.power.charges.p1 === CHARGE_CAP - BACKSTAB_COST + 1,
-      `got ${r.power.charges.p1}`,
-    );
-    check("Backstab: Larceny does NOT fire on a wound", r.power.charges.p2 === 1, `got ${r.power.charges.p2}`);
-    check("Backstab: reports the wounded token id", r.woundedTokenId === 4);
   }
 
   // --- Breaks any live shield streak (no token of the mover's ever moves,
@@ -2921,31 +2512,31 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Grand Heist: captures a Warded target", rWard.state.tokens.find((t) => t.id === 4)!.position === -1);
   check("Grand Heist: drains the Warded target owner's entire (full-cap) bank", rWard.power.charges.p2 === 0);
 
-  // Pierces Bulwark, and clears the captured token's bulwarked entry (the
-  // same reserve-trip leak resolveTurn already guards against elsewhere).
+  // Pierces a wall, and clears the captured token's wall (the same
+  // reserve-trip leak resolveTurn already guards against elsewhere).
   const sBulwark = state("p1", { 0: 5, 4: 9 });
   const baseW = power({ p1: "rogue", p2: "warrior" });
   const pwBulwark: PowerState = {
     ...baseW,
     ultimateReady: { ...baseW.ultimateReady, p1: true },
     charges: { p1: 0, p2: 2 },
-    bulwarked: { 4: 3 },
+    walls: { 4: "bulwark" },
   };
   const rBulwark = applyGrandHeist(sBulwark, pwBulwark, 4, "p1");
-  check("Grand Heist: captures a Bulwarked target", rBulwark.state.tokens.find((t) => t.id === 4)!.position === -1);
-  check("Grand Heist: clears the captured token's bulwarked entry", rBulwark.power.bulwarked[4] === undefined);
+  check("Grand Heist: captures a walled target", rBulwark.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Grand Heist: clears the captured token's wall", rBulwark.power.walls[4] === undefined);
 
-  // Pierces Blessing — a REAL kill, not a wound (every ultimate kills
-  // straight through it, same as Rain of Arrows/Blink Strike/Warpath).
+  // Pierces Blessing — a REAL kill (every ultimate kills straight through
+  // a wall, same as Rain of Arrows/Blink Strike/Warpath).
   const sBlessed = state("p1", { 0: 5, 4: 9 });
   const pwBlessed: PowerState = {
     ...power({ p1: "rogue", p2: "cleric" }, { p1: 0, p2: 2 }),
     ultimateReady: { p1: true, p2: false },
-    vitality: { 4: "blessed" },
+    walls: { 4: "blessing" },
   };
   const rBlessed = applyGrandHeist(sBlessed, pwBlessed, 4, "p1");
-  check("Grand Heist: kills a Blessed target outright (ultimates pierce blessing)", rBlessed.state.tokens.find((t) => t.id === 4)!.position === -1);
-  check("Grand Heist: clears the captured token's vitality entry", rBlessed.power.vitality[4] === undefined);
+  check("Grand Heist: kills a Blessed target outright (ultimates pierce a wall)", rBlessed.state.tokens.find((t) => t.id === 4)!.position === -1);
+  check("Grand Heist: clears the captured token's wall", rBlessed.power.walls[4] === undefined);
   check(
     "Grand Heist: still drains the entire bank even on a pierced-blessing kill",
     rBlessed.power.charges.p2 === 0,
@@ -3021,10 +2612,13 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Bargain: the necromancer's corpse is the stand-in, on its own tile", rN.power.corpse.p1?.tokenId === 6 && rN.power.corpse.p1?.tile === 3 && rN.power.grave.p1 === 3, JSON.stringify(rN.power.corpse));
     check("Bargain: the necromancer still banks the soul bounty", rN.power.charges.p1 === SOUL_BOUNTY_CHARGES);
 
-    // The saved stone did not die: its wound stays; the stand-in's entry clears.
-    const pwWound: PowerState = { ...pw, vitality: { 4: "wounded", 6: "wounded" } };
-    const rW = applyPowerMove(s, pwWound, getLegalPowerMoves(s, pwWound, 2).find((mv) => mv.tokenId === 0 && mv.to === 8)!, "p1");
-    check("Bargain: the saved runner keeps its wound, the stand-in's clears", rW.power.vitality[4] === "wounded" && rW.power.vitality[6] === undefined);
+    // The stand-in died for real: reserve-trip hygiene strips any wall from
+    // it, same defensive guard as curse/hamstring/inspire — even though a
+    // Warlock's own stone can never actually hold one in real play (Bulwark/
+    // Bless/Benediction only ever grant a wall to their OWN caster's army).
+    const pwWalled: PowerState = { ...pw, walls: { 6: "bulwark" } };
+    const rW = applyPowerMove(s, pwWalled, getLegalPowerMoves(s, pwWalled, 2).find((mv) => mv.tokenId === 0 && mv.to === 8)!, "p1");
+    check("Bargain: the stand-in's wall clears on its reserve trip", rW.power.walls[6] === undefined);
 
     // --- The archer lever: DARK_BARGAIN_LANDING_ONLY ----------------------
     // Flag is false by default (ships only after playtest Test 1), so these
@@ -3113,7 +2707,7 @@ function check(name: string, cond: boolean, detail?: string) {
   // Vanish makes a stone untargetable by every enemy ability below an ult.
   const pwVanished: PowerState = {
     ...power({ p1: "warlock", p2: "rogue" }, { p1: CURSE_COST }),
-    bulwarked: { 4: VANISH_TURNS },
+    vanished: { 4: VANISH_TURNS },
   };
   check("Curse: a Vanished stone cannot be cursed", !getCurseTargets(sCurse, pwVanished, "p1").includes(4));
   // Ward/shield tiles do NOT block it — the chains bind the legs, not armor.
@@ -3189,16 +2783,19 @@ function check(name: string, cond: boolean, detail?: string) {
     "Sacrifice: no targets with no stone to give",
     getSacrificeTargets(state("p1", { 4: 7 }), pwSac, "p1").length === 0,
   );
-  // Bulwark/Vanish DO block it — only the magical half is pierced.
-  const pwSacBul: PowerState = { ...pwSac, bulwarked: { 4: BULWARK_TURNS } };
-  check("Sacrifice: a Bulwarked stone is protected", !getSacrificeTargets(sSac, pwSacBul, "p1").includes(4));
-  // Ward does NOT.
+  // Bulwark/Vanish block it, same as ever.
+  const pwSacBul: PowerState = { ...pwSac, walls: { 4: "bulwark" } };
+  check("Sacrifice: a walled stone is protected", !getSacrificeTargets(sSac, pwSacBul, "p1").includes(4));
+  // RETIRED 2026-09-17: Ward is no longer pierced either — walls went
+  // absolute and Ward stopped being pierceable by anything below an
+  // ultimate at the same time, so Sacrifice's whole "pierce Ward/Blessing"
+  // identity is gone; getSacrificeTargets is a single isProtected check now.
   const pwSacWard = power({ p1: "warlock", p2: "mage" }, { p1: SACRIFICE_COST, p2: CHARGE_CAP });
   const sSacWard = state("p1", { 0: 5, 1: 9, 4: 8 });
   check(
-    "Sacrifice: a Warded stone IS a legal target (the pierce is the point)",
+    "Sacrifice: a Warded stone is NOT a legal target any more (the old pierce retired)",
     isWarded(sSacWard, pwSacWard, sSacWard.tokens.find((t) => t.id === 4)!) &&
-      getSacrificeTargets(sSacWard, pwSacWard, "p1").includes(4),
+      !getSacrificeTargets(sSacWard, pwSacWard, "p1").includes(4),
   );
 
   // --- Sacrifice: resolution + economy --------------------------------------
@@ -3214,11 +2811,11 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Sacrifice: ends the turn", rSac.state.currentPlayer === "p2");
   }
   {
-    // A BLESSED target dies outright — no wound split (the pierce covers it).
-    const pwSacBless: PowerState = { ...pwSac, vitality: { 4: "blessed" } };
-    const rBless = applySacrifice(sSac, pwSacBless, 4, "p1");
-    check("Sacrifice: kills a Blessed target outright, not a wound", rBless.state.tokens.find((t) => t.id === 4)!.position === -1);
-    check("Sacrifice: clears the dead stone's vitality entry", rBless.power.vitality[4] === undefined);
+    // RETIRED 2026-09-17: a BLESSED (walled) target is no longer a legal
+    // Sacrifice target at all — the old "pierce, no wound split" identity
+    // is gone; the target pool excludes it outright, same as Bulwark.
+    const pwSacBless: PowerState = { ...pwSac, walls: { 4: "blessing" } };
+    check("Sacrifice: a Blessed stone is not a legal target any more", !getSacrificeTargets(sSac, pwSacBless, "p1").includes(4));
   }
   {
     // In a mirror, the ENEMY warlock is still paid for the stone it lost.
@@ -3259,21 +2856,19 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Fel Storm: ends the turn", rStorm.state.currentPlayer === "p2");
     check("Fel Storm: grants no charge (displacement, not capture)", rStorm.power.charges.p1 === 0);
 
-    // Pierces everything: Ward, Bulwark and a shield tile are all irrelevant.
+    // Pierces everything: Ward, a wall and a shield tile are all irrelevant.
     const sPierce = state("p1", { 0: 5, 4: 11 });
     const pwPierce: PowerState = {
       ...power({ p1: "warlock", p2: "mage" }, { p2: CHARGE_CAP }),
       ultimateReady: { p1: true, p2: false },
-      bulwarked: { 4: BULWARK_TURNS },
-      vitality: { 4: "blessed" },
+      walls: { 4: "bulwark" },
     };
     const rPierce = applyFelStorm(sPierce, pwPierce, "p1");
     check(
-      "Fel Storm: drags a Warded + Bulwarked + Blessed stone anyway",
+      "Fel Storm: drags a Warded + walled stone anyway",
       rPierce.state.tokens.find((t) => t.id === 4)!.position === FEL_STORM_RETURN_POSITION,
     );
-    check("Fel Storm: a dragged stone keeps its Bulwark (it never died)", rPierce.power.bulwarked[4] !== undefined);
-    check("Fel Storm: a dragged stone keeps its blessing", rPierce.power.vitality[4] === "blessed");
+    check("Fel Storm: a dragged stone keeps its wall (it never died — this is a displacement, not a kill)", rPierce.power.walls[4] === "bulwark");
   }
 }
 
@@ -3380,7 +2975,7 @@ function check(name: string, cond: boolean, detail?: string) {
 
     // THE counterplay: the first body stops the arrow, for everything behind.
     const sBlocked = state("p1", { 0: 5, 4: 9, 5: 6 });
-    const pwBlocked: PowerState = { ...pwShot, bulwarked: { 5: BULWARK_TURNS } };
+    const pwBlocked: PowerState = { ...pwShot, walls: { 5: "bulwark" } };
     check(
       "Piercing Shot: a protected stone body-blocks the lane",
       getPiercingShotTargets(sBlocked, pwBlocked, "p1").length === 0,
@@ -3396,11 +2991,14 @@ function check(name: string, cond: boolean, detail?: string) {
       "Piercing Shot: no enemy down the lane means no shot",
       getPiercingShotTargets(state("p1", { 0: 9, 4: 5 }), pwShot, "p1").length === 0,
     );
-    // A BLESSED victim is wounded, not killed — a mortal weapon.
-    const pwBless: PowerState = { ...pwShot, vitality: { 4: "blessed" } };
+    // RETIRED 2026-09-17: a BLESSED (walled) sole occupant now stops the
+    // arrow outright (piercingShotVictim's own isProtected check returns
+    // null) — no wound tier left, the shot simply finds no victim at all
+    // and the cost is spent for nothing.
+    const pwBless: PowerState = { ...pwShot, walls: { 4: "blessing" } };
+    check("Piercing Shot: a Blessed sole occupant leaves no legal target", getPiercingShotTargets(sShot, pwBless, "p1").length === 0);
     const rBless = applyPiercingShot(sShot, pwBless, "p1");
-    check("Piercing Shot: a Blessing absorbs it", rBless.woundedTokenId === 4 && rBless.killedTokenId === null);
-    check("Piercing Shot: the wounded stone holds its tile", rBless.state.tokens.find((t) => t.id === 4)!.position === 9);
+    check("Piercing Shot: armor stops the arrow — no kill, no wound, the stone holds its tile", rBless.killedTokenId === null && rBless.woundedTokenId === null && rBless.state.tokens.find((t) => t.id === 4)!.position === 9);
   }
 
   // --- Wild Hunt ----------------------------------------------------------
@@ -3480,10 +3078,12 @@ function check(name: string, cond: boolean, detail?: string) {
       "Reckless: a distant enemy is not",
       !getRecklessSwingTargets(state("p1", { 0: 5, 4: 9 }), pw, "p1").includes(4),
     );
-    // PIERCES Bulwark/Vanish — the physical half.
-    const pwBul: PowerState = { ...pw, bulwarked: { 4: BULWARK_TURNS } };
-    check("Reckless: pierces a Bulwark", getRecklessSwingTargets(s, pwBul, "p1").includes(4));
-    // Does NOT pierce Ward or a shield tile — the magical half is Warlock's.
+    // RETIRED 2026-09-17: no longer pierces Bulwark/Vanish either — walls
+    // are absolute now, so Reckless Swing lost its one physical-pierce
+    // identity along with everything else below an ultimate.
+    const pwBul: PowerState = { ...pw, walls: { 4: "bulwark" } };
+    check("Reckless: a wall now stops it too (the old pierce retired)", !getRecklessSwingTargets(s, pwBul, "p1").includes(4));
+    // Does NOT pierce Ward or a shield tile — never did.
     const pwWard = power({ p1: "barbarian", p2: "mage" }, { p1: RECKLESS_SWING_COST, p2: CHARGE_CAP });
     check("Reckless: a Ward still stops it", !getRecklessSwingTargets(s, pwWard, "p1").includes(4));
     check(
@@ -3497,10 +3097,10 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Reckless: reports both halves of the trade", r.swingerTokenId === 0 && r.killedTokenId === 4);
     check("Reckless: spends the mana and earns the capture charge", r.power.charges.p1 === RECKLESS_SWING_COST - 1 + 1);
     check("Reckless: ends the turn", r.state.currentPlayer === "p2");
-    // A BLESSED victim is wounded, not killed — a mortal weapon.
-    const pwBless: PowerState = { ...pw, vitality: { 4: "blessed" } };
-    const rB = applyRecklessSwing(s, pwBless, 4, "p1");
-    check("Reckless: a Blessing absorbs it", rB.woundedTokenId === 4 && rB.killedTokenId === null);
+    // RETIRED 2026-09-17: a BLESSED (walled) victim is no longer a legal
+    // target at all — no wound tier left, walls are absolute.
+    const pwBless: PowerState = { ...pw, walls: { 4: "blessing" } };
+    check("Reckless: a Blessed stone is not a legal target any more", !getRecklessSwingTargets(s, pwBless, "p1").includes(4));
     // Recklessness can genuinely kill you: swinging from tile 1 recoils home.
     const rHome = applyRecklessSwing(state("p1", { 0: 1, 4: 2 }), pw, 4, "p1");
     check("Reckless: a recoil with nowhere to land sends the swinger home", rHome.swingerSentHome === true);
@@ -3543,7 +3143,7 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Bloodbath: the charge ends at the row's end", r.state.tokens.find((t) => t.id === 0)!.position === BLOODBATH_END_POSITION);
     check("Bloodbath: spends the ultimate", r.power.ultimateReady.p1 === false);
     // Pierces everything, ultimate convention.
-    const pwArmoured: PowerState = { ...pw, bulwarked: { 5: BULWARK_TURNS }, vitality: { 4: "blessed" } };
+    const pwArmoured: PowerState = { ...pw, walls: { 5: "bulwark", 4: "blessing" } };
     const rA = applyBloodbath(s, pwArmoured, "p1");
     check("Bloodbath: pierces a Bulwark and a Blessing alike", rA.killedTokenIds.length === 3);
   }

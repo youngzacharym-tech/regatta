@@ -515,10 +515,11 @@ export type ClientMessage =
         | { kind: "blinkStrike"; targetTokenId: number }
         | { kind: "rainOfArrows"; targetTokenId: number }
         | { kind: "warpath"; targetTokenId: number }
-        /** `reinforced` is additive: true spends the full charge bank on
-         *  the doubled (Reinforced) Bulwark; absent/false is the plain
-         *  1-charge cast, unchanged. */
-        | { kind: "bulwark"; tokenId: number; reinforced?: boolean }
+        /** Warrior's Bulwark: raises a wall on one of the caster's own
+         *  stones (2026-09-17, the wall rework — see master-killer.ts's
+         *  WallKind). The old Reinforced tier (`reinforced?: boolean`) is
+         *  retired; every cast is the same 1-charge shape now. */
+        | { kind: "bulwark"; tokenId: number }
         /** Necromancer's Revive: no payload — the server's banked corpse
          *  fully determines what rises and where. The client gates on
          *  power.reviveSpawnTile being non-null; the server re-validates
@@ -528,11 +529,15 @@ export type ClientMessage =
          *  epicenter; the client gates on power.corpseExplosionTargets. */
         | { kind: "corpseExplosion" }
         | { kind: "exhume"; targetTokenId: number }
-        /** Cleric's Bless / Heal: target one of the caster's OWN stones —
-         *  the client gates on power.blessTargets / power.healTargets;
-         *  the server re-validates against the same shared oracles. */
+        /** Cleric's Bless: target one of the caster's OWN stones — the
+         *  client gates on power.blessTargets; the server re-validates
+         *  against the same shared oracle. */
         | { kind: "bless"; targetTokenId: number }
-        | { kind: "heal"; targetTokenId: number }
+        /** Cleric's Vigil (2026-09-17, replaces Heal under the wall
+         *  rework): no payload — it waives upkeep for every wall the
+         *  mover already holds, not one stone. The client gates on
+         *  power.vigilCastable. */
+        | { kind: "vigil" }
         /** Cleric's Benediction: no payload — the client gates on
          *  power.benedictionTargets being non-empty. */
         | { kind: "benediction" }

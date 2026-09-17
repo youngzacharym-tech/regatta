@@ -7,12 +7,12 @@
 // through the CLASSIC rulebook (the trusted reference) and, at every single
 // turn, independently asks master-killer.ts what it would generate for the
 // exact same state+flip — using a frozen zero-charge Warrior-vs-Warrior
-// PowerState, which neutralizes every power (no charges means no wards to
-// break or trigger Ward Breaker against; Warrior is the one class whose
-// passive has zero effect without an active ward to interact with — Archer's
-// Snipe, by contrast, is free/charge-independent, so it's deliberately
-// excluded from this comparison and gets its own dedicated scenario tests
-// in test-master-killer.ts instead).
+// PowerState, which neutralizes every power (no charges means no Ward;
+// Warrior's own passive, Hold the Line, is a wall-upkeep discount with
+// nothing to discount here since no wall is ever raised in this fixture
+// — Archer's Snipe, by contrast, is free/charge-independent, so it's
+// deliberately excluded from this comparison and gets its own dedicated
+// scenario tests in test-master-killer.ts instead).
 //
 // Any mismatch — move count, or any shared field (tokenId/from/to/captures/
 // landsOnShield/causesWin) — is a drift bug and fails loudly.
@@ -46,18 +46,22 @@ const NEUTRAL_POWER: PowerState = {
   // see test-master-killer.ts for the ultimate's dedicated scenario coverage.
   shieldStreak: { p1: 0, p2: 0 },
   ultimateReady: { p1: false, p2: false },
-  // Bulwark is Warrior-only and starts empty here too — getLegalPowerMoves
-  // never populates it (only applyBulwark does), so an empty map is the
-  // only value this fixture could ever need. Same for bulwarkSaves
-  // (reinforced-Bulwark bookkeeping).
-  bulwarked: {},
-  bulwarkSaves: {},
+  // The wall system (2026-09-17): Warrior's Bulwark and Cleric's Blessing
+  // both start empty here — getLegalPowerMoves never populates walls or
+  // vanished itself (only the apply* actions do), so an empty map is the
+  // only value this fixture could ever need. Same for wallGrace (Vigil/
+  // Sanctified Ground/Benediction bookkeeping) — irrelevant to move
+  // generation, isProtected only ever reads walls/vanished directly.
+  walls: {},
+  vanished: {},
+  wallGrace: { p1: 0, p2: 0 },
   // Necromancer-only state, inert in a Warrior-vs-Warrior fixture: no
-  // corpse to revive, no thrall for effectiveOwner to reassign.
+  // corpse/grave to revive or detonate, no thrall for effectiveOwner to
+  // reassign, no Dark Bargain to have struck.
   corpse: { p1: null, p2: null },
+  grave: { p1: null, p2: null },
   thrall: { p1: null, p2: null },
-  // Cleric-only state, equally inert here: no blessings anywhere.
-  vitality: {},
+  darkBargain: { p1: null, p2: null },
   // Warlock-only state, same: no chains bound, so getLegalPowerMoves's
   // stride reduction never fires and every move keeps its classic length —
   // which is exactly what this fixture has to hold for the comparison to

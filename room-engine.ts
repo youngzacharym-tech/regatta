@@ -63,7 +63,6 @@ import {
   applyPiercingShot,
   applyRecklessSwing,
   applyWhirlwind,
-  applyHeal,
   applyPickpocket,
   applyPowerMove,
   applyPush as mkApplyPush,
@@ -84,8 +83,6 @@ import {
   canReflipAgain,
   CHARGE_CAP,
   CHARGED_SHOT_COST,
-  BULWARK_REINFORCED_COST,
-  BULWARK_REINFORCED_RETIRED,
   CURSE_COST,
   getBenedictionTargets,
   getBlessTargets,
@@ -106,7 +103,6 @@ import {
   getPiercingShotTargets,
   getRecklessSwingTargets,
   getWhirlwindTargets,
-  getHealTargets,
   getLegalPowerMoves,
   getPickpocketTargets,
   getPushTargets,
@@ -134,8 +130,15 @@ import {
   tickHamstringForNewTurn,
   tickDarkBargainForNewTurn,
   type DarkBargain,
+  type WallKind,
+  tickWallUpkeepForNewTurn,
+  tickVanishForNewTurn,
+  wallUpkeepFor,
+  applyVigil,
+  canCastVigil,
   tickThrallForNewTurn,
   VANISH_COST,
+  VIGIL_COST,
   wolfGuardTile,
   type PlayerClass,
   type PowerAction,
@@ -198,8 +201,14 @@ export interface WirePowerState {
   reflipsUsedThisTurn: number;
   shieldStreak: Record<PlayerId, number>;
   ultimateReady: Record<PlayerId, boolean>;
-  bulwarked: Record<number, number>;
-  bulwarkSaves: Record<number, number>;
+  /** THE WALL SYSTEM (2026-09-17) — see PowerState.walls. Plain JSON, rides
+   *  the doc verbatim. */
+  walls: Record<number, WallKind>;
+  /** Rogue's Vanish (2026-09-17, split off the wall map) — see
+   *  PowerState.vanished. */
+  vanished: Record<number, number>;
+  /** Wall-upkeep grace, per player (2026-09-17) — see PowerState.wallGrace. */
+  wallGrace: Record<PlayerId, number>;
   /** Necromancer rework (2026-07-19): corpse marker + active thrall — see
    *  PowerState's docs. Plain JSON, rides the doc verbatim. */
   corpse: Record<PlayerId, { tokenId: number; tile: number } | null>;
@@ -207,9 +216,6 @@ export interface WirePowerState {
    *  the body so Revive can leave it behind — see PowerState.grave. */
   grave: Record<PlayerId, number | null>;
   thrall: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
-  /** Cleric (2026-07-21): per-token blessed/wounded state — see
-   *  PowerState.vitality. Plain JSON, rides the doc verbatim. */
-  vitality: Record<number, "blessed" | "wounded">;
   /** Warlock (2026-07-26): each caster's single live curse — see
    *  PowerState.curse. Plain JSON, rides the doc verbatim. */
   curse: Record<PlayerId, { tokenId: number; turnsLeft: number } | null>;
@@ -239,11 +245,50 @@ export function fromWirePower(w: WirePowerState): PowerState {
         : (w as { reflipUsedThisTurn?: boolean }).reflipUsedThisTurn
           ? 1
           : 0,
-    // Same live-room back-compat: docs persisted before reinforced Bulwark
-    // existed have no bulwarkSaves — every live Bulwark in them is a plain
-    // 1-block cast, which an empty map means exactly. (A doc persisted with
-    // the retired safeTokens array just carries a harmless extra key.)
-    bulwarkSaves: w.bulwarkSaves ?? {},
+    // THE WALL REWORK MIGRATION (2026-09-17): a doc persisted before it
+    // ships still carries the old bulwarked/bulwarkSaves/vitality shape (a
+    // live room mid-flight). Convert it once, here, into the new model —
+    // every entry becomes a wall the instant this function reads it, so
+    // nothing downstream ever sees the old shape again. Reinforced Bulwark
+    // was already retired (BULWARK_REINFORCED_RETIRED) before this, so its
+    // saves entries carry no meaning either way and are simply dropped.
+    walls:
+      w.walls ??
+      (() => {
+        const legacy = w as unknown as {
+          bulwarked?: Record<number, number>;
+          vitality?: Record<number, "blessed" | "wounded">;
+        };
+        const walls: Record<number, WallKind> = {};
+        for (const idStr of Object.keys(legacy.bulwarked ?? {})) {
+          const id = Number(idStr);
+          // Token ids 0-3 are p1's, 4-7 are p2's (the fixed convention every
+          // fixture/tool in this codebase already relies on) — a rogue's
+          // own bulwarked entry was always Vanish wearing Bulwark's map, so
+          // it migrates to `vanished` (see that field below), not `walls`.
+          const owner: PlayerId = id < 4 ? "p1" : "p2";
+          if (w.classes[owner] !== "rogue") walls[id] = "bulwark";
+        }
+        for (const [idStr, v] of Object.entries(legacy.vitality ?? {})) {
+          if (v === "blessed") walls[Number(idStr)] = "blessing";
+          // A "wounded" entry has nothing to migrate to — the wound split
+          // retired with the stone it would have marked as scarred.
+        }
+        return walls;
+      })(),
+    vanished:
+      w.vanished ??
+      (() => {
+        const legacy = w as unknown as { bulwarked?: Record<number, number> };
+        const vanished: Record<number, number> = {};
+        for (const [idStr, turns] of Object.entries(legacy.bulwarked ?? {})) {
+          const id = Number(idStr);
+          const owner: PlayerId = id < 4 ? "p1" : "p2";
+          if (w.classes[owner] === "rogue") vanished[id] = turns;
+        }
+        return vanished;
+      })(),
+    wallGrace: w.wallGrace ?? { p1: 0, p2: 0 },
     // Docs persisted before the necromancer rework have neither corpse nor
     // thrall — no possession in flight, which the null pair means exactly.
     // (Their live necromancers ALSO lose the old Raise kit mid-game; the
@@ -254,9 +299,6 @@ export function fromWirePower(w: WirePowerState): PowerState {
     // row; the necromancer digs the next one with their next kill.
     grave: w.grave ?? { p1: null, p2: null },
     thrall: w.thrall ?? { p1: null, p2: null },
-    // Docs persisted before the cleric existed have no vitality — no
-    // blessings in flight, which the empty map means exactly.
-    vitality: w.vitality ?? {},
     // Docs persisted before the warlock existed have no curse — no chains
     // in flight, which the null pair means exactly.
     curse: w.curse ?? { p1: null, p2: null },
@@ -292,14 +334,17 @@ export interface PublicPower {
   rainOfArrowsTargets?: number[];
   warpathTargets: number[];
   bulwarkTargets: number[];
-  bulwarkedTokenIds: number[];
-  /** Bulwark countdowns (token id -> turns remaining) and Reinforced saves
-   *  (token id -> blocks remaining) — the raw lifecycle numbers behind
-   *  bulwarkedTokenIds. ADDITIVE fields (older events lack them), added
-   *  2026-07-19 for the activity log's effects panel so a "why did that
-   *  block / why did the glow drop" question is answerable from the log. */
-  bulwarkTurns?: Record<number, number>;
-  bulwarkSavesLeft?: Record<number, number>;
+  /** THE WALL SYSTEM (2026-09-17, replaces bulwarkedTokenIds + vitality —
+   *  a wall is now the one uncapturable-except-by-ultimate status, whether
+   *  it's a Warrior's Bulwark or a Cleric's Blessing): every walled token,
+   *  public board truth for both seats (the rings are visible). */
+  walls: Record<number, WallKind>;
+  /** Rogue's Vanish (2026-09-17, split off the wall map): token id ->
+   *  turns remaining. Public the same way a wall is. */
+  vanished: Record<number, number>;
+  /** What each player would pay per wall at their NEXT upkeep tick
+   *  (wallUpkeepFor) — the gem-rail "-N next turn" preview. ADDITIVE. */
+  wallUpkeep?: Record<PlayerId, number>;
   /** Shield-streak progress per player — ADDITIVE, same activity-log pass
    *  (diagnosing "did my Dark Resurrection count toward the ultimate"). */
   shieldStreak?: Record<PlayerId, number>;
@@ -328,17 +373,17 @@ export interface PublicPower {
    *  castable) — the dock gate and the blast preview highlight. */
   corpseExplosionTargets: number[];
   exhumeTargets: number[];
-  /** Cleric (2026-07-21): Bless / Heal target pools for the CURRENT player
-   *  (affordability baked into the oracles — empty = not castable), and
+  /** Cleric (2026-07-21; RE-THEMED 2026-09-17): Bless's target pool for the
+   *  CURRENT player (affordability baked in — empty = not castable), and
    *  Benediction's would-change pool (empty = not castable; gated on
    *  ultimateReady here like every ultimate's list). ADDITIVE: older
    *  events lack them. */
   blessTargets?: number[];
-  healTargets?: number[];
+  /** Vigil (2026-09-17, replaces Heal's target list — Vigil has no target,
+   *  it waives upkeep for every wall the mover already holds) — whether
+   *  the CURRENT player can cast it right now (canCastVigil). ADDITIVE. */
+  vigilCastable?: boolean;
   benedictionTargets?: number[];
-  /** Every token's blessed/wounded state — public table-state (the rings
-   *  are visible board truth, same idea as bulwarkedTokenIds). ADDITIVE. */
-  vitality?: Record<number, "blessed" | "wounded">;
   /** Rogue (2026-07-21, Vanish added 2026-07-22): Pickpocket / Vanish
    *  target pools for the CURRENT player (affordability baked in — Vanish's
    *  own list is gated on charges at the call site, same convention as
@@ -431,8 +476,8 @@ export type RoomEvent =
       lastMovePlayer: PlayerId | null;
       lastPush: { targetTokenId: number } | null;
       lastChargedShot: { targetTokenId: number } | null;
-      /** `reinforced` is additive (older events lack it): true when the
-       *  cast was the full-bank Reinforced Bulwark. */
+      /** RETIRED `reinforced` field 2026-09-13 (the tier itself retired
+       *  before the wall rework) — always absent now. */
       lastBulwark: { tokenId: number; reinforced?: boolean } | null;
       lastBulwarkBlock: { tokenIds: number[] } | null;
       lastChargeEvent: { player: PlayerId; delta: number } | null;
@@ -482,28 +527,28 @@ export type RoomEvent =
        *  walk actually landed the dragged token on (server-computed, never
        *  re-derived client-side). */
       lastExhume?: { targetTokenId: number; returnedTo: number } | null;
-      /** Cleric's Bless / Heal just resolved on this commit. */
+      /** Cleric's Bless just resolved on this commit. */
       lastBless?: { tokenId: number } | null;
-      lastHeal?: { tokenId: number } | null;
-      /** Cleric's Benediction ultimate — the ids it blessed. */
+      /** Cleric's Vigil just resolved on this commit (2026-09-17, replaces
+       *  Heal — no target, so just the caster, lastReflip's shape). */
+      lastVigil?: { player: PlayerId } | null;
+      /** Cleric's Benediction ultimate — the ids it walled. */
       lastBenediction?: { tokenIds: number[] } | null;
-      /** One or more BLESSINGS BROKE on this commit — a capture/knockback
-       *  resolved as a wound instead of a kill (any path: landing, Snipe,
-       *  sweep, Push, Charged Shot, Corpse Explosion). Positions are in
-       *  `state`; this is the authoritative "announce the survival"
-       *  signal, never re-derived client-side. */
+      /** RETIRED 2026-09-17 (walls are absolute — no more wound split, see
+       *  master-killer.ts's resolveTurn doc). Always null; kept on the wire
+       *  so nothing downstream needs its own removal pass. */
       lastWound?: { tokenIds: number[] } | null;
-      /** Sanctified Ground fired: the cleric's shield landing mended these
-       *  wounded stones back to blessed. */
+      /** RETIRED 2026-09-17 alongside lastWound — Sanctified Ground now
+       *  grants wall-upkeep grace instead of mending a wound. Always null. */
       lastMend?: { tokenIds: number[] } | null;
       /** Rogue's Pickpocket just resolved on this commit — bank-level, not
        *  board-level: no token moved, but the target owner's charges
        *  dropped by `stolen` (server-computed, never re-derived
        *  client-side — same discipline as every other announcement here). */
       lastPickpocket?: { targetTokenId: number; stolen: number } | null;
-      /** Rogue's Vanish just resolved on this commit — same shape/lifecycle
-       *  as lastBulwark, since it IS Bulwark's mechanic under a Rogue
-       *  cast (see VANISH_COST's doc in master-killer.ts). */
+      /** Rogue's Vanish just resolved on this commit — same shape as
+       *  lastBulwark; its own PowerState.vanished map since 2026-09-17
+       *  (see VANISH_COST's doc in master-killer.ts). */
       lastVanish?: { tokenId: number } | null;
       /** Warlock's Curse of Chains just resolved on this commit — same
        *  turn-continues lifecycle as lastReflip/lastBless. */
@@ -534,6 +579,11 @@ export type RoomEvent =
       /** A freeze ran out at the start of this commit's turn — the stones
        *  that thawed (lastThrallExpired's lifecycle). */
       lastThaw?: { tokenIds: number[] } | null;
+      /** THE WALL SYSTEM'S TICK (2026-09-17): set at the start of the
+       *  mover's own fresh turn — how much they paid to keep every wall up
+       *  (0 if they hold none) and which, if any, they couldn't afford and
+       *  lost. Same lifecycle slot as lastThaw. */
+      lastWallBleed?: { player: PlayerId; paid: number; droppedTokenIds: number[] } | null;
       /** Hunter's Wild Hunt ultimate — who froze and what the wolf took. */
       lastWildHunt?: { frozenTokenIds: number[]; killedTokenId: number | null } | null;
       /** Barbarian's Reckless Swing — the trade, both halves: who swung,
@@ -652,7 +702,7 @@ export interface RoomDoc {
   /** See RoomEvent's docs — the cleric's announcement slots (2026-07-21).
    *  Docs persisted before these fields existed read as undefined ≙ null. */
   lastBless?: { tokenId: number } | null;
-  lastHeal?: { tokenId: number } | null;
+  lastVigil?: { player: PlayerId } | null;
   lastBenediction?: { tokenIds: number[] } | null;
   lastWound?: { tokenIds: number[] } | null;
   lastMend?: { tokenIds: number[] } | null;
@@ -675,6 +725,7 @@ export interface RoomDoc {
   lastWolfBite?: { tokenId: number; sentHome: boolean } | null;
   lastPiercingShot?: { killedTokenId: number | null; woundedTokenId: number | null } | null;
   lastThaw?: { tokenIds: number[] } | null;
+  lastWallBleed?: { player: PlayerId; paid: number; droppedTokenIds: number[] } | null;
   lastWildHunt?: { frozenTokenIds: number[]; killedTokenId: number | null } | null;
   /** See RoomEvent's docs — the barbarian's announcement slots (2026-07-27).
    *  Docs persisted before these fields existed read as undefined ≙ null. */
@@ -712,10 +763,9 @@ export type RoomActionInput =
         | { kind: "blinkStrike"; targetTokenId: number }
         | { kind: "rainOfArrows"; targetTokenId: number }
         | { kind: "warpath"; targetTokenId: number }
-        /** `reinforced` is ADDITIVE: absent/false is the plain 1-charge
-         *  Bulwark, unchanged; true spends the full bank on the doubled
-         *  cast (see master-killer.ts's BULWARK_REINFORCED_TURNS). */
-        | { kind: "bulwark"; tokenId: number; reinforced?: boolean }
+        /** The reinforced tier retired 2026-09-13, before the wall rework —
+         *  Bulwark is the one plain cast now. */
+        | { kind: "bulwark"; tokenId: number }
         /** Necromancer's Revive: no payload — the banked corpse fully
          *  determines what rises and where (getReviveSpawnTile is the
          *  shared legality oracle). */
@@ -724,10 +774,13 @@ export type RoomActionInput =
          *  epicenter; getCorpseExplosionTargets is the shared oracle. */
         | { kind: "corpseExplosion" }
         | { kind: "exhume"; targetTokenId: number }
-        /** Cleric's Bless / Heal: target one of the caster's OWN stones
-         *  (Bulwark's shape) — the shared oracles are the whole gate. */
+        /** Cleric's Bless: target one of the caster's OWN stones (Bulwark's
+         *  shape) — the shared oracle is the whole gate. */
         | { kind: "bless"; targetTokenId: number }
-        | { kind: "heal"; targetTokenId: number }
+        /** Cleric's Vigil (2026-09-17, replaces Heal): no payload — it
+         *  waives upkeep for every wall the caster already holds, not one
+         *  target (canCastVigil is the shared oracle). */
+        | { kind: "vigil" }
         /** Cleric's Benediction: no payload — getBenedictionTargets is the
          *  shared oracle (empty pool = not castable). */
         | { kind: "benediction" }
@@ -832,22 +885,12 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
       doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1
         ? getBulwarkTargets(doc.state, p, mover)
         : [],
-    // A Bulwark that blocked THIS flip was already consumed by
-    // tickBulwarkForNewTurn, but it is still doing its job for the rest of
-    // this turn (the served move list was computed with it up). Keep it in
-    // the VISIBLE list until the turn resolves — CLEAR_SLOTS wipes
-    // lastBulwarkBlock on the next commit, so the glow falls exactly when
-    // the protection actually stops mattering. Without this union the glow
-    // dropped at the block flip while captures stayed impossible all turn:
-    // Kasen's 2026-07-19 "it wore off but it's still activating" report.
-    bulwarkedTokenIds: [
-      ...new Set([
-        ...Object.keys(doc.mk.bulwarked).map(Number),
-        ...(doc.lastBulwarkBlock?.tokenIds ?? []),
-      ]),
-    ],
-    bulwarkTurns: { ...doc.mk.bulwarked },
-    bulwarkSavesLeft: { ...doc.mk.bulwarkSaves },
+    // No more block-consumption timing gap to paper over (2026-09-17): a
+    // wall only ever falls at the upkeep tick or a reserve trip, both
+    // well-defined turn boundaries, so the map is just the live truth.
+    walls: { ...doc.mk.walls },
+    vanished: { ...doc.mk.vanished },
+    wallUpkeep: { p1: wallUpkeepFor(p, "p1"), p2: wallUpkeepFor(p, "p2") },
     shieldStreak: { ...doc.mk.shieldStreak },
     corpse: {
       // Broadcast only while raisable — the moment the victim re-enters
@@ -867,12 +910,11 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
         ? getExhumeTargets(doc.state, p, mover)
         : [],
     blessTargets: doc.mk.classes[mover] === "cleric" ? getBlessTargets(doc.state, p, mover) : [],
-    healTargets: doc.mk.classes[mover] === "cleric" ? getHealTargets(doc.state, p, mover) : [],
+    vigilCastable: doc.mk.classes[mover] === "cleric" ? canCastVigil(doc.state, p, mover) : false,
     benedictionTargets:
       doc.mk.classes[mover] === "cleric" && doc.mk.ultimateReady[mover]
         ? getBenedictionTargets(doc.state, p, mover)
         : [],
-    vitality: { ...(doc.mk.vitality ?? {}) },
     pickpocketTargets:
       doc.mk.classes[mover] === "rogue" ? getPickpocketTargets(doc.state, p, mover) : [],
     vanishTargets:
@@ -986,7 +1028,7 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastCorpseExplosion: doc.lastCorpseExplosion ?? null,
     lastExhume: doc.lastExhume ?? null,
     lastBless: doc.lastBless ?? null,
-    lastHeal: doc.lastHeal ?? null,
+    lastVigil: doc.lastVigil ?? null,
     lastBenediction: doc.lastBenediction ?? null,
     lastWound: doc.lastWound ?? null,
     lastMend: doc.lastMend ?? null,
@@ -1003,6 +1045,7 @@ function stateEventOf(doc: RoomDoc): UnseqEvent {
     lastWolfBite: doc.lastWolfBite ?? null,
     lastPiercingShot: doc.lastPiercingShot ?? null,
     lastThaw: doc.lastThaw ?? null,
+    lastWallBleed: doc.lastWallBleed ?? null,
     lastWildHunt: doc.lastWildHunt ?? null,
     lastRecklessSwing: doc.lastRecklessSwing ?? null,
     lastWhirlwind: doc.lastWhirlwind ?? null,
@@ -1036,10 +1079,10 @@ export function freshMatchFields(
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
   | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
-  | "lastBless" | "lastHeal" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
+  | "lastBless" | "lastVigil" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
   | "lastPickpocket" | "lastVanish" | "lastBackstab" | "lastBlink"
   | "lastCurse" | "lastCurseExpired" | "lastSacrifice" | "lastFelStorm"
-  | "lastSnare" | "lastTrapSprung" | "lastWolfBite" | "lastPiercingShot" | "lastThaw" | "lastWildHunt"
+  | "lastSnare" | "lastTrapSprung" | "lastWolfBite" | "lastPiercingShot" | "lastThaw" | "lastWallBleed" | "lastWildHunt"
   | "lastRecklessSwing" | "lastWhirlwind" | "lastBloodbath"
   | "lastInspire" | "lastInspireFaded" | "lastSongOfHaste" | "lastCrescendo"
 > {
@@ -1073,7 +1116,7 @@ export function freshMatchFields(
     lastCorpseExplosion: null,
     lastExhume: null,
     lastBless: null,
-    lastHeal: null,
+    lastVigil: null,
     lastBenediction: null,
     lastWound: null,
     lastMend: null,
@@ -1090,6 +1133,7 @@ export function freshMatchFields(
     lastWolfBite: null,
     lastPiercingShot: null,
     lastThaw: null,
+    lastWallBleed: null,
     lastWildHunt: null,
     lastRecklessSwing: null,
     lastWhirlwind: null,
@@ -1232,17 +1276,12 @@ export function applyAction(
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "rainOfArrows") return { doc: applyMkSimple(doc, seat, "rainOfArrows", a.targetTokenId, now) };
       if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
-      // `=== true` (not truthiness): these client-supplied flags are echoed
-      // into the persisted doc (lastBulwark/lastRaise) and broadcast, and
-      // the body arrives as unvalidated JSON — a truthy garbage value must
-      // neither ride into the doc verbatim nor diverge from what
-      // validateUsePower gated on (which coerces identically).
-      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now, rand, a.reinforced === true) };
+      if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
       if (a.kind === "exhume") return { doc: applyMkSimple(doc, seat, "exhume", a.targetTokenId, now) };
       if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
-      if (a.kind === "heal") return { doc: applyMkSimple(doc, seat, "heal", a.targetTokenId, now) };
+      if (a.kind === "vigil") return { doc: applyMkVigil(doc, seat, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
       if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
       if (a.kind === "vanish") return { doc: applyMkSimple(doc, seat, "vanish", a.tokenId, now, rand) };
@@ -1321,17 +1360,10 @@ function validateUsePower(
       return null;
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
-      // `=== true`, matching the dispatch's coercion — a truthy non-boolean
-      // must gate the same variant here that actually gets applied.
-      if (a.reinforced === true) {
-        if (BULWARK_REINFORCED_RETIRED) return "Reinforced Bulwark is retired";
-        // Mirrors Charged Shot's own full-bank gate: the reinforced cast is
-        // a uniform "has the mover banked the whole cap" check, identical
-        // for every target.
-        if (doc.mk.charges[seat] < BULWARK_REINFORCED_COST) return `Reinforced Bulwark costs ${BULWARK_REINFORCED_COST} charges`;
-      } else if (doc.mk.charges[seat] < 1) {
-        return "No charge available";
-      }
+      // The reinforced tier retired 2026-09-13 (BULWARK_REINFORCED_RETIRED)
+      // and its whole save-count/duration machinery went with the wall
+      // rework (2026-09-17) — there is only the one cast now.
+      if (doc.mk.charges[seat] < 1) return "No charge available";
       if (!getBulwarkTargets(doc.state, p(), seat).includes(a.tokenId)) return "Invalid Bulwark target";
       return null;
     case "revive":
@@ -1368,10 +1400,12 @@ function validateUsePower(
       // Affordability is baked into the oracle (see getBlessTargets).
       if (!getBlessTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Bless target";
       return null;
-    case "heal":
-      // Heal ENDS the turn (Bulwark's shape) — no flip guard needed.
-      if (cls !== "cleric") return "Only a Cleric can Heal";
-      if (!getHealTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Heal target";
+    case "vigil":
+      // Vigil ENDS the turn (Bulwark's shape) — no flip guard needed. No
+      // target either (2026-09-17, replaces Heal) — canCastVigil is the
+      // whole gate.
+      if (cls !== "cleric") return "Only a Cleric can hold Vigil";
+      if (!canCastVigil(doc.state, p(), seat)) return "Vigil not castable";
       return null;
     case "benediction":
       if (cls !== "cleric") return "Only a Cleric can cast Benediction";
@@ -1502,7 +1536,7 @@ const CLEAR_SLOTS = {
   lastCorpseExplosion: null,
   lastExhume: null,
   lastBless: null,
-  lastHeal: null,
+  lastVigil: null,
   lastBenediction: null,
   lastWound: null,
   lastMend: null,
@@ -1519,6 +1553,7 @@ const CLEAR_SLOTS = {
   lastWolfBite: null,
   lastPiercingShot: null,
   lastThaw: null,
+  lastWallBleed: null,
   lastWildHunt: null,
   lastRecklessSwing: null,
   lastWhirlwind: null,
@@ -1602,17 +1637,17 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
 
 /** Push / Charged Shot / Blink Strike / Warpath / Bulwark / Exhume share
  *  one commit shape and differ only in which apply-fn runs and which slot
- *  announces. `reinforced` only means anything for kind "bulwark" (the
- *  full-bank cast). (Bless/Heal are NOT here — they keep the turn, see
- *  applyMkBlessing.) */
+ *  announces. (Bless and Vigil are NOT here — Bless keeps the turn, see
+ *  applyMkBlessing; Vigil has no target at all, see applyMkVigil. The
+ *  reinforced Bulwark tier retired 2026-09-13, before the wall rework —
+ *  see BULWARK_REINFORCED_RETIRED.) */
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
-  kind: "push" | "chargedShot" | "blinkStrike" | "rainOfArrows" | "warpath" | "bulwark" | "exhume" | "heal" | "vanish" | "grandHeist",
+  kind: "push" | "chargedShot" | "blinkStrike" | "rainOfArrows" | "warpath" | "bulwark" | "exhume" | "vanish" | "grandHeist",
   tokenId: number,
   now: number,
   rand: () => number = Math.random,
-  reinforced = false,
 ): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
   const power = fromWirePower(doc.mk!);
@@ -1661,8 +1696,8 @@ function applyMkSimple(
       break;
     }
     case "bulwark":
-      r = applyBulwark(doc.state, power, tokenId, seat, reinforced);
-      slots = { lastBulwark: { tokenId, reinforced } };
+      r = applyBulwark(doc.state, power, tokenId, seat);
+      slots = { lastBulwark: { tokenId } };
       break;
     case "exhume": {
       const rr = applyExhume(doc.state, power, tokenId, seat);
@@ -1671,12 +1706,6 @@ function applyMkSimple(
       slots = { lastExhume: { targetTokenId: tokenId, returnedTo: rr.returnedTo } };
       break;
     }
-    case "heal":
-      // Turn-ending, Bulwark's shape (Bless is the turn-keeper — see
-      // applyMkBlessing).
-      r = applyHeal(doc.state, power, tokenId, seat);
-      slots = { lastHeal: { tokenId } };
-      break;
     case "vanish":
       // Turn-ending, no capture, no board movement — exactly Bulwark's
       // shape, since Vanish IS Bulwark's mechanic under a Rogue cast.
@@ -1786,12 +1815,12 @@ function applyMkRevive(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
 
 /** Cleric's Bless does NOT end the turn — Revive's exact commit contract
  *  (see applyMkRevive): the SAME flip stays live and the move list is
- *  recomputed (the board is untouched — only a vitality flag changed —
- *  but the recompute keeps the turn-keeping shape uniform and
+ *  recomputed (the board is untouched — only a wall flag changed — but
+ *  the recompute keeps the turn-keeping shape uniform and
  *  future-proof). The commit resets waitingSince, so a pending auto-skip
- *  restarts against the recomputed list by construction. (Heal is
- *  deliberately NOT here — it ends the turn via applyMkSimple; see
- *  HEAL_COST's doc for the asymmetry's balance trace.) */
+ *  restarts against the recomputed list by construction. (Vigil is
+ *  deliberately NOT here — it ends the turn via applyMkVigil; see
+ *  VIGIL_COST's doc for the asymmetry's balance trace.) */
 function applyMkBlessing(doc: RoomDoc, seat: PlayerId, tokenId: number, now: number): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
   const flip = doc.currentFlip!; // validated non-null (see validateUsePower)
@@ -2239,6 +2268,28 @@ function applyMkCrescendo(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Cleric's Vigil (2026-09-17, replaces Heal): ends the turn — the same
+ *  tempo price Heal always paid (see VIGIL_COST's doc) — but has its own
+ *  commit fn because there is no target token at all, unlike every other
+ *  turn-ending cast applyMkSimple handles. */
+function applyMkVigil(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const chargesBefore = doc.mk!.charges[seat];
+  const r = applyVigil(doc.state, fromWirePower(doc.mk!), seat);
+  const delta = r.power.charges[seat] - chargesBefore;
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastChargeEvent: delta !== 0 ? { player: seat, delta } : null,
+    lastVigil: { player: seat },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 /** Benediction ends the turn (its ultimate siblings' shape) — its own
  *  commit fn only because the announce payload is the blessed id list,
  *  not a single token slot. */
@@ -2317,18 +2368,18 @@ function autoSkipDelay(doc: RoomDoc): number {
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
     }
-    // A human Cleric with a dead flip but a castable Bless/Heal (both
-    // turn-keeping — the cast banks real value before the skip lands, and
-    // Benediction ends the turn outright) gets the same window. Flip-zero
-    // stays a snappy skip, matching the necromancer's arm: the zero's
-    // charge grant is its compensation, and the game's rhythm keeps zeros
-    // fast.
+    // A human Cleric with a dead flip but a castable Bless/Vigil (Bless
+    // turn-keeping, Vigil and Benediction turn-ending — same "don't
+    // silently auto-skip a meaningful action" reasoning either way) gets
+    // the same window. Flip-zero stays a snappy skip, matching the
+    // necromancer's arm: the zero's charge grant is its compensation, and
+    // the game's rhythm keeps zeros fast.
     if (
       doc.mk.classes[mover] === "cleric" &&
       doc.currentFlip !== null &&
       doc.currentFlip !== 0 &&
       (getBlessTargets(doc.state, p, mover).length > 0 ||
-        getHealTargets(doc.state, p, mover).length > 0 ||
+        canCastVigil(doc.state, p, mover) ||
         (doc.mk.ultimateReady[mover] && getBenedictionTargets(doc.state, p, mover).length > 0))
     ) {
       return AUTO_SKIP_WITH_RESCUE_MS;
@@ -2557,7 +2608,7 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
     case "warpath":
       return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
     case "bulwark":
-      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now, rand, action.reinforced ?? false);
+      return applyMkSimple(doc, seat, "bulwark", action.tokenId, now);
     case "revive":
       return applyMkRevive(doc, seat, now);
     case "corpseExplosion":
@@ -2566,8 +2617,8 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkSimple(doc, seat, "exhume", action.targetTokenId, now);
     case "bless":
       return applyMkBlessing(doc, seat, action.targetTokenId, now);
-    case "heal":
-      return applyMkSimple(doc, seat, "heal", action.targetTokenId, now);
+    case "vigil":
+      return applyMkVigil(doc, seat, now);
     case "benediction":
       return applyMkBenediction(doc, seat, now);
     case "pickpocket":
@@ -2620,6 +2671,7 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
   let lastThrallExpired: RoomDoc["lastThrallExpired"] = null;
   let lastCurseExpired: RoomDoc["lastCurseExpired"] = null;
   let lastThaw: RoomDoc["lastThaw"] = null;
+  let lastWallBleed: RoomDoc["lastWallBleed"] = null;
   let lastInspireFaded: RoomDoc["lastInspireFaded"] = null;
   if (doc.variant === "masterKiller" && mk) {
     let power = fromWirePower(mk);
@@ -2650,6 +2702,18 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
     // Last turn's Dark Bargain announcement has been seen; clear it here so
     // the client can key its proc off the field appearing.
     power = tickDarkBargainForNewTurn(power);
+    // THE WALL SYSTEM'S TICK (2026-09-17): charges the mover for every wall
+    // they hold, dropping any they can't afford — BEFORE move generation,
+    // so a dropped wall's stone is capturable THIS turn (see
+    // tickWallUpkeepForNewTurn's own doc for why the ordering matters).
+    const upkeepResult = tickWallUpkeepForNewTurn(state, power);
+    power = upkeepResult.power;
+    if (upkeepResult.paid > 0 || upkeepResult.droppedTokenIds.length > 0) {
+      lastWallBleed = { player: state.currentPlayer, paid: upkeepResult.paid, droppedTokenIds: upkeepResult.droppedTokenIds };
+    }
+    // Vanish is a fixed-duration dodge, not a wall — it ticks on its own
+    // schedule, same slot, no upkeep to pay.
+    power = tickVanishForNewTurn(state, power).power;
     currentPowerMoves = getLegalPowerMoves(state, power, flip);
     const bulwarkResult = tickBulwarkForNewTurn(state, power, flip);
     power = bulwarkResult.power;
@@ -2668,6 +2732,7 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
     lastThrallExpired,
     lastCurseExpired,
     lastThaw,
+    lastWallBleed,
     lastInspireFaded,
     zeroFlipChargeBefore,
   };

@@ -28,12 +28,10 @@ import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
 import {
   CHARGE_CAP,
   CHARGED_SHOT_COST,
-  BULWARK_REINFORCED_COST,
   BLESS_COST,
   BLESSING_CAP,
   BLOOD_PACT_CHARGES,
   CHARGED_SHOT_DISTANCE,
-  CHARGED_SHOT_WARD_DISTANCE,
   CORPSE_EXPLOSION_COST,
   CURSE_COST,
   CURSE_SLOW,
@@ -62,8 +60,14 @@ import {
   ROGUE_STEAL_ON_CAPTURE,
   SOUL_BOUNTY_CHARGES,
   WILD_HUNT_FREEZE_TURNS,
-  HEAL_COST,
+  VIGIL_COST,
+  WALL_BLEED,
+  WALL_BLEED_MIN,
+  HOLD_THE_LINE_DISCOUNT,
+  wallUpkeepFor,
   isWarded,
+  isWalled,
+  isVanished,
   NECRO_CHARGE_CAP,
   PICKPOCKET_COST,
   PICKPOCKET_STEAL,
@@ -78,6 +82,7 @@ import {
   type PlayerClass,
   type PowerMove,
   type PowerState,
+  type WallKind,
 } from "../../master-killer.ts";
 import { normalizeDifficulty, type BotDifficulty } from "../../bot-difficulty.ts";
 
@@ -1474,10 +1479,15 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // same hexes as the plate gems and targeting rings, so color = author:
 //   Ward (Mage passive)        -> mage purple spinning rune-ring
 //   Bulwark (Warrior cast)     -> warrior blue rune-ring + translucent dome
+//   Blessing (Cleric cast)     -> cleric gold rune-ring + translucent dome
+//                                 (2026-09-17: a wall now, same rig family
+//                                 as Bulwark — no more ashen "wounded" half)
+//   Vanish (Rogue cast)        -> moonlit steel rune-ring + translucent dome
 //   Sheltering on a shield tile -> faint still steel ring (information, not
 //                                  spectacle — the tile art carries the rest)
-// (The rig set had a fourth limb — Ward Breaker safety, table-gold ring —
-// until the transient-safety mechanic itself was removed 2026-07-17.)
+// (The rig set had a fifth limb — Ward Breaker safety, table-gold ring —
+// until the transient-safety mechanic itself was removed 2026-07-17; Ward
+// Breaker itself retired 2026-09-17.)
 // Pool of 8 rigs assigned per broadcast in updateTokenTints, animated and
 // stone-tracked in tick(). Classic rooms never assign any. Pure radial
 // decals — no surface materials touched (the 2026-07-18 moiré revert was
@@ -1485,13 +1495,14 @@ function refreshMarkers(state: GameState, exhumed = false) {
 // ---------------------------------------------------------------------------
 type StatusKind =
   | "ward" | "bulwark" | "vanish" | "shieldTile" | "thrall" | "soulClaim"
-  | "blessed" | "wounded" | "cursed" | "frozen" | "inspired";
+  | "blessed" | "cursed" | "frozen" | "inspired";
 const STATUS_TINTS: Record<StatusKind, number> = {
   ward: 0xb45cff,
   bulwark: 0x3f83ff,
-  // Vanish is Bulwark's exact protection under a Rogue cast (see
-  // VANISH_COST's doc in master-killer.ts) — same rig/dome treatment, just
-  // the class's own moonlit steel instead of warrior blue.
+  // Vanish is a fixed-duration dodge, not a wall (2026-09-17: split off
+  // Bulwark's old shared map — see PowerState.vanished), but it still wears
+  // the same rig/dome treatment, just the class's own moonlit steel instead
+  // of warrior blue.
   vanish: 0x9fb4c9,
   shieldTile: 0xcfdcec,
   // Possession wears the necromancer's blood red — the enemy stone serving
@@ -1500,11 +1511,11 @@ const STATUS_TINTS: Record<StatusKind, number> = {
   // Soul Claim on a RESERVE stone — the rig loop overrides with the claim
   // owner's temperature; this entry just keeps the map total.
   soulClaim: 0xd94a45,
-  // The cleric's consecrated gold (DOCK_RING_TINTS.cleric) — a live
-  // blessing burns full gold; a wounded stone's broken light is the same
-  // gold ashed down, so the pair reads as one story at a glance.
+  // The cleric's consecrated gold (DOCK_RING_TINTS.cleric) — a Blessing is
+  // a WALL now (2026-09-17, the wall rework: same absolute protection as
+  // Bulwark, same dome/ring rig), so this is the ONE state left — no more
+  // ashed-down "wounded" half-light, since there's no wound tier any more.
   blessed: 0xe0b341,
-  wounded: 0x8a7448,
   // Curse of Chains wears the warlock's acid lime (DOCK_RING_TINTS.warlock).
   // Unlike every other entry here this marks an AFFLICTION, not a
   // protection — it sits last in the ring priority chain so a stone that is
@@ -1715,16 +1726,17 @@ function updateCorpseDecals() {
   });
 }
 
-/** Master Killer only: mark warded / Bulwarked / Ward Breaker-safe /
- *  shield-tile-sheltered tokens for the protection rigs, plus a matching
- *  emissive lift on the sculpt itself. Reuses the real isWarded() from
- *  master-killer.ts against a minimal PowerState built from the public
- *  `power` field, so the client can never drift from the server's own
- *  definition of "warded". Bulwark's protected-ness is simpler — the server
- *  already hands over the exact token id list (bulwarkedTokenIds). Classic
- *  rooms (currentPower === null) always take the clear-everything branch —
- *  a no-op against the materials' own black-emissive default, so classic
- *  visuals are untouched. */
+/** Master Killer only: mark warded / walled / Vanished / shield-tile-
+ *  sheltered tokens for the protection rigs, plus a matching emissive lift
+ *  on the sculpt itself. Reuses the real isWarded() from master-killer.ts
+ *  against a minimal PowerState built from the public `power` field, so the
+ *  client can never drift from the server's own definition of "warded". A
+ *  wall's protected-ness is simpler — the server already hands over the
+ *  exact token id -> kind map (walls), and Vanish is its own separate map
+ *  (2026-09-17, split off the wall system — see PowerState.vanished).
+ *  Classic rooms (currentPower === null) always take the clear-everything
+ *  branch — a no-op against the materials' own black-emissive default, so
+ *  classic visuals are untouched. */
 /** The most recent GameState the client rendered. Needed by the Snare
  *  targeting flow, which has to turn a tapped STONE into the tile in front
  *  of it — the one place a dock action needs board positions rather than
@@ -1734,7 +1746,8 @@ let lastRenderedState: GameState | null = null;
 
 function updateTokenTints(state: GameState) {
   lastRenderedState = state;
-  const bulwarked = currentPower ? new Set(currentPower.bulwarkedTokenIds) : null;
+  const walls = currentPower?.walls ?? {};
+  const vanished = currentPower?.vanished ?? {};
   const fakePower: PowerState | null = currentPower
     ? {
         classes: currentPower.classes,
@@ -1742,20 +1755,28 @@ function updateTokenTints(state: GameState) {
         reflipsUsedThisTurn: 0,
         shieldStreak: { p1: 0, p2: 0 },
         ultimateReady: { p1: false, p2: false },
-        bulwarked: {},
-        bulwarkSaves: {},
+        walls: {},
+        vanished: {},
+        wallGrace: { p1: 0, p2: 0 },
         // Real possession state, not a stub: isWarded consults it (a
         // possessed token is never warded), and the thrall tint below
-        // reads it too. Vitality likewise real — the blessed/wounded
-        // branches below key off it.
+        // reads it too.
         corpse: currentPower.corpse ?? { p1: null, p2: null },
         thrall: currentPower.thrall ?? { p1: null, p2: null },
-        vitality: currentPower.vitality ?? {},
         // Curse plays no part in isWarded, and the cursed ring below reads
         // the broadcast's flat `cursed` map directly — but PowerState
         // requires the field, and a stub null pair is the honest value for
         // a structure this function only uses as an isWarded argument.
         curse: { p1: null, p2: null },
+        // None of these play any part in isWarded either — stub values to
+        // satisfy PowerState's full shape (pre-existing gap closed here
+        // while touching this stub anyway; grave/darkBargain/traps/
+        // hamstrung postdate whenever this stub was last completed).
+        grave: { p1: null, p2: null },
+        darkBargain: { p1: null, p2: null },
+        traps: { p1: null, p2: null },
+        hamstrung: {},
+        inspired: {},
       }
     : null;
   // Which token (if any) is currently a thrall — possession outranks every
@@ -1802,21 +1823,23 @@ function updateTokenTints(state: GameState) {
       kind = "ward";
       mat.emissive.setHex(0x8040ff); // violet — Mage ward
       mat.emissiveIntensity = 0.55;
-    } else if (bulwarked && bulwarked.has(token.id)) {
-      // Same underlying protection map (see VANISH_COST's doc); which
-      // class cast it decides the color/label only.
-      const vanished = currentPower?.classes[token.owner] === "rogue";
-      kind = vanished ? "vanish" : "bulwark";
-      mat.emissive.setHex(vanished ? 0x9fb4c9 : 0x2f6bff);
+    } else if (vanished[token.id] !== undefined) {
+      // Own map since 2026-09-17 (split off the wall system) — a fixed
+      // dodge, always the Rogue's own moonlit steel.
+      kind = "vanish";
+      mat.emissive.setHex(0x9fb4c9);
       mat.emissiveIntensity = 0.5;
-    } else if (currentPower?.vitality?.[token.id] === "blessed" && token.position >= 0) {
+    } else if (walls[token.id] === "bulwark") {
+      kind = "bulwark";
+      mat.emissive.setHex(0x2f6bff); // warrior blue
+      mat.emissiveIntensity = 0.5;
+    } else if (walls[token.id] === "blessing") {
+      // A Blessing IS a wall now (2026-09-17) — same absolute protection
+      // as Bulwark, just the cleric's consecrated gold. No more "wounded"
+      // half-light: there's no wound tier left to fade into.
       kind = "blessed";
-      mat.emissive.setHex(0xe0b341); // consecrated gold — the second life burns
-      mat.emissiveIntensity = 0.45;
-    } else if (currentPower?.vitality?.[token.id] === "wounded" && token.position >= 0) {
-      kind = "wounded";
-      mat.emissive.setHex(0x8a7448); // ashed gold — the blessing broke, the scar shows
-      mat.emissiveIntensity = 0.3;
+      mat.emissive.setHex(0xe0b341);
+      mat.emissiveIntensity = 0.5;
     } else if (currentPower?.inspired?.[token.id] !== undefined && token.position >= 0) {
       // A BOON, unlike the two afflictions below it — but still after every
       // protection, since what can hit a stone matters more than how fast
@@ -1984,7 +2007,14 @@ let currentPower: {
   rainOfArrowsTargets?: number[];
   warpathTargets: number[];
   bulwarkTargets: number[];
-  bulwarkedTokenIds: number[];
+  /** THE WALL SYSTEM (2026-09-17): every walled token, public board truth
+   *  for both seats — replaces bulwarkedTokenIds + vitality. */
+  walls: Record<number, WallKind>;
+  /** Rogue's Vanish (split off the wall map): token id -> turns remaining. */
+  vanished: Record<number, number>;
+  /** What each player would pay per wall at their next upkeep tick — the
+   *  gem-rail "-N next turn" preview. */
+  wallUpkeep?: Record<PlayerId, number>;
   /** Optional (older servers omit it): how many Re-flips the current
    *  player has already fired this turn — gates the Re-flip button
    *  together with charges (see renderPowerActions). */
@@ -2007,21 +2037,15 @@ let currentPower: {
   darkBargain?: Record<PlayerId, { savedTokenId: number; from: number; to: number; sacrificedTokenId: number; sacrificedFrom: number } | null>;
   corpseExplosionTargets?: number[];
   exhumeTargets?: number[];
-  /** Optional (older servers omit them): raw lifecycle numbers behind
-   *  bulwarkedTokenIds and the streak — surfaced for the activity log's
-   *  effects panel, never used for gameplay decisions client-side. */
-  bulwarkTurns?: Record<number, number>;
-  bulwarkSavesLeft?: Record<number, number>;
   shieldStreak?: Record<PlayerId, number>;
-  /** Cleric (2026-07-21): Bless/Heal target pools for the CURRENT player
-   *  (affordability baked in server-side — empty = not castable),
-   *  Benediction's would-change pool (ultimateReady-gated), and every
-   *  token's blessed/wounded state (public table-state — the gold rings
-   *  both seats see). */
+  /** Cleric (2026-07-21; RE-THEMED 2026-09-17): Bless's target pool for
+   *  the CURRENT player (affordability baked in server-side — empty = not
+   *  castable), Vigil's castability (no target — it waives upkeep for
+   *  every wall the mover already holds), and Benediction's would-change
+   *  pool (ultimateReady-gated). */
   blessTargets?: number[];
-  healTargets?: number[];
+  vigilCastable?: boolean;
   benedictionTargets?: number[];
-  vitality?: Record<number, "blessed" | "wounded">;
   /** Rogue (2026-07-21, Vanish added 2026-07-22): Pickpocket target pool
    *  for the CURRENT player (affordability baked in server-side), Vanish's
    *  own OWN-stone pool (affordability NOT baked in — Bulwark's own
@@ -2064,9 +2088,9 @@ let currentPower: {
 let currentPowerMoves: PowerMove[] | null = null;
 /** Master Killer targeting — ONE mutually exclusive armed state for every
  *  aim-then-tap ability (the dock's gems arm it; the canvas tap consumes
- *  it). Arming anything disarms whatever else was armed, so Bulwark-vs-
- *  Reinforced exclusivity (and every other pairing) falls out for free.
- *  `targetIds` always come from the server's own lists — enemy tokens for
+ *  it). Arming anything disarms whatever else was armed, so every pairing's
+ *  exclusivity falls out for free. `targetIds` always come from the
+ *  server's own lists — enemy tokens for
  *  Push/Charged Shot/ultimates, MY OWN tokens for Bulwark and Charge — and
  *  findTargetUnderPointer works over any of them regardless of owner. */
 type ArmedKind =
@@ -2076,10 +2100,8 @@ type ArmedKind =
   | "rainOfArrows"
   | "warpath"
   | "bulwark"
-  | "bulwarkReinforced"
   | "charge"
   | "bless"
-  | "heal"
   | "pickpocket"
   | "vanish"
   | "backstab"
@@ -2203,73 +2225,67 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Charged Shot",
     cost: `${CHARGED_SHOT_COST} mana`,
     klass: "archer",
-    desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces — ${CHARGED_SHOT_WARD_DISTANCE} if Warded, the one shot that can reach a Warded stone. Send it home and one mana comes back.`,
+    desc: `A heavier shot: knock an enemy stone back ${CHARGED_SHOT_DISTANCE} paces. Send it home and one mana comes back. A shield tile, a Ward, a wall, or a Vanish all stop it cold.`,
   },
   charge: {
     name: "Charge",
     cost: "1 mana",
     klass: "warrior",
-    desc: "Turn this move into a sweep: one enemy stone between your start and landing is captured too, Warded or not.",
+    desc: "Turn this move into a sweep: one unprotected enemy stone between your start and landing is captured too.",
   },
   bulwark: {
     name: "Bulwark",
     cost: "1 mana",
     klass: "warrior",
-    desc: "Shield one of your own stones: it can't be captured or swept by a Charge — though an ultimate or a Barbarian's Reckless Swing still punches through. Fades after a few turns, or the moment it saves the stone.",
-  },
-  bulwarkReinforced: {
-    name: "Reinforced Bulwark",
-    cost: `${BULWARK_REINFORCED_COST} mana`,
-    klass: "warrior",
-    desc: "A Bulwark with everything doubled: it lasts twice as many turns AND shrugs off the first save instead of fading — only the second save (or time) brings it down. A plain Push can't budge it; only a Charged Shot moves it.",
+    desc: "Wall one of your own stones: nothing short of an ultimate can capture, sweep, push, or otherwise touch it. Holding it costs mana every one of your own turns — let the bill go unpaid and the wall falls on its own. Hold the Line shaves a little off what your own wall costs you to keep.",
   },
   blinkStrike: {
     name: "Blink Strike",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "mage",
-    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields, Wards, and Bulwarks.",
+    desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields, Wards, and walls.",
   },
   warpath: {
     name: "Warpath",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "warrior",
-    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and Bulwarks.",
+    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and walls.",
   },
   snipe: {
     name: "Snipe",
     cost: "Passive · always on",
     klass: "archer",
-    desc: "Every landing in shared water also fells an unprotected enemy stone exactly one tile ahead of where you land — a free second capture, no mana, no aiming. Shields, Wards, and Bulwarks turn it.",
+    desc: "Every landing in shared water also fells an unprotected enemy stone exactly one tile ahead of where you land — a free second capture, no mana, no aiming. A shield tile, a Ward, a wall, or a Vanish turns it.",
   },
   rainOfArrows: {
     name: "Rain of Arrows",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "archer",
-    desc: "Chain three shield-tile landings in a row, your turn never passing, and the sky is yours to call: tap any enemy stone in shared water and the arrows strike it down through every protection — shield, Ward, Bulwark, Blessing, Vanish, even a Warlock's bargain. Spends the ultimate, not mana; grants a mana like any capture; ends your turn.",
+    desc: "Chain three shield-tile landings in a row, your turn never passing, and the sky is yours to call: tap any enemy stone in shared water and the arrows strike it down through every protection — shield, Ward, wall, Vanish, even a Warlock's bargain. Spends the ultimate, not mana; grants a mana like any capture; ends your turn.",
   },
   ward: {
     name: "Ward",
     cost: "Passive · while your mana is full",
     klass: "mage",
-    desc: "While your mana is full, your most-advanced stone is shielded: it cannot be captured or targeted. Spend any mana and the Ward falls until you refill. Warriors, thralls, blessed Cleric stones, a Warlock's Sacrifice, and ultimates pierce it.",
+    desc: "While your mana is full, your most-advanced stone is shielded: it cannot be captured or targeted by anything short of an ultimate. Spend any mana and the Ward falls until you refill.",
   },
-  wardBreaker: {
-    name: "Ward Breaker",
+  holdTheLine: {
+    name: "Hold the Line",
     cost: "Passive · always on",
     klass: "warrior",
-    desc: "Wards mean nothing to you: landing on a Warded enemy breaks the Ward and captures it all the same, and your Charge sweep cuts through Warded stones too. Shield tiles and Bulwarks still hold.",
+    desc: "A wall you raise yourself is cheaper for you to keep standing than it is for anyone else — the front holds longest, and you're built to pay for it.",
   },
   revive: {
     name: "Revive",
     cost: `${REVIVE_COST} mana · keeps your turn`,
     klass: "necromancer",
-    desc: `Raise the enemy stone you last killed as your THRALL, on the very tile it died. For ${THRALL_TURNS} of your turns it fights for you — it moves on your flips, kills like any stone, and its blade ignores the Mage's Ward — but it can never leave shared water, and then it crumbles home. Your flip stands: the risen dead may be the one that moves.`,
+    desc: `Raise the enemy stone you last killed as your THRALL, on the very tile it died. For ${THRALL_TURNS} of your turns it fights for you — it moves on your flips and kills like any stone — but it can never leave shared water, and then it crumbles home. Your flip stands: the risen dead may be the one that moves.`,
   },
   corpseExplosion: {
     name: "Corpse Explosion",
     cost: `${CORPSE_EXPLOSION_COST} mana`,
     klass: "necromancer",
-    desc: "Detonate your open grave: the unprotected enemy stone standing on it is killed outright — sent home. A blessed stone is only wounded. The grave stays open after Revive takes the body, so raise first and keep the mine armed for whoever stops on it; your next kill moves the grave. The blast desecrates it: a blown grave raises nothing, and its kill pays no mana and marks no corpse. Shields, Wards, and Bulwarks all turn it.",
+    desc: "Detonate your open grave: the unprotected enemy stone standing on it is killed outright — sent home. The grave stays open after Revive takes the body, so raise first and keep the mine armed for whoever stops on it; your next kill moves the grave. The blast desecrates it: a blown grave raises nothing, and its kill pays no mana and marks no corpse. A shield tile, a Ward, a wall, or a Vanish all turn it.",
   },
   exhume: {
     name: "Exhume",
@@ -2281,25 +2297,25 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bless",
     cost: `${BLESS_COST} mana · keeps your turn`,
     klass: "cleric",
-    desc: `A quick prayer over one of your stones: it gains a second life. The first blow that would kill it only WOUNDS it — the stone survives, the attacker gets nothing for the strike, and if they landed on its tile it staggers back to the nearest open water. Your turn continues: bless, then still make your move.`,
+    desc: "A quick prayer over one of your stones: it becomes a wall, same as a Warrior's Bulwark — nothing short of an ultimate can touch it, and it costs you mana every one of your own turns to keep standing. Your turn continues: bless, then still make your move.",
   },
-  heal: {
-    name: "Heal",
-    cost: `${HEAL_COST} mana`,
+  vigil: {
+    name: "Vigil",
+    cost: `${VIGIL_COST} mana`,
     klass: "cleric",
-    desc: "Lay hands on a WOUNDED stone and restore its blessing — ready to turn the next killing blow again. Mending takes your whole turn: a broken blessing is a real setback, not a free bounce-back.",
+    desc: "Keep watch over your whole army at once: your NEXT wall-upkeep bill is waived, front stone first. Worth nothing with a single wall up — the tool is for when you're juggling two or more and the bank can't cover them all. Ends your turn.",
   },
   benediction: {
     name: "Benediction",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "cleric",
-    desc: "Bless your entire army on the board at once — every unblessed and wounded stone rises under the light together. The prayer takes the turn; the protection stays until broken.",
+    desc: "Wall your entire army on the board at once — every unwalled stone rises under the light together, and the whole army's next upkeep is waived too. The prayer takes the turn; the walls stand only as long as you keep paying for them.",
   },
   sanctifiedGround: {
     name: "Sanctified Ground",
     cost: "Passive · always on",
     klass: "cleric",
-    desc: "The shield tiles are holy ground to you: every time one of your stones lands on one, ALL your wounded stones are mended back to blessed — on top of the extra turn and mana every shield landing already grants.",
+    desc: "The shield tiles are holy ground to you: every time one of your stones lands on one, your next wall-upkeep bill is waived — on top of the extra turn and mana every shield landing already grants.",
   },
   // Passive — no dock slot (same rule as the Archer's Snipe), so nothing
   // opens this card yet; the entry keeps the tooltip copy in the one place
@@ -2326,19 +2342,19 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Backstab",
     cost: `${BACKSTAB_COST} mana`,
     klass: "rogue",
-    desc: "A guaranteed hit on any enemy stone in shared water: it dies and goes home, no roll, no aiming — straight through a Ward. A shield tile, a Bulwark, or a Vanish still turns it aside, and a blessed stone is only wounded. Larceny still drains the victim's purse on the kill. Ends your turn.",
+    desc: "A guaranteed hit on any enemy stone in shared water: it dies and goes home, no roll, no aiming. Nothing protected reaches it though — a shield tile, a Ward, a wall, or a Vanish all turn it aside. Larceny still drains the victim's purse on the kill. Ends your turn.",
   },
   vanish: {
     name: "Vanish",
     cost: `${VANISH_COST} mana`,
     klass: "rogue",
-    desc: "Slip one of your own stones into the shadows: it can't be captured, swept, Pushed, Cursed, shot, or caught in a Whirlwind. A Charged Shot can still shove it (never home), a Barbarian's Reckless Swing cuts it down, and an ultimate always finds it. Fades after a few turns, or the moment it saves the stone.",
+    desc: "Slip one of your own stones into the shadows: nothing short of an ultimate can capture, sweep, push, shoot, curse, or catch it in a Whirlwind. Fades after a couple of turns on its own — a fixed dodge, not a wall, so it never costs you mana to hold.",
   },
   grandHeist: {
     name: "Grand Heist",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "rogue",
-    desc: "Teleport your furthest-along stone onto any enemy in shared water and take it — straight through shields, Wards, and Bulwarks — then empty their ENTIRE bank on the spot. A capture and a robbery in the same breath.",
+    desc: "Teleport your furthest-along stone onto any enemy in shared water and take it — straight through shields, Wards, and walls — then empty their ENTIRE bank on the spot. A capture and a robbery in the same breath.",
   },
   darkBargain: {
     name: "Dark Bargain",
@@ -2356,7 +2372,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Sacrifice",
     cost: `${SACRIFICE_COST} mana`,
     klass: "warlock",
-    desc: "Give your furthest-along stone to the dark and one enemy in shared water dies outright — straight through a Ward or a Blessing, with no wound and no second life. A Bulwark, a Vanish or a shield tile still turns it aside. The ritual demands your best, not your worst.",
+    desc: "Give your furthest-along stone to the dark and one enemy in shared water dies outright. Anything protected turns it aside though — a shield tile, a Ward, a wall, or a Vanish. The ritual demands your best, not your worst.",
   },
   felStorm: {
     name: "Fel Storm",
@@ -2368,7 +2384,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Wolf Companion",
     cost: "Passive · always on",
     klass: "hunter",
-    desc: "Your wolf ranges ahead of your furthest-along stone, guarding the tile directly in front of it. Any enemy that lands there is taken — no mana, no action, no warning beyond the mark on the board. A shield tile, a Ward or a Bulwark walks past it safely.",
+    desc: "Your wolf ranges ahead of your furthest-along stone, guarding the tile directly in front of it. Any enemy that lands there is taken — no mana, no action, no warning beyond the mark on the board. A shield tile, a Ward, a wall, or a Vanish walks past it safely.",
   },
   snare: {
     name: "Snare",
@@ -2380,7 +2396,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Piercing Shot",
     cost: `${PIERCING_SHOT_COST} mana`,
     klass: "hunter",
-    desc: "Loose an arrow down the shared row from your furthest-along stone: the first enemy in its path dies, at any range. The first body stops the arrow though — a shielded, Warded, Bulwarked or Vanished stone blocks the shot for everything behind it, and so does one of your own.",
+    desc: "Loose an arrow down the shared row from your furthest-along stone: the first enemy in its path dies, at any range. The first body stops the arrow though — a shielded, Warded, walled, or Vanished stone blocks the shot for everything behind it, and so does one of your own.",
   },
   wildHunt: {
     name: "Wild Hunt",
@@ -2398,7 +2414,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Reckless Swing",
     cost: `${RECKLESS_SWING_COST} mana`,
     klass: "barbarian",
-    desc: `Bring the axe down on an enemy standing directly in front of one of your stones — straight through a Bulwark or a Vanish, which nothing else you own can touch. The blow throws YOUR stone ${RECKLESS_SELF_KNOCKBACK} tiles back, and if there's nowhere to land it goes home. A Ward or a shield tile still turns it aside.`,
+    desc: `Bring the axe down on an unprotected enemy standing directly in front of one of your stones. The blow throws YOUR stone ${RECKLESS_SELF_KNOCKBACK} tiles back, and if there's nowhere to land it goes home. A shield tile, a Ward, a wall, or a Vanish stops the swing before it lands.`,
   },
   whirlwind: {
     name: "Whirlwind",
@@ -2410,7 +2426,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bloodbath",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "barbarian",
-    desc: "Your furthest-along stone charges the length of shared water and takes EVERY enemy in its path — no cap, no shield, no Ward, no Bulwark, nothing. It finishes standing at the far end of the row.",
+    desc: "Your furthest-along stone charges the length of shared water and takes EVERY enemy in its path — no cap, no shield, no Ward, no wall, nothing. It finishes standing at the far end of the row.",
   },
   encore: {
     name: "Encore",
@@ -2522,7 +2538,6 @@ const DOCK_COST: Record<string, number> = {
   chargedShot: CHARGED_SHOT_COST,
   charge: 1,
   bulwark: 1,
-  bulwarkReinforced: BULWARK_REINFORCED_COST,
   blinkStrike: 0,
   warpath: 0,
   revive: REVIVE_COST,
@@ -2531,10 +2546,10 @@ const DOCK_COST: Record<string, number> = {
   snipe: 0,
   rainOfArrows: 0,
   ward: 0,
-  wardBreaker: 0,
+  holdTheLine: 0,
   soulHarvest: 0,
   bless: BLESS_COST,
-  heal: HEAL_COST,
+  vigil: VIGIL_COST,
   benediction: 0,
   sanctifiedGround: 0,
   larceny: 0,
@@ -2567,7 +2582,6 @@ const DOCK_NAMES: Record<string, string> = {
   chargedShot: "Charged Shot",
   charge: "Charge",
   bulwark: "Bulwark",
-  bulwarkReinforced: "Reinforced",
   blinkStrike: "Blink Strike",
   warpath: "Warpath",
   revive: "Revive",
@@ -2576,10 +2590,10 @@ const DOCK_NAMES: Record<string, string> = {
   snipe: "Snipe",
   rainOfArrows: "Rain of Arrows",
   ward: "Ward",
-  wardBreaker: "Ward Breaker",
+  holdTheLine: "Hold the Line",
   soulHarvest: "Soul Harvest",
   bless: "Bless",
-  heal: "Heal",
+  vigil: "Vigil",
   benediction: "Benediction",
   sanctifiedGround: "Sanctified",
   larceny: "Larceny",
@@ -2627,7 +2641,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "blinkStrike", ult: true },
   ],
   warrior: [
-    { ability: "wardBreaker", passive: true },
+    { ability: "holdTheLine", passive: true },
     { ability: "charge" },
     { ability: "bulwark" },
     { ability: "warpath", ult: true },
@@ -2641,7 +2655,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
   cleric: [
     { ability: "sanctifiedGround", passive: true },
     { ability: "bless" },
-    { ability: "heal" },
+    { ability: "vigil" },
     { ability: "benediction", ult: true },
   ],
   rogue: [
@@ -2707,13 +2721,11 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   push: "tap a glowing enemy stone",
   chargedShot: "tap a glowing enemy stone",
   charge: "tap one of your glowing stones to sweep",
-  bulwark: "tap one of your stones to shield",
-  bulwarkReinforced: "tap one of your stones",
+  bulwark: "tap one of your stones to wall",
   blinkStrike: "tap an enemy to strike",
   rainOfArrows: "tap an enemy to rain on",
   warpath: "tap an enemy to end on",
-  bless: "tap one of your stones to bless",
-  heal: "tap a wounded stone to mend",
+  bless: "tap one of your stones to wall",
   pickpocket: "tap a glowing enemy stone",
   vanish: "tap one of your stones to hide it",
   backstab: "tap a glowing enemy stone to kill it",
@@ -2799,11 +2811,7 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       return { state: "ready" };
     case "bulwark":
       if (charges < 1) return { state: "noafford", reason: needCharges(1) };
-      if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to shield" };
-      return { state: "ready" };
-    case "bulwarkReinforced":
-      if (charges < CHARGE_CAP) return { state: "noafford", reason: needCharges(CHARGE_CAP) };
-      if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to shield" };
+      if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to wall" };
       return { state: "ready" };
     case "blinkStrike":
     case "rainOfArrows":
@@ -2839,10 +2847,10 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (charges < BLESS_COST) return { state: "noafford", reason: needCharges(BLESS_COST) };
       return { state: "noafford", reason: "No stones to bless" };
     }
-    case "heal": {
-      if ((p.healTargets ?? []).length > 0) return { state: "ready" };
-      if (charges < HEAL_COST) return { state: "noafford", reason: needCharges(HEAL_COST) };
-      return { state: "noafford", reason: "No wounded stones" };
+    case "vigil": {
+      if (p.vigilCastable) return { state: "ready" };
+      if (charges < VIGIL_COST) return { state: "noafford", reason: needCharges(VIGIL_COST) };
+      return { state: "noafford", reason: "No walls to keep" };
     }
     case "benediction":
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
@@ -2993,9 +3001,10 @@ function updateDock(active?: boolean) {
     JSON.stringify(p.thrall ?? null),
     (p.exhumeTargets ?? []).join(),
     (p.blessTargets ?? []).join(),
-    (p.healTargets ?? []).join(),
+    p.vigilCastable ?? false,
     (p.benedictionTargets ?? []).join(),
-    JSON.stringify(p.vitality ?? null),
+    JSON.stringify(p.walls ?? null),
+    JSON.stringify(p.vanished ?? null),
     [...chargeMoveIndexByToken.keys()].join(),
   ].join("|");
   if (key !== dockKey) {
@@ -3089,27 +3098,25 @@ function armAbility(kind: ArmedKind) {
               ? [...chargeMoveIndexByToken.keys()]
               : kind === "bless"
                 ? (p.blessTargets ?? [])
-                : kind === "heal"
-                  ? (p.healTargets ?? [])
-                  : kind === "pickpocket"
-                    ? (p.pickpocketTargets ?? [])
-                    : kind === "vanish"
-                      ? (p.vanishTargets ?? [])
-                      : kind === "grandHeist"
-                        ? (p.grandHeistTargets ?? [])
-                        : kind === "backstab"
-                          ? (p.backstabTargets ?? [])
-                        : kind === "curse"
-                          ? (p.curseTargets ?? [])
-                          : kind === "sacrifice"
-                            ? (p.sacrificeTargets ?? [])
-                            : kind === "snare"
-                              ? snareStoneTargets(p)
-                              : kind === "recklessSwing"
-                                ? (p.recklessSwingTargets ?? [])
-                                : kind === "inspire"
-                                  ? (p.inspireTargets ?? [])
-                                  : p.bulwarkTargets, // bulwark / bulwarkReinforced
+                : kind === "pickpocket"
+                  ? (p.pickpocketTargets ?? [])
+                  : kind === "vanish"
+                    ? (p.vanishTargets ?? [])
+                    : kind === "grandHeist"
+                      ? (p.grandHeistTargets ?? [])
+                      : kind === "backstab"
+                        ? (p.backstabTargets ?? [])
+                      : kind === "curse"
+                        ? (p.curseTargets ?? [])
+                        : kind === "sacrifice"
+                          ? (p.sacrificeTargets ?? [])
+                          : kind === "snare"
+                            ? snareStoneTargets(p)
+                            : kind === "recklessSwing"
+                              ? (p.recklessSwingTargets ?? [])
+                              : kind === "inspire"
+                                ? (p.inspireTargets ?? [])
+                                : p.bulwarkTargets, // bulwark
   );
   const tiles = kind === "blink" ? new Set<number>(p.blinkTiles ?? []) : null;
   if (ids.size === 0 && !(tiles && tiles.size > 0)) return;
@@ -3167,9 +3174,6 @@ function fireArmed(tokenId: number) {
     case "bulwark":
       sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId } });
       break;
-    case "bulwarkReinforced":
-      sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId, reinforced: true } });
-      break;
     case "charge": {
       const moveIndex = chargeMoveIndexByToken.get(tokenId);
       if (moveIndex !== undefined) sendToServer({ type: "usePower", action: { kind: "charge", moveIndex } });
@@ -3177,9 +3181,6 @@ function fireArmed(tokenId: number) {
     }
     case "bless":
       sendToServer({ type: "usePower", action: { kind: "bless", targetTokenId: tokenId } });
-      break;
-    case "heal":
-      sendToServer({ type: "usePower", action: { kind: "heal", targetTokenId: tokenId } });
       break;
     case "pickpocket":
       sendToServer({ type: "usePower", action: { kind: "pickpocket", targetTokenId: tokenId } });
@@ -3338,6 +3339,13 @@ dockEl.addEventListener("click", (e) => {
     // on-board army" — a board tap would be a choice carrying no
     // information. The server re-validates against the shared oracle.
     sendToServer({ type: "usePower", action: { kind: "benediction" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "vigil") {
+    // Instant, Revive's precedent: Vigil has no target at all — it waives
+    // upkeep for every wall the mover already holds, not one stone.
+    sendToServer({ type: "usePower", action: { kind: "vigil" } });
     flashDockButton(ability, "fired");
     return;
   }
@@ -3510,7 +3518,7 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: "Thrall",
         cost: `serves ${n} more turn${n === 1 ? "" : "s"}`,
         klass: "necromancer",
-        desc: `This fallen stone fights for ${mine ? "YOU" : "the enemy Necromancer"}: it moves on ${mine ? "your" : "their"} coin flips, kills like any stone, and its blade ignores the Mage's Ward. It can never leave shared water — when its service ends it crumbles back to its owner's hand. Kill it early to end the possession.`,
+        desc: `This fallen stone fights for ${mine ? "YOU" : "the enemy Necromancer"}: it moves on ${mine ? "your" : "their"} coin flips and kills like any stone. It can never leave shared water — when its service ends it crumbles back to its owner's hand. Kill it early to end the possession.`,
       };
     }
     case "ward":
@@ -3518,25 +3526,25 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         name: "Warded",
         cost: "while the Mage holds full mana",
         klass: "mage",
-        desc: "The Mage's most-advanced stone is shielded: it cannot be captured or targeted — except by a Warrior's Ward Breaker, a thrall's blade, a blessed Cleric stone, a Warlock's Sacrifice, or an ultimate. A Charged Shot can still knock it back. The Ward falls the moment the Mage spends any mana.",
+        desc: "The Mage's most-advanced stone is shielded: it cannot be captured, targeted, or knocked back by anything short of an ultimate. The Ward falls the moment the Mage spends any mana.",
       };
     case "bulwark": {
-      const turns = currentPower.bulwarkTurns?.[tokenId];
-      const saves = currentPower.bulwarkSavesLeft?.[tokenId];
+      const owner = tokenId < 4 ? "p1" : "p2";
+      const upkeep = currentPower.wallUpkeep?.[owner];
       return {
         name: "Bulwark",
-        cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left${saves !== undefined ? ` · ${saves} save${saves === 1 ? "" : "s"}` : ""}`,
+        cost: upkeep !== undefined ? `${upkeep} mana/turn to hold` : "walled",
         klass: "warrior",
-        desc: `A Warrior's shield stands over this stone: it cannot be captured or swept, and no Push or Charged Shot can send it home${saves !== undefined ? " — and a plain Push can't budge it at all" : ""}. Ultimates and a Barbarian's Reckless Swing still punch through. It fades when its turns run out${saves !== undefined ? " or its saves are spent" : " or the moment it blocks a capture"}.`,
+        desc: "A Warrior's shield stands over this stone: nothing short of an ultimate can capture, sweep, push, or otherwise touch it. It costs its owner mana every one of their own turns to keep standing — let the bill go unpaid and it falls on its own, no warning beyond an empty purse.",
       };
     }
     case "vanish": {
-      const turns = currentPower.bulwarkTurns?.[tokenId];
+      const turns = currentPower.vanished[tokenId];
       return {
         name: "Vanished",
         cost: `${turns ?? "?"} turn${turns === 1 ? "" : "s"} left`,
         klass: "rogue",
-        desc: "The Rogue has slipped this stone into the shadows: it cannot be captured, swept, Pushed, Cursed, or shot. A Charged Shot can still shove it (never home), a Barbarian's Reckless Swing cuts it down, and ultimates always find it. It fades when its turns run out or the moment it blocks a capture.",
+        desc: "The Rogue has slipped this stone into the shadows: nothing short of an ultimate can capture, sweep, push, shoot, curse, or catch it in a Whirlwind. A fixed dodge, not a wall — it costs no mana to hold, and it fades on its own once its turns run out.",
       };
     }
     case "soulClaim": {
@@ -3560,20 +3568,16 @@ function statusCardFor(idx: number): { name: string; cost: string; desc: string;
         klass: "warrior",
         desc: "A stone standing here cannot be captured, and LANDING here grants an extra turn plus a mana. Chain three shield landings in a row to awaken your ultimate.",
       };
-    case "blessed":
+    case "blessed": {
+      const owner = tokenId < 4 ? "p1" : "p2";
+      const upkeep = currentPower.wallUpkeep?.[owner];
       return {
         name: "Blessed",
-        cost: "a second life · until broken",
+        cost: upkeep !== undefined ? `${upkeep} mana/turn to hold` : "walled",
         klass: "cleric",
-        desc: "This stone carries the Cleric's blessing: the first blow that would kill it only WOUNDS it — the stone survives (staggering back if the attacker needs its tile), and the attacker earns just one mana for breaking the light. A blessed stone's own strikes carry the light through the Mage's Ward. Ultimates and a Warlock's Sacrifice still kill it outright.",
+        desc: "This stone carries the Cleric's blessing — a wall, same as a Warrior's Bulwark: nothing short of an ultimate can touch it. It costs its owner mana every one of their own turns to keep the light burning; let the bill go unpaid and the blessing fades on its own.",
       };
-    case "wounded":
-      return {
-        name: "Wounded",
-        cost: "the blessing is broken",
-        klass: "cleric",
-        desc: "This stone's blessing broke absorbing a killing blow. It fights on with one life like any mortal stone — until the Cleric spends a turn to Heal it, mends it by landing on a shield tile, or blesses the army anew with Benediction.",
-      };
+    }
     case "inspired": {
       const turns = currentPower.inspired?.[tokenId];
       const mine = (tokenId < 4 ? "p1" : "p2") === (myRole ?? "p1");
@@ -4185,6 +4189,7 @@ function announceFromState(msg: {
   lastChargedShot?: { targetTokenId: number } | null;
   lastBulwark?: { tokenId: number; reinforced?: boolean } | null;
   lastBulwarkBlock?: { tokenIds: number[] } | null;
+  lastWallBleed?: { player: PlayerId; paid: number; droppedTokenIds: number[] } | null;
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
   lastUltimate?: {
@@ -4201,12 +4206,34 @@ function announceFromState(msg: {
   lastCorpseExplosion?: { tile: number; struckTokenIds: number[]; sentHomeIds: number[] } | null;
   lastExhume?: { targetTokenId: number; returnedTo: number } | null;
   lastBless?: { tokenId: number } | null;
-  lastHeal?: { tokenId: number } | null;
+  lastVigil?: { player: PlayerId } | null;
   lastBenediction?: { tokenIds: number[] } | null;
-  lastWound?: { tokenIds: number[] } | null;
-  lastMend?: { tokenIds: number[] } | null;
   lastPickpocket?: { targetTokenId: number; stolen: number } | null;
   lastVanish?: { tokenId: number } | null;
+  // Below: filled in from their declared shapes in room-engine.ts's
+  // RoomEvent — this parameter type had drifted narrower than what the
+  // function body already read (pre-existing gap, unrelated to the wall
+  // rework; closed here while touching this function anyway).
+  lastCurse?: { targetTokenId: number } | null;
+  lastSacrifice?: { sacrificedTokenId: number; targetTokenId: number } | null;
+  lastBackstab?: { targetTokenId: number } | null;
+  lastBlink?: { tokenId: number; from: number; to: number } | null;
+  lastFelStorm?: { struckTokenIds: number[]; sentHomeIds: number[] } | null;
+  lastTrapSprung?: { tile: number; tokenId: number; sentHome: boolean } | null;
+  lastWolfBite?: { tokenId: number; sentHome: boolean } | null;
+  lastPiercingShot?: { killedTokenId: number | null; woundedTokenId: number | null } | null;
+  lastWildHunt?: { frozenTokenIds: number[]; killedTokenId: number | null } | null;
+  lastRecklessSwing?: {
+    swingerTokenId: number;
+    killedTokenId: number | null;
+    woundedTokenId: number | null;
+    swingerSentHome: boolean;
+  } | null;
+  lastWhirlwind?: { capturedTokenIds: number[]; knockedTokenIds: number[]; sentHomeIds: number[] } | null;
+  lastBloodbath?: { killedTokenIds: number[]; endedOn: number } | null;
+  lastInspire?: { tokenId: number } | null;
+  lastSongOfHaste?: { movedIds: number[]; capturedIds: number[] } | null;
+  lastCrescendo?: { inspiredIds: number[]; movedIds: number[]; capturedIds: number[] } | null;
   power?: { classes: Record<PlayerId, PlayerClass> };
   wasSkipped: boolean;
   skippedPlayer: PlayerId | null;
@@ -4281,18 +4308,13 @@ function announceFromState(msg: {
     const owner = msg.state.tokens.find((t) => t.id === msg.lastBless!.tokenId)?.owner;
     if (classOf(owner) === "cleric") showProc("cleric", "Bless!", "bless");
   }
-  // A blessing BROKE this commit — the stone survived a killing blow. The
-  // proc wears the VICTIM's (cleric's) color; the main move/push/blast
-  // announcement still follows.
-  if (msg.lastWound && msg.lastWound.tokenIds.length > 0) {
-    const owner = msg.state.tokens.find((t) => t.id === msg.lastWound!.tokenIds[0])?.owner;
-    if (classOf(owner) === "cleric") showProc("cleric", "Blessing Breaks!", "wound");
-  }
-  // Sanctified Ground fired on a shield landing — mends ride the landing's
-  // own commit and announcement.
-  if (msg.lastMend && msg.lastMend.tokenIds.length > 0) {
-    const owner = msg.state.tokens.find((t) => t.id === msg.lastMend!.tokenIds[0])?.owner;
-    if (classOf(owner) === "cleric") showProc("cleric", "Sanctified Ground", "sanctifiedGround");
+  // A wall fell for non-payment (2026-09-17, the wall-bleed tick) — shares
+  // the commit with whatever the wall's owner does on their fresh flip,
+  // same reasoning as the thrall-crumble/corpse-denied procs above (it
+  // fires the instant the tick runs, before they've even chosen a move).
+  if (msg.lastWallBleed && msg.lastWallBleed.droppedTokenIds.length > 0) {
+    const k = classOf(msg.lastWallBleed.player);
+    if (k) showProc(k, "Wall Falls!", "wallBleed");
   }
   // Rogue's Pickpocket keeps the turn (Bless's contract) — a proc, not a
   // returning announcement. Turn-keeping means lastMovePlayer is stale (a
@@ -4360,15 +4382,17 @@ function announceFromState(msg: {
     return;
   }
 
-  // Heal ends the turn (a whole turn spent mending), so it announces and
-  // returns like its Bulwark sibling; Benediction is an ultimate resolving.
-  if (msg.lastHeal && msg.lastMovePlayer) {
-    const isMe = msg.lastMovePlayer === myRole;
-    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+  // Vigil (replaces Heal, 2026-09-17): ends the turn (a whole turn spent
+  // buying grace), so it announces and returns like its Bulwark sibling.
+  // No target — it banks one turn of waived wall-upkeep for the WHOLE
+  // army, not a single mended stone.
+  if (msg.lastVigil) {
+    const isMe = msg.lastVigil.player === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastVigil.player);
     const target = isMe ? "your" : "their";
-    if (classOf(msg.lastMovePlayer) === "cleric") showProc("cleric", "Healed", "heal");
+    if (classOf(msg.lastVigil.player) === "cleric") showProc("cleric", "Vigil", "vigil");
     showAnnouncement(
-      `${subject} healed ${target} wounded stone — the blessing burns again${chargeFor(msg.lastMovePlayer)}`,
+      `${subject} kept Vigil — ${target} walls stand another turn for free${chargeFor(msg.lastVigil.player)}`,
       "shield",
     );
     return;
@@ -4391,11 +4415,10 @@ function announceFromState(msg: {
     const isMe = msg.lastMovePlayer === myRole;
     const subject = isMe ? "You" : who;
     const target = isMe ? "your" : "their";
-    const reinforced = msg.lastBulwark.reinforced === true;
     const k = classOf(msg.lastMovePlayer);
-    if (k) showProc(k, reinforced ? "Reinforced Bulwark!" : "Bulwark!", reinforced ? "bulwarkReinforced" : "bulwark");
+    if (k) showProc(k, "Bulwark!", "bulwark");
     showAnnouncement(
-      `${subject} raised ${reinforced ? "a REINFORCED Bulwark" : "Bulwark"} on ${target} token${chargeFor(msg.lastMovePlayer)}`,
+      `${subject} raised Bulwark on ${target} token — held until the mana to keep it runs out${chargeFor(msg.lastMovePlayer)}`,
       "shield",
     );
     return;
@@ -4446,11 +4469,10 @@ function announceFromState(msg: {
     const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Backstab!", "backstab");
-    const wounded = (msg.lastWound?.tokenIds ?? []).includes(msg.lastBackstab.targetTokenId);
+    // Always a real kill now (2026-09-17: no more wound split — a walled
+    // target is excluded from the pool outright, never reaches here).
     showAnnouncement(
-      wounded
-        ? `${subject} backstabbed ${isMe ? "an enemy" : "one of your"} stone — its blessing broke${chargeFor(msg.lastMovePlayer)}`
-        : `${subject} backstabbed ${isMe ? "an enemy" : "one of your"} stone — sent home${chargeFor(msg.lastMovePlayer)}`,
+      `${subject} backstabbed ${isMe ? "an enemy" : "one of your"} stone — sent home${chargeFor(msg.lastMovePlayer)}`,
       "capture",
     );
     return;
@@ -4544,7 +4566,10 @@ function announceFromState(msg: {
     const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Piercing Shot!", "piercingShot");
-    const hit = msg.lastPiercingShot.woundedTokenId !== null ? "the arrow broke a blessing" : "the arrow found its mark";
+    // No more wound tier (2026-09-17): a protected occupant now stops the
+    // arrow outright (piercingShotVictim's own isProtected check), so the
+    // only two outcomes left are a kill or armor blocking it entirely.
+    const hit = msg.lastPiercingShot.killedTokenId !== null ? "the arrow found its mark" : "a protected stone stopped the arrow cold";
     showAnnouncement(`${subject} loosed a Piercing Shot — ${hit}${chargeFor(msg.lastMovePlayer)}`, "capture");
     return;
   }
@@ -4608,9 +4633,11 @@ function announceFromState(msg: {
     const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Reckless!", "recklessSwing");
-    const hit = msg.lastRecklessSwing.woundedTokenId !== null ? "broke a blessing" : "cut one down";
+    // Always a real kill now (2026-09-17: no more wound tier — a
+    // protected target is excluded from the pool outright, never reaches
+    // this far).
     const cost = msg.lastRecklessSwing.swingerSentHome ? " — and the swing sent them home too" : "";
-    showAnnouncement(`${subject} ${hit}${cost}${chargeFor(msg.lastMovePlayer)}`, "capture");
+    showAnnouncement(`${subject} cut one down${cost}${chargeFor(msg.lastMovePlayer)}`, "capture");
     return;
   }
 
@@ -4703,7 +4730,9 @@ function announceFromState(msg: {
       if (msg.lastRainOfArrows) showProc(k, "Rain of Arrows!", "rainOfArrows");
       else if (msg.lastChargeSweep) showProc(k, "Charge!", "charge");
       else if ("bonusCaptures" in m && m.bonusCaptures.length > 0) showProc(k, "Snipe!", "snipe");
-      else if ("breaksWard" in m && m.breaksWard) showProc(k, "Ward Breaker!", "wardBreaker");
+      // Ward Breaker retired 2026-09-17 — breaksWard stays on the wire,
+      // always false now (walls are absolute; nothing below an ultimate
+      // pierces anything any more).
     }
 
     if (m.causesWin) {
@@ -4723,6 +4752,10 @@ function announceFromState(msg: {
         "shield",
         "A shield tile! Landing on one grants an extra turn, and the stone standing there cannot be captured.",
       );
+      // Sanctified Ground (Cleric passive, reworked 2026-09-17): a shield
+      // landing banks a turn of wall-upkeep grace for the whole army — the
+      // proc rides this same commit rather than a dedicated server field.
+      if (k === "cleric") showProc("cleric", "Sanctified Ground", "sanctifiedGround");
       showAnnouncement(`${subject} landed on shield (${tileDisplay(m.to)}) — extra turn${suffix}`, "shield");
       return;
     }
@@ -5166,9 +5199,9 @@ function summarizeEvent(ev: StateEvent): string {
   if (ev.lastBenediction) return `Benediction — ${ev.lastBenediction.tokenIds.length} blessed`;
   if (ev.lastPush) return "Push";
   if (ev.lastChargedShot) return "Charged Shot";
-  if (ev.lastBulwark) return ev.lastBulwark.reinforced ? "Reinforced Bulwark cast" : "Bulwark cast";
+  if (ev.lastBulwark) return "Bulwark cast";
   if (ev.lastBless) return "Bless — turn continues";
-  if (ev.lastHeal) return "Heal";
+  if (ev.lastVigil) return "Vigil";
   if (ev.lastReflip) return "Re-flip";
   if (ev.lastMove) {
     const m = ev.lastMove;
@@ -5176,7 +5209,7 @@ function summarizeEvent(ev: StateEvent): string {
     return `moves ${tileDisplay(m.from)} → ${tileDisplay(m.to)}${caps > 0 ? ` · captures ${caps}` : ""}`;
   }
   if (ev.wasSkipped) return `flip ${ev.flip ?? "—"} · turn skipped`;
-  if (ev.lastBulwarkBlock) return `flip ${ev.flip ?? "—"} · Bulwark blocked!`;
+  if (ev.lastBulwarkBlock) return `flip ${ev.flip ?? "—"} · Wall blocked!`;
   return ev.flip !== null ? `flip ${ev.flip}` : "state";
 }
 
@@ -5243,17 +5276,14 @@ function describeEffects(i: number): string[] {
     fx.push(`<b>Soul reclaimed</b>: ${ownedLabel(ev.lastCorpseDenied.tokenId)} re-entered — the Revive is denied`);
   if (ev.lastBless)
     fx.push(`<b>Bless</b>: ${ownedLabel(ev.lastBless.tokenId)} gains a second life — turn continues`);
-  if (ev.lastHeal) fx.push(`<b>Heal</b>: ${ownedLabel(ev.lastHeal.tokenId)} mended — the blessing burns again`);
+  if (ev.lastVigil) fx.push(`<b>Vigil</b>${cls(ev.lastVigil.player)}: next wall-upkeep bill waived`);
   if (ev.lastBenediction)
     fx.push(
       `<b>Benediction</b>: blessed ${ev.lastBenediction.tokenIds.map((id) => ownedLabel(id)).join(", ") || "no one"}`,
     );
-  if (ev.lastWound)
-    for (const id of ev.lastWound.tokenIds)
-      fx.push(`<b>Blessing breaks</b>: ${ownedLabel(id)} survives the killing blow — wounded, not captured`);
-  if (ev.lastMend)
+  if (ev.lastWallBleed && ev.lastWallBleed.droppedTokenIds.length > 0)
     fx.push(
-      `<b>Sanctified Ground</b>: shield landing mends ${ev.lastMend.tokenIds.map((id) => ownedLabel(id)).join(", ")}`,
+      `<b>Wall falls</b>${cls(ev.lastWallBleed.player)}: ${ev.lastWallBleed.droppedTokenIds.map((id) => ownedLabel(id)).join(", ")} unpaid, protection lost`,
     );
   if (ev.lastPush) fx.push(`<b>Push</b>: ${ownedLabel(ev.lastPush.targetTokenId)} knocked back`);
   if (ev.lastChargedShot) fx.push(`<b>Charged Shot</b>: ${ownedLabel(ev.lastChargedShot.targetTokenId)} struck`);
@@ -5314,30 +5344,32 @@ function describeEffects(i: number): string[] {
     }
   }
 
-  // Bulwark lifecycle — the raw countdown/save numbers behind the glow.
+  // Wall lifecycle (2026-09-17): no more countdown/saves — a wall stands
+  // until an ultimate strips it or its owner can't pay wallUpkeepFor it.
   if (ev.lastBulwarkBlock)
     for (const id of ev.lastBulwarkBlock.tokenIds)
-      fx.push(`<b>Bulwark BLOCKED</b> a threat to ${ownedLabel(id)} — it still guards for the rest of this turn`);
-  const bwNow = ev.power?.bulwarkTurns ?? {};
-  const bwPrev = prev?.power?.bulwarkTurns ?? {};
-  const svNow = ev.power?.bulwarkSavesLeft ?? {};
-  const svPrev = prev?.power?.bulwarkSavesLeft ?? {};
-  if (ev.power?.bulwarkTurns || prev?.power?.bulwarkTurns) {
-    for (const idStr of Object.keys(bwNow)) {
+      fx.push(`<b>Wall BLOCKED</b> a threat to ${ownedLabel(id)} — it still guards for the rest of this turn`);
+  const wallsNow = ev.power?.walls ?? {};
+  const wallsPrev = prev?.power?.walls ?? {};
+  if (ev.power?.walls || prev?.power?.walls) {
+    for (const idStr of Object.keys(wallsNow)) {
       const id = Number(idStr);
-      if (bwPrev[id] === undefined)
-        fx.push(`<b>Bulwark raised</b> on ${ownedLabel(id)} — ${bwNow[id]} turns${(svNow[id] ?? 1) > 1 ? `, ${svNow[id]} saves` : ""}`);
-      else if (bwNow[id] < bwPrev[id]) fx.push(`Bulwark on ${ownedLabel(id)} ticks: <b>${bwNow[id]}</b> turn${bwNow[id] === 1 ? "" : "s"} left`);
-      if (svPrev[id] !== undefined && svNow[id] !== undefined && svNow[id] < svPrev[id])
-        fx.push(`Bulwark on ${ownedLabel(id)} spent a save — <b>${svNow[id]}</b> left`);
+      if (wallsPrev[id] === undefined) {
+        const owner = id < 4 ? "p1" : "p2";
+        const upkeep = ev.power?.wallUpkeep?.[owner];
+        fx.push(
+          `<b>${wallsNow[id] === "blessing" ? "Blessing" : "Bulwark"} raised</b> on ${ownedLabel(id)}${upkeep !== undefined ? ` — ${upkeep} mana/turn to hold` : ""}`,
+        );
+      }
     }
-    for (const idStr of Object.keys(bwPrev)) {
+    for (const idStr of Object.keys(wallsPrev)) {
       const id = Number(idStr);
-      if (bwNow[id] !== undefined) continue;
+      if (wallsNow[id] !== undefined) continue;
       if (ev.lastBulwarkBlock?.tokenIds.includes(id))
-        fx.push(`Bulwark on ${ownedLabel(id)} <b>consumed</b> by that block — glow falls when the turn ends`);
-      else if (bwPrev[id] === 1) fx.push(`Bulwark on ${ownedLabel(id)} <b>expired</b> (countdown reached 0)`);
-      else fx.push(`Bulwark on ${ownedLabel(id)} ended (stone captured or spent)`);
+        fx.push(`Wall on ${ownedLabel(id)} <b>consumed</b> by that block — glow falls when the turn ends`);
+      else if (ev.lastWallBleed?.droppedTokenIds.includes(id))
+        fx.push(`Wall on ${ownedLabel(id)} <b>fell</b> — its owner couldn't pay the upkeep`);
+      else fx.push(`Wall on ${ownedLabel(id)} ended (stone captured or an ultimate pierced it)`);
     }
   }
 
@@ -6118,9 +6150,9 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Archer</b> — Snipe, Push, Charged Shot.</li>
        <li><b>Mage</b> — Ward, Re-flip, Blink.</li>
-       <li><b>Warrior</b> — Ward Breaker, Charge, Bulwark.</li>
+       <li><b>Warrior</b> — Hold the Line, Charge, Bulwark.</li>
        <li><b>Necromancer</b> — Soul Harvest, Corpse Explosion, Revive.</li>
-       <li><b>Cleric</b> — Sanctified Ground, Bless, Heal.</li>
+       <li><b>Cleric</b> — Sanctified Ground, Bless, Vigil.</li>
        <li><b>Rogue</b> — Larceny, Backstab, Vanish.</li>
        <li><b>Warlock</b> — Dark Bargain, Curse, Sacrifice.</li>
        <li><b>Hunter</b> — Wolf, Snare, Piercing Shot.</li>
@@ -6140,27 +6172,24 @@ const GUIDE_SPREADS: [string, string][] = [
        water back one pace. Land it on your own stone, or off the front of
        the board, and it is sent all the way home to their hand — and your
        charge comes right back, since that's really a capture.</li>
-       <li>A <span class="gold">Warded</span> Mage stone shrugs off a plain
-       Push entirely — the charge is spent, but the stone doesn't move. A
-       <span class="gold">Vanished</span> Rogue stone can't be Pushed at
-       all — only a Charged Shot still shoves it, never home.</li>
+       <li>A <span class="gold">Warded</span> Mage stone can't be Pushed at
+       all — nor can a <span class="gold">walled</span> stone (a Warrior's
+       Bulwark or a Cleric's Blessing) or a <span class="gold">Vanished</span>
+       Rogue stone. Push simply has no legal target among them.</li>
      </ul>`,
     `<div class="runner">The Archer &middot; continued</div>
      <ul>
        <li><b>Charged Shot</b> (active, ${CHARGED_SHOT_COST} charges): a heavier shot
        at an enemy stone in shared water, knocking it back
-       ${CHARGED_SHOT_DISTANCE} paces — or ${CHARGED_SHOT_WARD_DISTANCE}
-       against a <span class="gold">Warded</span> stone, the one shot that
-       can still reach it at all. Send the target all the way home and one
-       charge comes right back. A Warrior can never be Warded, so it always
-       takes the full hit.</li>
+       ${CHARGED_SHOT_DISTANCE} paces. Send the target all the way home and
+       one charge comes right back. Same protections as Push stop it dead —
+       a Ward, a wall, or a Vanish.</li>
        <li><b>Rain of Arrows</b> (active, spends your ultimate): chain
        three shield landings in a row, your turn never passing between
        them, and the rain is yours to call whenever you like — tap any
        enemy stone in shared water and it is struck down through shields,
-       Wards, Bulwarks and Blessings alike. It grants a mana like any
-       capture and ends your turn. Rare by design: the board holds only
-       three shield tiles.</li>
+       Wards, and walls alike. It grants a mana like any capture and ends
+       your turn. Rare by design: the board holds only three shield tiles.</li>
      </ul>`,
   ],
   [
@@ -6168,12 +6197,13 @@ const GUIDE_SPREADS: [string, string][] = [
      <ul>
        <li><b>Ward</b> (passive, free): the moment your bank holds a full
        ${CHARGE_CAP} charges, your furthest-along stone still on the water
-       cannot be captured. A plain Push can't budge it at all, though a
-       Charged Shot can still knock it back.</li>
-       <li>What breaks through: a Warrior's Ward Breaker, a Necromancer's
-       thrall, a blessed Cleric stone, a Warlock's Sacrifice, and any
-       ultimate. A Curse binds a Warded stone like any other. Ward follows
-       your furthest stone — send it home and it passes to the new leader.</li>
+       cannot be captured, targeted, or knocked back by anything short of
+       an ultimate.</li>
+       <li>Nothing below an ultimate reaches a Warded stone — not a
+       Warrior's step, not a thrall's blade, not a blessed Cleric's strike,
+       not a Warlock's Sacrifice. A Curse still binds a Warded stone like
+       any other. Ward follows your furthest stone — send it home and it
+       passes to the new leader.</li>
        <li><b>Blink</b> (active, ${BLINK_COST} mana): teleport your rearmost
        stone on the board to any empty tile in shared water ahead of it —
        never a shield, trap or wolf's watch. Nothing is captured. Ends
@@ -6189,28 +6219,25 @@ const GUIDE_SPREADS: [string, string][] = [
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight
        onto any enemy in shared water — capturing it even through a shield,
-       a Ward, or a Bulwark.</li>
+       a Ward, or a wall.</li>
      </ul>`,
   ],
   [
     `<h2>The Warrior</h2>
      <ul>
-       <li><b>Ward Breaker</b> (passive, free): walk onto a Warded enemy
-       stone and the Ward breaks — captured all the same.</li>
+       <li><b>Hold the Line</b> (passive, free): a wall you raise yourself
+       costs you less mana to keep standing than it would cost anyone
+       else — you're built to hold the front.</li>
        <li><b>Charge</b> (active, 1 mana): make your move a sweep — one
-       enemy stone in shared water between where you started and where you
-       land is captured too, Warded or not.</li>
-       <li>The Warrior is the only class whose plain step walks through a
-       Ward — everyone else needs a thrall, a blessing, a Sacrifice, a
-       Push, or an ultimate.</li>
+       unprotected enemy stone in shared water between where you started
+       and where you land is captured too.</li>
      </ul>`,
     `<div class="runner">The Warrior &middot; continued</div>
      <ul>
-       <li><b>Bulwark</b> (active, 1 mana): shield one of YOUR OWN stones
-       — it can't be captured or swept by Charge, and a Push can only
-       shove it, never send it home. An ultimate or a Barbarian's Reckless
-       Swing still punches through. Fades after a few of your turns, or
-       the instant it saves the stone.</li>
+       <li><b>Bulwark</b> (active, 1 mana): wall one of YOUR OWN stones —
+       nothing short of an ultimate can capture, sweep, push, or otherwise
+       touch it. Holding it costs mana every one of your own turns; let
+       the bill go unpaid and it falls on its own.</li>
        <li><b>Warpath</b> (active, spends your ultimate): land on a shield
        tile three times running, then teleport your least-advanced stone
        onto any enemy in shared water, capturing it and every enemy in
@@ -6229,20 +6256,21 @@ const GUIDE_SPREADS: [string, string][] = [
        spend it.</li>
        <li><b>Corpse Explosion</b> (active, ${CORPSE_EXPLOSION_COST} mana):
        detonate your open grave: the unprotected enemy stone standing on it
-       is killed outright — sent home; a blessed one is only wounded. The
-       grave stays open after Revive takes the body, so raise first and
-       keep the mine armed; your next kill moves it. A blown grave raises
-       nothing, and its kill pays no mana.</li>
+       is killed outright — sent home. A shield tile, a Ward, a wall, or a
+       Vanish all turn the blast. The grave stays open after Revive takes
+       the body, so raise first and keep the mine armed; your next kill
+       moves it. A blown grave raises nothing, and its kill pays no
+       mana.</li>
      </ul>`,
     `<div class="runner">The Necromancer &middot; continued</div>
      <ul>
        <li><b>Revive</b> (active, ${REVIVE_COST} mana, keeps your turn): raise
        the marked corpse as your THRALL, on the very tile it died. For
        ${THRALL_TURNS} of your turns it fights for you — it moves on your
-       flips, kills like any stone (its kills pay full mana and mark new
-       corpses), and its blade ignores the Mage's Ward — but it can never
-       leave shared water, and then it crumbles home. Your flip stands:
-       the risen dead may be the one that moves.</li>
+       flips and kills like any stone (its kills pay full mana and mark new
+       corpses) — but it can never leave shared water, and then it
+       crumbles home. Your flip stands: the risen dead may be the one that
+       moves.</li>
        <li><b>Exhume</b> (active, spends your ultimate): land on a shield
        tile three times running and death honors no finish line — drag one
        of the opponent's ESCAPED stones back aboard at tile
@@ -6255,33 +6283,33 @@ const GUIDE_SPREADS: [string, string][] = [
     `<h2>The Cleric</h2>
      <ul>
        <li><b>Bless</b> (active, ${BLESS_COST} mana, keeps your turn): a
-       quick prayer grants one of your stones a SECOND LIFE. The first
-       blow that would kill it only <span class="gold">wounds</span> it —
-       the stone survives, staggering back only if the attacker needs its
-       tile, and the attacker earns just one mana. Bless, then still
-       move.</li>
-       <li>The light shelters <span class="gold">${BLESSING_CAP} at a
-       time</span> — one stone always stands outside it. Ultimates and a
-       Warlock's Sacrifice kill straight through it; a blessed stone's own
-       strikes carry the light through the Mage's Ward.</li>
-       <li><b>Heal</b> (active, ${HEAL_COST} mana): lay hands on a wounded
-       stone and its blessing burns again. Mending takes your whole
-       turn.</li>
+       quick prayer WALLS one of your stones — the same absolute
+       protection as a Warrior's Bulwark: nothing short of an ultimate can
+       touch it. Bless, then still move.</li>
+       <li>A wall costs mana every one of its owner's turns to keep
+       standing — let the bill go unpaid and it falls on its own. The
+       light shelters <span class="gold">${BLESSING_CAP} at a time</span>
+       — one stone always stands outside it.</li>
+       <li><b>Vigil</b> (active, ${VIGIL_COST} mana): keep watch over your
+       whole army at once — your NEXT wall-upkeep bill is waived, front
+       stone first. Worth nothing with a single wall up; the tool is for
+       juggling two or more. Ends your turn.</li>
      </ul>`,
     `<div class="runner">The Cleric &middot; continued</div>
      <ul>
        <li><b>Sanctified Ground</b> (passive, free): the shield tiles are
-       holy ground to you. Land on one and ALL your wounded stones are
-       mended back to blessed — on top of the extra turn and mana every
-       shield landing already grants.</li>
+       holy ground to you. Land on one and your NEXT wall-upkeep bill is
+       waived — on top of the extra turn and mana every shield landing
+       already grants.</li>
        <li><b>Benediction</b> (active, spends your ultimate): land on a
-       shield tile three times running, then bless your ENTIRE on-board
-       army at once — every unblessed and wounded stone rises under the
-       light together, beyond the usual shelter of ${BLESSING_CAP}.</li>
+       shield tile three times running, then wall your ENTIRE on-board
+       army at once — every unwalled stone rises under the light together,
+       beyond the usual shelter of ${BLESSING_CAP}, and the whole army's
+       next upkeep is waived too.</li>
      </ul>
-     <p>The Cleric wins by refusing to lose stones: each blessing costs the
-     enemy a full extra blow, and the army that keeps its crew keeps the
-     race.</p>`,
+     <p>The Cleric wins by refusing to lose stones: each wall costs the
+     enemy a wasted turn just probing it, and the army that keeps its crew
+     keeps the race — so long as the mana holds out to pay for it.</p>`,
   ],
   [
     `<h2>The Rogue</h2>
@@ -6289,20 +6317,19 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Larceny</b> (passive, free): every stone you send home for
        good pays twice — your own mana climbs as usual, and
        ${ROGUE_STEAL_ON_CAPTURE} mana drains straight out of the enemy's
-       pocket too. A wound doesn't count; only a real kill pays.</li>
+       pocket too.</li>
        <li><b>Vanish</b> (active, ${VANISH_COST} mana): slip one of your
-       own stones into the shadows — it can't be captured, swept, Pushed,
-       Cursed, shot, or caught in a Whirlwind. Fades after a few turns, or
-       the moment it saves the stone.</li>
+       own stones into the shadows — nothing short of an ultimate can
+       capture, sweep, push, shoot, curse, or catch it in a Whirlwind. A
+       fixed dodge, not a wall: it costs no mana to hold, and it fades on
+       its own after a couple of turns.</li>
      </ul>`,
     `<div class="runner">The Rogue &middot; continued</div>
      <ul>
-       <li>What still reaches a Vanished stone: a Charged Shot shoves it
-       (never home), a Reckless Swing cuts it down, any ultimate finds it.</li>
        <li><b>Backstab</b> (active, ${BACKSTAB_COST} mana, the full bank): a
-       guaranteed kill on any enemy in shared water — no roll, straight
-       through a Ward. A shield tile, Bulwark or Vanish turns it aside; a
-       blessed stone is only wounded. Larceny still drains. Ends your turn.</li>
+       guaranteed kill on any enemy in shared water — no roll, no aiming.
+       Anything protected turns it aside though: a shield tile, a Ward, a
+       wall, or a Vanish. Larceny still drains. Ends your turn.</li>
        <li><b>Grand Heist</b> (active, spends your ultimate): three shield
        landings running, then teleport your furthest stone onto any enemy
        in shared water and take it — through everything — and empty their
@@ -6331,10 +6358,10 @@ const GUIDE_SPREADS: [string, string][] = [
     `<div class="runner">The Warlock &middot; continued</div>
      <ul>
        <li><b>Sacrifice</b> (active, ${SACRIFICE_COST} mana): give your furthest-along stone to the dark and one enemy in
-       shared water dies outright — straight through a Ward or a
-       Blessing, no wound, no second life. A Bulwark, a Vanish, or a
-       shield tile still turns it aside. The kill pays no mana, and the
-       Pact pays nothing for the stone you gave. Ends your turn.</li>
+       shared water dies outright. Anything protected turns it aside
+       though: a shield tile, a Ward, a wall, or a Vanish. The kill pays
+       no mana, and the Pact pays nothing for the stone you gave. Ends
+       your turn.</li>
        <li><b>Fel Storm</b> (active, spends your ultimate): land on a
        shield tile three times running, then green fire sweeps the whole
        shared row — every enemy stone in open water is dragged back to
@@ -6349,8 +6376,8 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Wolf Companion</b> (passive, free): your wolf ranges ahead
        of your furthest-along stone, guarding the shared-water tile
        directly in front of it. Any enemy that lands there is captured,
-       for free. A blessed stone is only wounded; a shielded, Warded, or
-       Bulwarked one walks past.</li>
+       for free. A shielded, Warded, walled, or Vanished stone walks past
+       it safely.</li>
        <li><b>Snare</b> (active, ${SNARE_COST} mana, keeps your turn): arm
        a trap on any empty shared-water tile that isn't a shield tile —
        both sides see it, so making them route around it is half the
@@ -6364,8 +6391,8 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Piercing Shot</b> (active, ${PIERCING_SHOT_COST} mana): loose an arrow down the shared row from your
        furthest-along stone. The first enemy in its path dies, at any
        range — but the first body stops the arrow: a shielded, Warded,
-       Bulwarked, or Vanished stone blocks the shot for everything behind
-       it, and so does one of your own. A blessed stone is wounded.</li>
+       walled, or Vanished stone blocks the shot for everything behind
+       it, and so does one of your own.</li>
        <li><b>Wild Hunt</b> (active, spends your ultimate): land on a
        shield tile three times running and every trap snaps shut at once.
        Your wolf takes the nearest enemy in shared water through every
@@ -6384,10 +6411,9 @@ const GUIDE_SPREADS: [string, string][] = [
        usually the one just killed coming back angry. Only that stone; the
        rest keep their pace.</li>
        <li><b>Reckless Swing</b> (active, ${RECKLESS_SWING_COST} mana):
-       bring the axe down on an enemy directly in front of one of your
-       stones — straight through a Bulwark or a Vanish, which nothing else
-       short of an ultimate can touch. A Ward or a shield tile turns it
-       aside; a Blessing takes it as a wound. Your stone is thrown
+       bring the axe down on an unprotected enemy directly in front of one
+       of your stones — a shield tile, a Ward, a wall, or a Vanish all stop
+       the swing before it lands. Your stone is thrown
        ${RECKLESS_SELF_KNOCKBACK} tiles back — home, if there's nowhere to
        land. Ends your turn.</li>
      </ul>`,
@@ -6400,7 +6426,7 @@ const GUIDE_SPREADS: [string, string][] = [
        <li><b>Bloodbath</b> (active, spends your ultimate): land on a
        shield tile three times running, then your furthest-along stone
        charges the length of shared water and takes EVERY enemy in its
-       path — no cap, no shield, no Ward, no Bulwark, nothing. It finishes
+       path — no cap, no shield, no Ward, no wall, nothing. It finishes
        standing on tile ${BLOODBATH_END_POSITION + 1}, the far end of the
        row.</li>
      </ul>`,
@@ -6593,6 +6619,21 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // player-facing tavern voice, telling people what to LOOK FOR, not a diff.
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-09-17-the-walls-rise",
+    date: "September 17, 2026",
+    title: "The Walls Rise",
+    items: [
+      "<b>Bulwark and Blessing are one rule now.</b> A walled stone — the Warrior's Bulwark, the Cleric's Blessing — cannot be captured, swept, pushed, or otherwise touched by anything short of an ultimate. No countdown, no saves, no wounds: a wall simply holds.",
+      "<b>But holding one costs you.</b> A wall bleeds its owner mana every one of their own turns. Let the bill go unpaid and it falls on its own — a wall that outlives its threat is a wall you can't afford to keep.",
+      "<b>Ward Breaker is retired.</b> The Warrior's new passive is <b>Hold the Line</b>: a wall you raise yourself costs you less to hold than it costs anyone else. Nothing below an ultimate pierces a Ward, a wall, or a Vanish any more — not a Warrior's step, not a thrall's blade, not a Cleric's own strike, not a Warlock's Sacrifice.",
+      "<b>Vanish stands on its own.</b> The Rogue's dodge is no longer a cut-rate wall — it's a fixed two-turn vanishing act, costing no mana to hold, immune to everything short of an ultimate.",
+      "<b>Heal is retired. Vigil takes its place.</b> No target — it waives your NEXT wall-upkeep bill for your whole army at once, front stone first. Worthless with a single wall up; built for when you're juggling two or more.",
+      "<b>Sanctified Ground keeps the lights on, not the bandages.</b> A shield-tile landing now waives your next wall bill instead of mending old wounds.",
+      "<b>No more wounds, anywhere.</b> Every protection below an ultimate is absolute now — a Warlock's Sacrifice, a Rogue's Backstab, and a Barbarian's Reckless Swing all lost the pierce that used to reach a blessed or walled stone. Everyone's tools read the same way.",
+      "<b>The Barbarian holds no walls, ever.</b> Speed is the only armour he gets — and it just got a little more honest.",
+    ],
+  },
   {
     id: "2026-09-16-the-open-grave",
     date: "September 16, 2026",
@@ -6947,28 +6988,20 @@ function tick() {
       rig.ring.rotation.z = 0;
       rig.ringMat.opacity = 0.62 + 0.16 * Math.sin(now * 0.0016 + i);
       rig.ring.scale.setScalar(mark.kind === "soulClaim" ? 0.8 : 1.02);
-    } else if (mark.kind === "blessed" || mark.kind === "wounded") {
-      // The blessing is a steady halo: a slow, calm turn while whole;
-      // ashen, near-still and smaller once broken — the pair reads as one
-      // story dimming.
-      const whole = mark.kind === "blessed";
-      rig.ring.rotation.z = now * (whole ? 0.00025 : 0.0001) + i * 1.3;
-      rig.ringMat.opacity = whole
-        ? 0.5 + 0.18 * Math.sin(now * 0.0018 + i)
-        : 0.26 + 0.08 * Math.sin(now * 0.0012 + i);
-      rig.ring.scale.setScalar(whole ? 1 : 0.92);
     } else {
-      // Ward spins with intent; Bulwark/Vanish turn slow and heavy — same
-      // underlying protection, so the same weight.
-      const shielded = mark.kind === "bulwark" || mark.kind === "vanish";
+      // Ward spins with intent; a wall (Bulwark/Blessing) or Vanish turns
+      // slow and heavy — Blessing is a wall now too (2026-09-17: same
+      // absolute protection, no more ashen "wounded" half-light to dim
+      // into), so all three share the one weighted turn.
+      const shielded = mark.kind === "bulwark" || mark.kind === "vanish" || mark.kind === "blessed";
       rig.ring.rotation.z = now * (shielded ? 0.00035 : 0.0009) + i * 1.3;
       rig.ringMat.opacity = 0.5 + 0.22 * Math.sin(now * 0.0026 + i * 2.1);
       rig.ring.scale.setScalar(1);
     }
-    const domed = mark.kind === "bulwark" || mark.kind === "vanish";
+    const domed = mark.kind === "bulwark" || mark.kind === "vanish" || mark.kind === "blessed";
     rig.dome.visible = domed;
     if (domed) {
-      rig.domeMat.color.setHex(STATUS_TINTS[mark.kind as "bulwark" | "vanish"]);
+      rig.domeMat.color.setHex(STATUS_TINTS[mark.kind as "bulwark" | "vanish" | "blessed"]);
       rig.dome.position.set(
         marker.mesh.position.x,
         marker.mesh.position.y - 0.08, // token base — hemisphere wraps the coin
@@ -7144,7 +7177,8 @@ if (dockDemoParam !== null) {
       blinkStrikeTargets: d.ult ? [4, 5] : [],
       warpathTargets: d.ult ? [4] : [],
       bulwarkTargets: [0, 1, 2],
-      bulwarkedTokenIds: [],
+      walls: {},
+      vanished: {},
       reflipsUsedThisTurn: d.reflips,
       // Necromancer demo pools mirror the server's gating: Revive needs a
       // full soul bank + a marked corpse, exhume the ultimate.
@@ -7209,11 +7243,10 @@ if (dockDemoParam !== null) {
 // ---------------------------------------------------------------------------
 // Dev-only protection-VFX harness (localhost, ?vfx — same gate family as
 // ?sips / ?dockdemo): parks the menu and poses one deterministic mid-game
-// tableau exercising every protection rig — Mage warded on a sword tile,
-// stones sheltering on shield tiles, a Bulwarked Warrior stone, a Ward
-// Breaker-safe stone — through the REAL refreshMarkers/updateTokenTints
-// path, so what it shows is exactly what a live game shows. Display-only;
-// no session exists.
+// tableau exercising the protection rigs — Mage warded on a sword tile,
+// stones sheltering on shield tiles, a walled Warrior stone — through the
+// REAL refreshMarkers/updateTokenTints path, so what it shows is exactly
+// what a live game shows. Display-only; no session exists.
 // ---------------------------------------------------------------------------
 if (location.hostname === "localhost" && new URLSearchParams(location.search).has("vfx")) {
   menuEl.classList.remove("show");
@@ -7227,7 +7260,7 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
       { id: 2, owner: "p1", position: 0 },
       { id: 3, owner: "p1", position: -1 },
       { id: 4, owner: "p2", position: 7 }, // middle shield tile → sheltering
-      { id: 5, owner: "p2", position: 9 }, // Bulwarked
+      { id: 5, owner: "p2", position: 9 }, // walled (Bulwark)
       { id: 6, owner: "p2", position: 4 }, // plain contested-row stone
       { id: 7, owner: "p2", position: -1 },
     ],
@@ -7245,7 +7278,8 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
     blinkStrikeTargets: [],
     warpathTargets: [],
     bulwarkTargets: [],
-    bulwarkedTokenIds: [5],
+    walls: { 5: "bulwark" },
+    vanished: {},
     reflipsUsedThisTurn: 0,
   };
   refreshMarkers(demoState);

@@ -36,7 +36,7 @@ import {
   applyBenediction,
   applyBulwark,
   applyGrandHeist,
-  applyHeal,
+  applyVigil,
   applyCharge,
   applyChargedShot,
   applyCorpseExplosion,
@@ -72,6 +72,8 @@ import {
   tickBulwarkForNewTurn,
   tickBulwarkForReflip,
   tickThrallForNewTurn,
+  tickWallUpkeepForNewTurn,
+  tickVanishForNewTurn,
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
@@ -157,14 +159,20 @@ function takeTurnMK(
   power = tickHamstringForNewTurn(state, power).power;
   power = tickInspireForNewTurn(state, power).power;
   power = tickDarkBargainForNewTurn(power);
+  // Wall upkeep + Vanish countdown, same slot as room-engine's
+  // commitTurnFlip and batch-random-master-killer-games.ts's takeTurn:
+  // after the other ticks, before move generation.
+  power = tickWallUpkeepForNewTurn(state, power).power;
+  power = tickVanishForNewTurn(state, power).power;
   let moves = getLegalPowerMoves(state, power, flip);
   power = tickBulwarkForNewTurn(state, power, flip).power;
   let action = pickBotPowerAction(state, power, moves, flip, Math.random, tier);
 
   // Cleric Bless, Rogue Pickpocket and Warlock Curse joined the
   // turn-keeping club (applyBless/applyPickpocket/applyCurse's shared
-  // contract; Heal did NOT — it ends the turn, see HEAL_COST's doc) —
-  // same five-kind loop as batch-random-master-killer-games.ts's takeTurn.
+  // contract; Vigil did NOT — it ends the turn, same as Heal used to, see
+  // VIGIL_COST's doc) — same five-kind loop as
+  // batch-random-master-killer-games.ts's takeTurn.
   for (
     let i = 0;
     (action?.kind === "reflip" ||
@@ -239,7 +247,7 @@ function takeTurnMK(
       return { state: r.state, power: r.power };
     }
     case "bulwark":
-      return applyBulwark(state, power, action.tokenId, mover, action.reinforced ?? false);
+      return applyBulwark(state, power, action.tokenId, mover);
     case "corpseExplosion": {
       const r = applyCorpseExplosion(state, power, mover);
       return { state: r.state, power: r.power };
@@ -248,8 +256,8 @@ function takeTurnMK(
       const r = applyExhume(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };
     }
-    case "heal":
-      return applyHeal(state, power, action.targetTokenId, mover);
+    case "vigil":
+      return applyVigil(state, power, mover);
     case "benediction": {
       const r = applyBenediction(state, power, mover);
       return { state: r.state, power: r.power };

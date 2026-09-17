@@ -29,13 +29,12 @@ export type ProcIconId =
   | "rainOfArrows"
   | "reflip"
   | "wardBlock"
-  | "wardBreaker"
   | "blinkStrike"
   | "warpath"
   | "charge"
   | "bulwark"
-  | "bulwarkReinforced"
   | "bulwarkBlock"
+  | "wallBleed"
   | "revive"
   | "corpseExplosion"
   | "thrallExpired"
@@ -43,10 +42,9 @@ export type ProcIconId =
   | "exhume"
   | "soulHarvest"
   | "bless"
-  | "heal"
+  | "vigil"
   | "benediction"
   | "sanctifiedGround"
-  | "wound"
   | "larceny"
   | "pickpocket"
   | "vanish"
@@ -236,16 +234,6 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M11 17.5 L6 15.5" ${GOLD_DETAIL}/>`,
   ),
 
-  // Warrior passive: the ward circle broken — a cleave through the gap.
-  wardBreaker: wrap(
-    `<path d="M26.4 14.4 A13 13 0 1 0 35.6 23.6" ${MAIN} ${BODY}/>` +
-      `<path d="M40 7 L18 33.5" ${MAIN}/>` +
-      diamond(40.5, 6.5) +
-      // Ward fragments flung from the gap.
-      `<path d="M33 9 L36 5" ${GOLD_DETAIL}/>` +
-      `<path d="M38.5 13.5 L43 11.5" ${GOLD_DETAIL}/>`,
-  ),
-
   // Mage ultimate: the teleport-strike flash, echo rings trailing the jump.
   blinkStrike: wrap(
     `<path d="M30 7 L33 15 L41 18 L33 21 L30 29 L27 21 L19 18 L27 15 Z" ${MAIN} ${BODY}/>` +
@@ -287,18 +275,6 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       diamond(24, 42.5),
   ),
 
-  // Warrior full-bank: the same shield doubled — second rim, riveted band.
-  bulwarkReinforced: wrap(
-    SHIELD +
-      `<path d="M16.5 16.5 Q24 18.9 31.5 16.5 C31.5 24 30 30.5 24 36.5 C18 30.5 16.5 24 16.5 16.5 Z" ${GOLD_DETAIL}/>` +
-      `<path d="M14.5 19.5 L33.5 19.5" ${DETAIL}/>` +
-      `<circle cx="19" cy="19.5" r="1.3" fill="${GOLD}"/>` +
-      `<circle cx="24" cy="19.5" r="1.3" fill="${GOLD}"/>` +
-      `<circle cx="29" cy="19.5" r="1.3" fill="${GOLD}"/>` +
-      diamond(24, 27, 2.8, GOLD) +
-      diamond(24, 42.5),
-  ),
-
   // Blocked!: the shield takes the hit and holds — burst at the rim, a
   // crack that stops. Tinted by the DEFENDER's class (the shield's owner).
   bulwarkBlock: wrap(
@@ -312,6 +288,23 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M7 12.5 L3.5 12" ${GOLD_DETAIL}/>` +
       // The crack that didn't get through.
       `<path d="M15 17.5 L19 21 L17.5 24 L21.5 27.5" ${DETAIL}/>`,
+  ),
+
+  // A wall falls for non-payment (2026-09-17, the wall-bleed rework): the
+  // same family shield, but the crack this time runs THROUGH — no starburst
+  // holding it back — and its pieces are already coming apart. Distinct
+  // from bulwarkBlock's "held" silhouette on purpose: this is the wall
+  // failing, not defending.
+  wallBleed: wrap(
+    `<path d="${SHIELD_PATH}" ${MAIN} ${BODY} opacity="0.55"/>` +
+      // The break running clean through the face.
+      `<path d="M24 13.5 L20 24 L26 30 L21 41" ${MAIN}/>` +
+      // A shard already adrift from the rim.
+      `<path d="M31 15 L36 12 L34.5 18 Z" ${GOLD_DETAIL}/>` +
+      diamond(36.5, 10.5, 1.8, GOLD) +
+      // Spent mana draining off the lower rim.
+      `<path d="M17 37 L14.5 43" ${GOLD_DETAIL}/>` +
+      `<path d="M21.5 42 L19.5 47" ${GOLD_DETAIL}/>`,
   ),
 
   // Necromancer full-bank Revive: the grave cracked open, the claimed soul
@@ -399,8 +392,12 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<circle cx="24" cy="33" r="2" fill="${GOLD}"/>`,
   ),
 
-  // Cleric active: the chalice poured over the scar — the blessing rekindled.
-  heal: wrap(
+  // Cleric active: the chalice poured out — a turn bought so the whole
+  // wall economy survives its next bill (2026-09-17: Vigil replaces Heal
+  // under the wall rework; no target, no scar to mend — just tempo spent
+  // to buy the army a free turn of upkeep). Same chalice art: still light
+  // poured out at a cost, just for the ledger now, not a wound.
+  vigil: wrap(
     `<path d="M14 10 L34 10 C34 19 30 24 24 24 C18 24 14 19 14 10 Z" ${MAIN} ${BODY}/>` +
       `<path d="M24 24 L24 33" ${MAIN}/>` +
       `<path d="M16.5 38 C16.5 35 20 33 24 33 C28 33 31.5 35 31.5 38 Z" ${MAIN} ${BODY}/>` +
@@ -436,19 +433,6 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<circle cx="16" cy="20" r="1.2" fill="${GOLD}"/>` +
       `<circle cx="32" cy="20" r="1.2" fill="${GOLD}"/>` +
       `<circle cx="24" cy="31" r="1.8" fill="${GOLD}"/>`,
-  ),
-
-  // The blessing BREAKS: the family halo split over the surviving stone —
-  // a shard falling, the stone still standing (that's the whole point).
-  wound: wrap(
-    `<path d="M15.2 10.5 A9 3.06 0 0 1 30 9.5" ${MAIN}/>` +
-      `<path d="M32.8 13.5 A9 3.06 0 0 1 18 14.8" ${MAIN}/>` +
-      // The falling shard.
-      diamond(35, 20, 2.2, GOLD) +
-      `<path d="M33.5 24 L31.5 27.5" ${GOLD_DETAIL}/>` +
-      // The stone beneath: struck, scarred, alive.
-      `<circle cx="24" cy="33" r="9" ${MAIN} ${BODY}/>` +
-      `<path d="M20 27.5 L23 31 L21.5 34 L25 37.5" ${DETAIL}/>`,
   ),
 
   // Necromancer passive: the reaper's scythe, souls gathered under the

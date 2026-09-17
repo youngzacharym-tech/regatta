@@ -46,6 +46,45 @@ function otherPlayerId(p: PlayerId): PlayerId {
  *  (Revive fell from 7/game to 0.3 before that fix). Ward is the one
  *  deliberate exception: it still asks for a FULL bank, see isWarded. */
 export const CHARGE_CAP = 4;
+
+/** THE WALL SYSTEM'S PRICE (2026-09-17): mana a wall-holder pays every one
+ *  of their OWN turns, per wall, to keep it up (tickWallUpkeepForNewTurn).
+ *  This is the entire balancing mechanism for an otherwise-absolute
+ *  defense — the wall is safe, but you pay to keep it, so raising one is a
+ *  real decision (armor up in a pinch; too expensive to leave on forever)
+ *  instead of a free win button. GUARDRAIL, hard-won: a wall must NEVER be
+ *  free to hold — free defense is the recorded Blessing 66-81% blowout
+ *  (see BLESSING_CAP's doc), where breaking a blessing paid the attacker
+ *  nothing and every blessed runner became a guaranteed escape. WALL_BLEED
+ *  must stay > 0; WALL_BLEED_MIN is the floor even Hold the Line's
+ *  discount can't cross. Sim-tuned in Sweep 1 (see this constant's
+ *  eventual trace) — the economy is wet (escapes pay 1, captures pay,
+ *  zero-flips pay, shield landings pay), so the real question is drain
+ *  rate MINUS income rate, not this number in isolation. */
+export const WALL_BLEED = 2;
+/** The floor no discount (Hold the Line) can push WALL_BLEED below — see
+ *  WALL_BLEED's guardrail. */
+export const WALL_BLEED_MIN = 1;
+/** Warrior's Hold the Line (passive, replaces Ward Breaker 2026-09-17):
+ *  the discount on WALL_BLEED for a Bulwark the Warrior himself holds — a
+ *  discount, never free (wallUpkeepFor floors at WALL_BLEED_MIN
+ *  regardless). Plumbing value until Sweep 2 sim-tunes it; 0 here is not a
+ *  design statement, just an unset dial. */
+export const HOLD_THE_LINE_DISCOUNT = 0;
+
+/** What it costs `owner` to hold one wall through their next turn-start —
+ *  WALL_BLEED, discounted for a Warrior's own Bulwark by
+ *  HOLD_THE_LINE_DISCOUNT, floored at WALL_BLEED_MIN so a discount can
+ *  shrink the price but never zero it (the guardrail every wall shares).
+ *  Reads the WALL's kind, not just the owner's class: a Cleric's Blessing
+ *  never gets the Warrior's discount even inside a warlock mirror... a
+ *  necromancer mirror — no class but Warrior ever holds a "bulwark"-kind
+ *  wall, so this is really just `classes[owner] === "warrior"`, spelled
+ *  out for the day a second wall-granting class exists. */
+export function wallUpkeepFor(power: PowerState, owner: PlayerId): number {
+  const discount = power.classes[owner] === "warrior" ? HOLD_THE_LINE_DISCOUNT : 0;
+  return Math.max(WALL_BLEED_MIN, WALL_BLEED - discount);
+}
 /** ESCAPE PAYS (2026-09-16, user rule: "when a token crosses the finish to
  *  make a point you get a mana"): every escape banks the mover this many
  *  charges, through addCharge (so it clamps at the cap like all generic
@@ -222,6 +261,10 @@ export const WARD_SCOPE: WardScope = "most-advanced";
  *  mage-vs-warrior (15.0), the most even the whole RPS triangle has been.
  *  Kept at 1: same cost as a normal push, still gated on `charges >=
  *  PUSH_WARD_COST` so it scales cleanly if ever retuned back up.) */
+/** RETIRED 2026-09-17 — walls are absolute now (see WALL_BLEED): a Warded
+ *  target is excluded from getPushTargets entirely, the same as any other
+ *  protected stone, so there is no separate Ward-tier cost left to pay.
+ *  Constant and the historical trace below kept for the record. */
 export const PUSH_WARD_COST = 1;
 
 /** How far a Push knocks back a WARDED target specifically — a normal push
@@ -258,6 +301,8 @@ export const PUSH_WARD_COST = 1;
  *  it just can never itself send a Warded target home. See
  *  batch-random-master-killer-games.ts output for the actual re-tuned
  *  archer-vs-mage numbers under this restructuring. */
+/** RETIRED 2026-09-17 — see PUSH_WARD_COST's note just above: a Warded
+ *  target never reaches Push's collision math at all any more. */
 export const PUSH_WARD_DISTANCE = 0;
 
 /** Archer's Charged Shot: spends BOTH banked charges at once (requires
@@ -318,6 +363,9 @@ export const CHARGED_SHOT_DISTANCE = 4;
  *  49.7), archer mirror (50.3/49.7), mage mirror (50.5/49.5), and
  *  mage-vs-warrior (50.6/49.4) all held completely flat through this whole
  *  change, exactly as the scoping argument predicted. */
+/** RETIRED 2026-09-17 — same story as PUSH_WARD_COST/DISTANCE: a Warded
+ *  target is excluded from getChargedShotTargets outright now, so
+ *  computeChargedShotLanding never reaches this tier. */
 export const CHARGED_SHOT_WARD_DISTANCE = 3;
 
 /** Ultimates: how many CONSECUTIVE shield-tile landings, within one unbroken
@@ -363,7 +411,12 @@ export const ULTIMATE_STREAK = 3;
  *  N=2/3/4 respectively). Landed on 2: it moves archer-vs-warrior the
  *  LEAST (-0.5pt vs -3.1 and -4.8 at N=3/N=4) while still giving Bulwark
  *  real presence (bulwark/g ~9.4, bulwarkBlock/g ~1.5) — the most
- *  conservative value is the healthiest one here, not the default 3. */
+ *  conservative value is the healthiest one here, not the default 3.
+ *
+ *  RETIRED as a Bulwark countdown 2026-09-17 (the wall rework: a wall no
+ *  longer expires, it bleeds — see WALL_BLEED). Kept alive only because
+ *  VANISH_TURNS is still defined relative to it; the history above stays
+ *  for the record. */
 export const BULWARK_TURNS = 2;
 
 /** Reinforced Bulwark — the Warrior's use for the SECOND banked charge:
@@ -610,25 +663,25 @@ export const BLESS_COST = 2;
  *  "the light shelters three at a time." */
 export const BLESSING_CAP = 3;
 
-/** Cleric's Heal: mend a WOUNDED stone back to blessed. Unlike Bless it
- *  ENDS the turn (laying on hands takes the whole turn; the quick prayer
- *  doesn't) — that asymmetry is load-bearing, found by overshooting in
+/** Cleric's Vigil (2026-09-17, RENAMED from HEAL_COST when Heal became
+ *  Vigil under the wall rework — see applyVigil). HISTORICAL, from the old
+ *  Heal-mends-a-wound kit: mending a WOUNDED stone back to blessed ENDED
+ *  the turn (laying on hands takes the whole turn; the quick prayer
+ *  doesn't) — that asymmetry was load-bearing, found by overshooting in
  *  both directions at 1200/matchup: both casts turn-ending = 72.9-79.5
  *  AGAINST the cleric (tempo-starved, see BLESS_COST's trace); both casts
  *  turn-keeping = 86.1-89.6 FOR the cleric vs warrior/necro/archer — the
  *  wound-then-mend cycle cost the cleric nothing while every enemy
  *  landing paid nothing, so blessings were effectively permanent
- *  (heal/g 3.9-4.3, wound/g 6.7-9.0). Making the MEND pay real tempo is
- *  the dial that makes a broken blessing a real setback the attacker
+ *  (heal/g 3.9-4.3, wound/g 6.7-9.0). Making the MEND pay real tempo was
+ *  the dial that made a broken blessing a real setback the attacker
  *  earned. PRICE raised 1 -> 2 in the same sweep: at 1 the break-mend
  *  war stayed cleric-favored against the two classes with no burst
- *  removal (archer 73.2, necro 75.9 — wound/g 5.6-8.0, the cleric simply
- *  re-armored per break out of slow but ENDLESS zero-flip income, and
- *  long grind games compound that income edge). At 2, undoing a break
- *  costs the full bank AND the turn — the breaker finally wins the
- *  exchange. Flavor holds: a broken blessing is harder to rekindle than
- *  a fresh one is to speak. */
-export const HEAL_COST = 2;
+ *  removal (archer 73.2, necro 75.9 — wound/g 5.6-8.0). Vigil inherits
+ *  both the price and the turn-ending shape for the same reason: a
+ *  turn-keeping upkeep-waiver would let the class farm walls for free,
+ *  the exact failure this history warns against. */
+export const VIGIL_COST = 2;
 
 /** Rogue's Larceny (passive, free, added 2026-07-21): every REAL kill the
  *  Rogue lands drains this much mana from the victim's owner, on top of the
@@ -700,36 +753,37 @@ export const PICKPOCKET_RETIRED = true;
 export const PICKPOCKET_STEAL = 2;
 
 /** Rogue's Vanish (added 2026-07-22, replacing Backstab's slot entirely —
- *  see PowerState.bulwarked's own history for the discarded shield-breaker
- *  rework this supersedes). The user's diagnosis after that rework crashed
- *  the class to a 23-42% win rate everywhere: every OTHER class has some
+ *  see PowerState.walls' history for the discarded shield-breaker rework
+ *  this supersedes). The user's diagnosis after that rework crashed the
+ *  class to a 23-42% win rate everywhere: every OTHER class has some
  *  defensive lever (Mage's Ward, Warrior's Bulwark, Cleric's Blessing) —
  *  Rogue had none, so once Backstab stopped being an offensive equalizer
  *  the class had no way to protect its own advancing stones at all. Vanish
  *  is that missing lever: spend VANISH_COST to make one of the mover's own
  *  on-board stones fully untargetable for VANISH_TURNS of the mover's own
  *  turns — excluded from every enemy targeted ability's pool AND immune to
- *  plain-move capture, same as a Bulwarked stone.
+ *  plain-move capture, same as a walled stone.
  *
- *  Deliberately implemented as a second caster of Warrior's EXACT Bulwark
- *  mechanic (writes into the same power.bulwarked/bulwarkSaves maps,
- *  ticked/diffed/consumed by the same tickBulwarkExpiry/
- *  getBulwarkBlockedIds/consumeBulwarkBlocks — all fully class-agnostic
- *  already) rather than a parallel protection system: the two classes
- *  never share a match-up with themselves needing independent tracking (a
- *  player is Warrior XOR Rogue, never both, in any one seat), so there is
- *  no cross-talk risk, and reinventing an equally elaborate duration/save/
- *  block-diffing system for one more flavor of "temporarily uncapturable"
- *  would have been pure duplication. "Vanished" and "Bulwarked" are the
- *  same underlying status; only the player-facing name/art differ. */
+ *  HISTORICAL (until 2026-09-17): originally a second caster of Warrior's
+ *  EXACT Bulwark mechanic, sharing its bulwarked/bulwarkSaves maps and
+ *  every tick/diff/consume function, on the reasoning that a Warrior XOR
+ *  Rogue seat meant zero cross-talk risk and reinventing the machinery
+ *  would be pure duplication. The wall rework split them apart
+ *  (PowerState.vanished is now Vanish's own map): Bulwark became a paid,
+ *  bleeding, non-expiring WALL, while Vanish stayed the fixed-duration,
+ *  no-cost dodge it always was in spirit — sharing one mechanic would have
+ *  made Vanish bleed mana it was never supposed to. "Vanished" and
+ *  "Walled" read the same to isProtected, but are tracked and priced
+ *  separately now. */
 export const VANISH_COST = 1;
 
 /** How many of the mover's own turns a Vanish lasts before expiring
- *  (ticked by the same tickBulwarkExpiry a plain Bulwark uses) — started
- *  equal to BULWARK_TURNS (2), Bulwark's own already-validated plain-cast
- *  lifetime, rather than guessing a fresh number; no "reinforced"/saves
- *  tier for Vanish (unlike Bulwark) since the user didn't ask for that
- *  extra complexity and Warrior's own reinforced tier was itself an
+ *  (ticked by tickVanishForNewTurn, its own map since 2026-09-17 — see
+ *  VANISH_COST's doc) — started equal to BULWARK_TURNS (2), Bulwark's own
+ *  already-validated plain-cast lifetime before the wall rework retired
+ *  that constant, rather than guessing a fresh number; no "reinforced"/
+ *  saves tier for Vanish (unlike old Bulwark) since the user didn't ask
+ *  for that extra complexity and Warrior's own reinforced tier was itself an
  *  optimization added after simulation, not a day-one requirement.
  *  STARTING VALUE, not yet sim-tuned for the reworked kit. */
 export const VANISH_TURNS = BULWARK_TURNS;
@@ -1070,13 +1124,14 @@ export const RAGE_FREE_DEFICIT = 0;
 export type RageScope = "all" | "least-advanced";
 export const RAGE_SCOPE: RageScope = "least-advanced";
 
-/** Barbarian's Reckless Swing: mana cost of the adjacent strike that kills
- *  through BULWARK and VANISH — the PHYSICAL half of the defence roster,
- *  the counterpart to the Warlock's Sacrifice piercing the magical half
- *  (Ward, Blessing). Neither tool answers everything and that split is
- *  load-bearing across the whole expansion: do not widen either side. A
- *  Ward, a shield tile and — being a mortal weapon — a Blessing all still
- *  stop it. */
+/** Barbarian's Reckless Swing: mana cost of the adjacent strike on an
+ *  unprotected enemy. HISTORICAL: until 2026-09-17 this pierced Bulwark
+ *  and Vanish — the "physical half" of a defence-piercing split with the
+ *  Warlock's Sacrifice (which pierced Ward and Blessing, the "magical
+ *  half") — but walls are absolute now and every bespoke breaker retired
+ *  with them, Sacrifice's included. A real identity loss for both casts,
+ *  flagged rather than patched around; the sim decides whether either
+ *  needs a new lever. */
 export const RECKLESS_SWING_COST = 1;
 
 /** What the swing costs the SWINGER: its own stone is thrown this many
@@ -1304,28 +1359,29 @@ export interface PowerState {
    *  by resetTurnFlags, and not yet consumed by anything (no ultimate
    *  action exists yet), so it just sits true once earned. */
   ultimateReady: Record<PlayerId, boolean>;
-  /** Warrior's Bulwark: token id -> turns remaining before it expires
-   *  unconsumed. Presence in the map (any value > 0) means the token is
-   *  fully immune to a normal capture or Charge sweep (folded into
-   *  isProtected/isBulwarked — see those), and to a Push that would send
-   *  it home specifically (see getPushTargets). Ultimates (Rain of Arrows,
-   *  Blink Strike, Warpath) all pierce it — see isBulwarked's doc.
-   *  Deliberately NOT reset by resetTurnFlags — same reasoning as
-   *  shieldStreak/ultimateReady: resetTurnFlags fires on every resolved
-   *  turn, including a shield-landing's own extra turn, and Bulwark has to
-   *  survive those without ticking down. Ticked down once per the
-   *  BULWARKED player's own fresh flip (tickBulwarkExpiry) and cleared
-   *  early the instant it actually blocks something for the opponent
-   *  (getBulwarkBlockedIds/consumeBulwarkBlocks) — whichever comes first. */
-  bulwarked: Record<number, number>;
-  /** Reinforced Bulwark bookkeeping: token id -> capture-blocks remaining
-   *  before the Bulwark fades. An entry exists ONLY for reinforced casts
-   *  (value starts at BULWARK_REINFORCED_SAVES); a plain Bulwark has no
-   *  entry here and is consumed by its first block, exactly as before —
-   *  consumeBulwarkBlocks treats a missing entry as 1. Cleared alongside
-   *  its bulwarked entry everywhere that clears one (expiry, final block,
-   *  an ultimate's capture). */
-  bulwarkSaves: Record<number, number>;
+  /** THE WALL (2026-09-17 rework — Warrior's Bulwark and Cleric's Blessing
+   *  collapse into one system): token id -> which wall it carries.
+   *  Presence in the map means the token cannot be captured, shoved, or
+   *  otherwise sent home by any NORMAL attack — no pierce, no bespoke
+   *  breaker, only an ultimate reaches it (folded into isProtected/
+   *  isWalled — see those). No countdown and no save-count: a wall is up
+   *  for as long as its owner can pay WALL_BLEED for it every one of
+   *  their own turns (tickWallUpkeepForNewTurn) — it falls the instant
+   *  they can't, never by blocking a capture. Ward (the Mage's) is
+   *  deliberately NOT a wall: it keeps its own full-bank threshold and
+   *  never bleeds — see isWarded. Vanish (the Rogue's) is deliberately
+   *  ALSO not a wall — see PowerState.vanished — a fixed-duration dodge,
+   *  not a paid-for wall. Cleared on every reserve trip
+   *  (clearWallsOnReserveTrip) so a wall never rides free protection back
+   *  from the dead. */
+  walls: Record<number, WallKind>;
+  /** Rogue's Vanish: token id -> turns remaining before it expires — split
+   *  off Bulwark's old shared map (2026-09-17) because Vanish stays a
+   *  fixed-duration dodge under the wall rework, not a paid wall: it does
+   *  not bleed mana and it does expire on its own. Ticked once per the
+   *  VANISHED player's own fresh flip (tickVanishForNewTurn). Cleared on
+   *  every reserve trip alongside walls. */
+  vanished: Record<number, number>;
   /** Necromancer's corpse marker: the last QUALIFYING kill this player made
    *  (see SOUL_BOUNTY_CHARGES for what qualifies), remembered as the killed
    *  token and the contested tile it died on. Only ever populated for a
@@ -1401,23 +1457,21 @@ export interface PowerState {
    *  (tickHamstringForNewTurn) and cleared on a reserve trip
    *  (clearHamstringOnCapture) like every other per-token status. */
   hamstrung: Record<number, number>;
-  /** Cleric's per-token life state (2026-07-21): token id -> "blessed"
-   *  (carries the second life — the next capture wounds instead of kills)
-   *  or "wounded" (the blessing broke; back to one life, but mendable by
-   *  Heal / the shield-landing passive, and displayed as scarred). Absent =
-   *  mortal, the default for every token in the game. Only ever populated
-   *  for a CLERIC's own tokens (Bless/Heal/Benediction target own stones;
-   *  wound entries are only ever downgraded blessed entries), which keeps
-   *  every cross-class question trivial: a thrall can never be blessed (a
-   *  blessed stone never dies, so it never becomes a corpse — and Bless's
-   *  target pool excludes a stone possessed against the cleric), and
-   *  Ward/Bulwark never stack with it (different classes, own-stones
-   *  only). Entries are cleared on every real kill (clearVitality — the
-   *  same reserve-trip hygiene bulwarked entries get) and ride through an
-   *  escape untouched (an Exhumed returner keeps its blessing: it never
-   *  died, it came home in glory and got dragged back). */
-  vitality: Record<number, "blessed" | "wounded">;
+  /** Grace turns of waived wall upkeep, per player — Cleric's Vigil and
+   *  Sanctified Ground grant it, Benediction and Warrior's Shield Wall
+   *  spend it too (2026-09-17). Consumed by tickWallUpkeepForNewTurn
+   *  BEFORE it charges anyone anything; 0/absent means no grace banked. */
+  wallGrace: Record<PlayerId, number>;
 }
+
+/** THE WALL SYSTEM (2026-09-17 rework): a wall is any effect that makes a
+ *  stone uncapturable except by an ultimate. Two kinds share the one rule
+ *  and the one price (WALL_BLEED per turn, see wallUpkeepFor) — Warrior's
+ *  Bulwark and Cleric's Blessing. Ward Breaker is retired: nothing pierces
+ *  a wall below ultimate tier any more, which is the entire point — no
+ *  more bespoke per-class breakers, no more "why does the Archer pierce
+ *  these two defenses and not the others." */
+export type WallKind = "bulwark" | "blessing";
 
 /** Superset of rulebook.Move — same fields, plus power-derived ones. */
 export interface PowerMove {
@@ -1429,9 +1483,9 @@ export interface PowerMove {
   bonusCaptures: number[];
   landsOnShield: boolean;
   causesWin: boolean;
-  /** True if the mover is a Warrior and this move's landing tile is a
-   *  Mage-warded (non-shield) enemy — Ward Breaker triggers automatically
-   *  as part of taking this move, no separate action needed. */
+  /** RETIRED 2026-09-17 (Ward Breaker is gone; walls are absolute now) —
+   *  always false. Kept on the type/wire so nothing downstream needs its
+   *  own removal pass. */
   breaksWard: boolean;
   /** True if a Warrior could spend a charge to Charge through this move
    *  (from >= 0, clear lane of own tokens, at least implicitly meaningful
@@ -1454,15 +1508,9 @@ export type PowerAction =
   | { kind: "charge"; move: PowerMove }
   | { kind: "blinkStrike"; targetTokenId: number }
   | { kind: "warpath"; targetTokenId: number }
-  | {
-      kind: "bulwark";
-      tokenId: number;
-      /** Reinforced Bulwark: spend the FULL bank (CHARGE_CAP) on one
-       *  Bulwark with doubled lifetime and saves — see
-       *  BULWARK_REINFORCED_TURNS. Optional and additive: absent/false is
-       *  the plain 1-charge cast, unchanged. */
-      reinforced?: boolean;
-    }
+  /** Warrior's Bulwark: the reinforced tier retired 2026-09-13, before the
+   *  wall rework — there is only the one 1-charge cast now. */
+  | { kind: "bulwark"; tokenId: number }
   /** Necromancer's Revive: no target — the corpse (PowerState.corpse)
    *  fully determines what rises and where. Legality lives in
    *  getReviveSpawnTile, the drift-proof single source shared by the
@@ -1473,11 +1521,13 @@ export type PowerAction =
    *  (empty pool = not castable). */
   | { kind: "corpseExplosion" }
   | { kind: "exhume"; targetTokenId: number }
-  /** Cleric's Bless: flag one own stone blessed (see BLESS_COST /
-   *  PowerState.vitality). Targets an OWN token, Bulwark's shape. */
+  /** Cleric's Bless: raise a wall on one own stone (see BLESS_COST /
+   *  PowerState.walls). Targets an OWN token, Bulwark's shape. */
   | { kind: "bless"; targetTokenId: number }
-  /** Cleric's Heal: mend one own WOUNDED stone back to blessed. */
-  | { kind: "heal"; targetTokenId: number }
+  /** Cleric's Vigil (2026-09-17, replaces Heal): no target — waives upkeep
+   *  for every wall the caster already holds (canCastVigil is the shared
+   *  oracle). */
+  | { kind: "vigil" }
   /** Cleric's Benediction ultimate: no target — blesses the cleric's whole
    *  on-board army. getBenedictionTargets is the shared oracle (empty pool
    *  = nothing would change = not castable; a blessing that blesses no one
@@ -1547,8 +1597,9 @@ export function initialPowerState(): PowerState {
     reflipsUsedThisTurn: 0,
     shieldStreak: { p1: 0, p2: 0 },
     ultimateReady: { p1: false, p2: false },
-    bulwarked: {},
-    bulwarkSaves: {},
+    walls: {},
+    vanished: {},
+    wallGrace: { p1: 0, p2: 0 },
     corpse: { p1: null, p2: null },
     grave: { p1: null, p2: null },
     thrall: { p1: null, p2: null },
@@ -1557,7 +1608,6 @@ export function initialPowerState(): PowerState {
     inspired: {},
     traps: { p1: null, p2: null },
     hamstrung: {},
-    vitality: {},
   };
 }
 
@@ -1673,81 +1723,63 @@ function onShieldTile(token: TokenState): boolean {
   return BOARD_LAYOUT[token.position].type === "shield";
 }
 
-/** Is this token currently protected by Warrior Bulwark? Live map lookup —
- *  presence in power.bulwarked (any positive turns-remaining count) means
- *  "still active." Like a shield tile (and unlike Ward), nothing pierces
- *  this for normal captures/Charge — see isProtected. TWO exceptions: a
- *  soft (non-home) Push, which Bulwark deliberately does not block (see
- *  getPushTargets's own Bulwark-aware filter, not this function — though a
- *  REINFORCED Bulwark shrugs off a plain Push entirely, see
- *  isBulwarkReinforced); and ultimates — Rain of Arrows, Blink Strike, and
- *  Warpath ALL punch through Bulwark, the same "pierces everything"
- *  identity that lets them ignore shield tiles and Ward (each capture path
- *  clears the captured token's bulwarked entry so this doesn't leak free
- *  protection across a reserve trip). */
-export function isBulwarked(power: PowerState, token: TokenState): boolean {
-  return power.bulwarked[token.id] !== undefined;
+/** Is this token currently walled — Warrior's Bulwark or Cleric's
+ *  Blessing? Live map lookup, presence in power.walls means "still up."
+ *  Nothing below ultimate tier pierces a wall — see isProtected, which is
+ *  now the ONE predicate every enemy-targeting pool and every landing
+ *  capture checks. A wall falls only when its owner can't pay
+ *  wallUpkeepFor it (tickWallUpkeepForNewTurn); this function never
+ *  changes state, it only reads it. */
+export function isWalled(power: PowerState, token: TokenState): boolean {
+  return power.walls[token.id] !== undefined;
 }
 
-/** Is this token under a REINFORCED Bulwark specifically? A bulwarkSaves
- *  entry exists only for reinforced casts and lives exactly as long as its
- *  bulwarked entry does. On top of everything a plain Bulwark blocks, a
- *  reinforced one can't be touched by a plain Push AT ALL — not even the
- *  soft on-board shove a plain Bulwark still allows. Charged Shot is the
- *  tool that still moves it (soft only — the send-home immunity every
- *  Bulwark grants stays). */
-export function isBulwarkReinforced(power: PowerState, token: TokenState): boolean {
-  return power.bulwarkSaves[token.id] !== undefined;
+/** May `token`'s owner ever hold a wall on it? The Barbarian's whole
+ *  identity is having none, by rule (2026-09-17) — not a kit gap, a
+ *  guardrail against a future wall-granting ability (a Warpath retheme, a
+ *  cross-class buff) silently handing him one. Checked at every
+ *  wall-granting pool AND apply (Bulwark, Bless, Benediction, Shield
+ *  Wall) — a shield TILE still protects him; only the paid-for kind is
+ *  denied. */
+export function canHoldWall(power: PowerState, token: TokenState): boolean {
+  return power.classes[token.owner] !== "barbarian";
 }
 
-/** Is this token hidden by a Rogue's Vanish specifically? Vanish reuses
- *  Bulwark's bulwarked-map mechanic wholesale (see VANISH_COST's doc), so a
- *  bulwarked flag on a ROGUE-owned token can ONLY have come from Vanish — a
- *  Rogue never casts Warrior Bulwark, and a seat is never both classes, so
- *  power.classes[owner] disambiguates the shared field with zero conflict.
- *
- *  Unlike a plain Warrior Bulwark — but LIKE a Reinforced one — a Vanished
- *  stone is fully immune to Push (see getPushTargets), not just its send-home
- *  case. This is scoped by construction to the archer-vs-rogue matchup (only
- *  an Archer has Push) and exists because that matchup was otherwise
- *  structurally unwinnable for the Rogue: Push is the Archer's primary answer
- *  to Rogue (push/g ~6 in the sim) and Vanish is the Rogue's ONLY defensive
- *  lever, yet a plain Vanish left the hidden stone freely shoveable — so a
- *  smarter defensive AI couldn't move the matchup at all (see
- *  batch-random-master-killer-games.ts history). Charged Shot still moves a
- *  Vanished stone (soft only, never send-home), exactly as it still moves a
- *  Reinforced Bulwark — the same "the bigger, rarer tool still reaches it"
- *  carve-out. */
+/** Is this token hidden by a Rogue's Vanish? Own map (2026-09-17 — split
+ *  off Bulwark's, see PowerState.vanished): a fixed VANISH_TURNS dodge,
+ *  not a paid wall — it does not bleed and it does expire on its own
+ *  (tickVanishForNewTurn). Fully immune to everything a wall is, folded
+ *  into isProtected below, same as before the split. */
 export function isVanished(power: PowerState, token: TokenState): boolean {
-  return power.classes[token.owner] === "rogue" && isBulwarked(power, token);
+  return power.vanished[token.id] !== undefined;
 }
 
-/** Universal "is this token capturable/pushable/sweepable AT ALL right
- *  now" check, used everywhere EXCEPT the main landing-capture path (which
- *  needs to distinguish ward-protection specifically, since that's the one
- *  case a Warrior's landing can pierce via Ward Breaker) and Push (which
- *  can also pierce Ward, at a price, and only partially pierces Bulwark —
- *  see getPushTargets/pushCost). Shield tiles and Bulwark block every
- *  class with no exception. */
-function isProtected(state: GameState, power: PowerState, token: TokenState): boolean {
+/** THE single "is this token capturable/pushable/sweepable/advanceable AT
+ *  ALL right now" check (2026-09-17: now used EVERYWHERE, including the
+ *  main landing-capture path and Push, which used to carve out their own
+ *  partial exceptions for Ward Breaker and a "soft" push — both retired.
+ *  A wall or a shield tile stops every class with no exception; ultimates
+ *  are the only thing that ever reaches a protected stone, and they check
+ *  for it nowhere at all — that's what "pierces everything" means. */
+export function isProtected(state: GameState, power: PowerState, token: TokenState): boolean {
   return (
     onShieldTile(token) ||
     isWarded(state, power, token) ||
-    isBulwarked(power, token)
+    isWalled(power, token) ||
+    isVanished(power, token)
   );
-}
-
-/** What a Push against this specific target will cost: PUSH_WARD_COST if
- *  it's currently warded, 1 otherwise. Evaluated against the pre-push
- *  state/target, since isWarded is derived from live board position. */
-function pushCost(state: GameState, power: PowerState, target: TokenState): number {
-  return isWarded(state, power, target) ? PUSH_WARD_COST : 1;
 }
 
 /** How far a Push against this specific target knocks it back:
  *  PUSH_WARD_DISTANCE if it's currently warded, PUSH_DISTANCE otherwise. */
+/** RETIRED tier collapsed 2026-09-17: a Warded target can no longer reach
+ *  this at all (getPushTargets excludes every protected stone outright),
+ *  so Push always knocks back PUSH_DISTANCE now. Kept as its own function
+ *  — not inlined at the call site — so a future distance-tier reopens in
+ *  one place. */
 function pushDistance(state: GameState, power: PowerState, target: TokenState): number {
-  return isWarded(state, power, target) ? PUSH_WARD_DISTANCE : PUSH_DISTANCE;
+  void state; void power;
+  return PUSH_DISTANCE;
 }
 
 /** How deep this player's bank goes for ORDINARY income. CHARGE_CAP for
@@ -1776,6 +1808,90 @@ export function grantZeroFlipCharge(power: PowerState, mover: PlayerId): PowerSt
   let next = power;
   for (let i = 0; i < n; i++) next = addCharge(next, mover);
   return next;
+}
+
+/** THE WALL SYSTEM'S TICK (2026-09-17): charges `mover` wallUpkeepFor every
+ *  wall they hold, front (most-advanced) stone first — "the front holds
+ *  longest" — and DROPS any it can't afford, reporting which. Call once
+ *  per fresh flip dealt to `mover`, AFTER the other economy ticks
+ *  (zero-flip grant, thrall, curse, hamstring, inspire, Dark Bargain) and
+ *  BEFORE move generation — a dropped wall unprotects that stone THIS
+ *  turn, so the move list has to see the post-upkeep board. Grace
+ *  (wallGrace, Vigil/Sanctified Ground/Benediction/Shield Wall) waives ONE
+ *  wall's payment before charging anything — spent front-first too, same
+ *  order as payment, and never lets a grace turn go to waste on an empty
+ *  wall list. No voluntary drop: spending below upkeep IS the drop. */
+export function tickWallUpkeepForNewTurn(
+  state: GameState,
+  power: PowerState,
+): { power: PowerState; paid: number; droppedTokenIds: number[] } {
+  const mover = state.currentPlayer;
+  const mine = Object.keys(power.walls)
+    .map(Number)
+    .filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover)
+    .sort((a, b) => {
+      const pa = state.tokens.find((t) => t.id === a)!.position;
+      const pb = state.tokens.find((t) => t.id === b)!.position;
+      return pb - pa; // most-advanced first
+    });
+  if (mine.length === 0) return { power, paid: 0, droppedTokenIds: [] };
+
+  let grace = power.wallGrace[mover] ?? 0;
+  let charges = power.charges[mover];
+  let paid = 0;
+  const droppedTokenIds: number[] = [];
+  const walls = { ...power.walls };
+  for (const id of mine) {
+    if (grace > 0) {
+      grace -= 1;
+      continue;
+    }
+    const cost = wallUpkeepFor(power, mover);
+    if (charges >= cost) {
+      charges -= cost;
+      paid += cost;
+    } else {
+      delete walls[id];
+      droppedTokenIds.push(id);
+    }
+  }
+  const nextPower: PowerState = {
+    ...power,
+    walls,
+    charges: { ...power.charges, [mover]: charges },
+    wallGrace: { ...power.wallGrace, [mover]: grace },
+  };
+  return { power: nextPower, paid, droppedTokenIds };
+}
+
+/** Rogue's Vanish: ticks down the countdown on every token `mover`
+ *  currently has hidden — one of THEIR OWN turns has just started. A
+ *  fixed-duration dodge, not a wall (see PowerState.vanished) — no
+ *  upkeep, no grace, just VANISH_TURNS and then it's gone. Same calling
+ *  convention as tickHamstringForNewTurn: once per fresh flip, before
+ *  move generation. Returns the ids that expired so the server can
+ *  announce them. */
+export function tickVanishForNewTurn(
+  state: GameState,
+  power: PowerState,
+): { power: PowerState; expiredTokenIds: number[] } {
+  const mover = state.currentPlayer;
+  const mine = Object.keys(power.vanished)
+    .map(Number)
+    .filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
+  if (mine.length === 0) return { power, expiredTokenIds: [] };
+  const vanished = { ...power.vanished };
+  const expiredTokenIds: number[] = [];
+  for (const id of mine) {
+    const left = vanished[id] - 1;
+    if (left <= 0) {
+      delete vanished[id];
+      expiredTokenIds.push(id);
+    } else {
+      vanished[id] = left;
+    }
+  }
+  return { power: { ...power, vanished }, expiredTokenIds };
 }
 
 /** Necromancer's Soul Harvest (passive, REWORKED — see SOUL_BOUNTY_CHARGES
@@ -1870,18 +1986,19 @@ export function applyDarkBargain(
       t.id === id ? { ...t, position: retreat } : t.id === standIn.id ? { ...t, position: -1 } : t,
     );
     // The saved stone did not die: put back what the kill hooks stripped.
-    if (prePower.vitality[id] !== undefined) pw = { ...pw, vitality: { ...pw.vitality, [id]: prePower.vitality[id] } };
+    // (A warlock's own stone can never be Blessed/walled — that's a
+    // Cleric-only grant onto the Cleric's own stones — so there is no
+    // vitality/wall entry to restore here any more, only these three.)
     if (prePower.hamstrung?.[id] !== undefined) pw = { ...pw, hamstrung: { ...pw.hamstrung, [id]: prePower.hamstrung[id] } };
     if (prePower.inspired?.[id] !== undefined) pw = { ...pw, inspired: { ...pw.inspired, [id]: prePower.inspired[id] } };
     for (const pl of ["p1", "p2"] as PlayerId[]) {
       if (prePower.curse[pl]?.tokenId === id) pw = { ...pw, curse: { ...pw.curse, [pl]: prePower.curse[pl] } };
     }
     // The stand-in died for real: the standard reserve-trip hygiene.
-    pw = clearVitality(pw, [standIn.id]);
     pw = clearCurseOnCapture(pw, [standIn.id]);
     pw = clearHamstringOnCapture(pw, [standIn.id]);
     pw = clearInspireOnCapture(pw, [standIn.id]);
-    pw = clearCapturedBulwarks(pw, [standIn.id]);
+    pw = clearWallsOnReserveTrip(pw, [standIn.id]);
     // A necromancer's corpse and grave follow the stone that actually died.
     if (pw.corpse[killer]?.tokenId === id) {
       pw = {
@@ -2071,59 +2188,21 @@ function clearHamstringOnCapture(power: PowerState, capturedIds: number[]): Powe
   return { ...power, hamstrung };
 }
 
-/** Is this token carrying an unbroken blessing (a second life)? Blessing is
- *  NOT protection — it never gates targeting or move legality anywhere (a
- *  blessed stone is a legal capture/Push/Snipe/sweep victim everywhere a
- *  mortal one is); it changes what the hit RESOLVES to (a wound instead of
- *  a kill — see resolveTurn). That split is the whole design: Ward answers
- *  "can I be hit," blessing answers "do I survive it." */
+/** Is this token Blessed — under the wall rework (2026-09-17), IS this
+ *  token's wall a Blessing specifically? A Blessing is now a wall like any
+ *  other (see PowerState.walls/isWalled) — this is display/card plumbing
+ *  (which art, which class chapter) for the two kinds, not a legality
+ *  check anywhere. Kept exported under its old name because the client
+ *  and the guide still say "blessed," not "walled-by-blessing." */
 export function isBlessed(power: PowerState, tokenId: number): boolean {
-  return power.vitality[tokenId] === "blessed";
+  return power.walls[tokenId] === "blessing";
 }
 
-/** Is this token wounded (its blessing broke and hasn't been mended)? Purely
- *  Heal's bookkeeping plus display state — a wounded stone plays exactly
- *  like a mortal one. */
-export function isWounded(power: PowerState, tokenId: number): boolean {
-  return power.vitality[tokenId] === "wounded";
-}
-
-/** Every REAL kill clears the dead token's vitality entry — the same
- *  reserve-trip hygiene clearCapturedBulwarks applies, and the same
- *  call-site discipline: any path that sends tokens home for good must run
- *  this (resolveTurn kills, Push/Charged Shot send-homes, Blink Strike,
- *  Warpath, Corpse Explosion). In practice only a "wounded" entry can ever
- *  be cleared here (a blessed stone doesn't die to non-ultimate hits, and
- *  the ultimate paths that pierce the blessing clear it via this exact
- *  helper), but the helper doesn't care. No-op (same reference back) when
- *  nothing captured carried an entry. */
-function clearVitality(power: PowerState, capturedIds: number[]): PowerState {
-  if (!capturedIds.some((id) => power.vitality[id] !== undefined)) return power;
-  const vitality = { ...power.vitality };
-  for (const id of capturedIds) delete vitality[id];
-  return { ...power, vitality };
-}
-
-/** The stagger-back walk for a wounded stone whose tile the killer now
- *  occupies (landing captures only — Snipe/sweep/knockback wounds leave the
- *  victim standing, see resolveTurn's wound resolution): the nearest free
- *  tile BEHIND the victim along its own path, walking past occupied
- *  squares — applyExhume's collision semantics exactly (same-owner tokens
- *  collide anywhere, cross-owner only on contested tiles). Guaranteed to
- *  land at >= 0 by counting: the walk reaches the victim's own private
- *  entry lane (tiles 0-3, where only its 3 siblings can block 4 squares),
- *  so a free tile always exists; -1 is a defensive degenerate fallback
- *  only. */
-function staggerBackTile(tokens: TokenState[], victim: TokenState): number {
-  for (let tile = victim.position - 1; tile >= 0; tile--) {
-    const contested = BOARD_LAYOUT[tile].isContested;
-    const occupied = tokens.some(
-      (t) => t.id !== victim.id && t.position === tile && (t.owner === victim.owner || contested),
-    );
-    if (!occupied) return tile;
-  }
-  return -1;
-}
+// RETIRED 2026-09-17: staggerBackTile (the stagger-back walk for a wounded
+// stone whose tile the killer now occupies) went with the wound split — a
+// walled/Blessed stone can no longer be hit at all, so nothing ever needs
+// to stagger. Its collision-walk shape is echoed once more in
+// applyCorpseExplosion's own knockback loop (see that function's comment).
 
 // ============================================================================
 // MOVE GENERATION
@@ -2277,39 +2356,18 @@ export function getLegalPowerMoves(
     if (self) continue; // own-token blocks, same as classic
 
     let captures: number[] = [];
-    let breaksWard = false;
+    // RETIRED 2026-09-17 (walls are absolute now): Ward Breaker (Warriors
+    // pierced Ward), the necromancer thrall's Ward pierce, and the Blessed
+    // Blade (a blessed attacker's strike pierced Ward) are all gone — one
+    // isProtected check covers shield tile, Ward, Bulwark, Blessing and
+    // Vanish alike, and nothing below ultimate tier reaches any of them.
+    // `breaksWard` stays on PowerMove/the wire, always false now, so
+    // nothing downstream needs its own removal pass.
+    const breaksWard = false;
 
     if (enemy) {
-      // Shield tiles and Bulwark block EVERY class, no exception — Bulwark
-      // isn't something even a Warrior's Ward Breaker pierces, unlike Ward.
-      if (onShieldTile(enemy) || isBulwarked(power, enemy)) continue;
-      if (isWarded(state, power, enemy)) {
-        // THE DEAD FEEL NO MAGIC: a thrall's capture pierces Ward, the
-        // same exception Warrior's Ward Breaker carries — and the thrall's
-        // whole reason to exist in the mage matchup. Without it the
-        // necromancer has zero Ward interaction of any kind, the
-        // structural hole BOTH kits' balance passes measured as their
-        // worst number (old kit 63-69/37-31 mage; rework pre-pierce
-        // 70.0/30.0 at 5000 games with Soul Claim + 3-turn thralls
-        // already applied). Shield tiles and Bulwark still block it —
-        // only the living's magic is beneath its notice.
-        //
-        // THE BLESSED BLADE (cleric, third member of the pierce club): a
-        // BLESSED stone's strike carries the light through the Ward too.
-        // Same structural story as the thrall's: with BLESSING_CAP=2
-        // landing the other three matchups inside the bar, the mage —
-        // whose Ward blanks the cleric's only offense — overshot to
-        // 75.1/24.9 at 1500/matchup; this is the scoped answer (isWarded
-        // is only ever true for a mage's stones, and only a cleric's own
-        // stones can be blessed, so no other matchup can move). A WOUNDED
-        // stone's light is broken — no pierce — and shield tiles and
-        // Bulwark still block everyone.
-        if (cls !== "warrior" && !isThrall && !isBlessed(power, token.id)) continue; // blocked for everyone else
-        breaksWard = true; // pierce: legal, captures (client announces the break)
-        captures = [enemy.id];
-      } else {
-        captures = [enemy.id]; // normal contested capture
-      }
+      if (isProtected(state, power, enemy)) continue;
+      captures = [enemy.id]; // normal contested capture
     }
 
     // Archer Snipe (passive, free): a second unprotected enemy exactly one
@@ -2339,13 +2397,10 @@ export function getLegalPowerMoves(
     // intermediate contested tile must be clear of the Warrior's own
     // tokens. The sweep itself only touches contested tiles strictly
     // between from and to, and — like a normal move — never crosses a
-    // shield tile. A WARDED token in the sweep IS captured, same as a
-    // direct landing — Ward Breaker's whole identity is "Warriors pierce
-    // Ward," so the sweep shouldn't quietly disagree with that just
-    // because the token is in the middle of the lane instead of the
-    // landing tile. A BULWARKED token, unlike a warded one, is NOT
-    // captured by the sweep — Bulwark isn't something Ward Breaker was
-    // ever meant to pierce.
+    // shield tile. Every protection blocks it now (2026-09-17: walls are
+    // absolute, and Ward Breaker's old "a Warded token IS captured, same
+    // as a direct landing" carve-out retired with it) — one isProtected
+    // check, same as the landing tile.
     let chargeAvailable = false;
     const chargeSweepCaptures: number[] = [];
     if (cls === "warrior" && from >= 0) {
@@ -2365,8 +2420,7 @@ export function getLegalPowerMoves(
         if (
           foe &&
           chargeSweepCaptures.length < CHARGE_SWEEP_CAP &&
-          !onShieldTile(foe) &&
-          !isBulwarked(power, foe)
+          !isProtected(state, power, foe)
         ) {
           chargeSweepCaptures.push(foe.id);
         }
@@ -2467,12 +2521,11 @@ export function applyRainOfArrows(
   mover: PlayerId,
 ): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
   const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
-  let nextPower: PowerState = clearCapturedBulwarks(
+  let nextPower: PowerState = clearWallsOnReserveTrip(
     { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } },
     [targetTokenId],
   );
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
-  nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
   nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
   nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
@@ -2493,19 +2546,15 @@ export function applyRainOfArrows(
  *  the opponent (or keep it on a shield landing), and reset per-turn flags
  *  for the next flip.
  *
- *  THE WOUND SPLIT (Cleric, 2026-07-21): every capture in `allCaptures`
- *  resolves as either a KILL (reserve, exactly as before) or — when the
- *  victim carries an unbroken blessing — a WOUND: the blessing breaks
- *  (vitality -> "wounded"), the stone STAYS ON THE BOARD, and the attacker
- *  earns nothing for it (no capture charge, no soul bounty, no corpse —
- *  only a full kill marks one). A wounded stone holds its tile except in
- *  the one case physics forbids it: the mover's landing tile, where it
- *  staggers back to the nearest free tile behind it (staggerBackTile —
- *  Snipe and Charge-sweep victims are never on the landing tile, so they
- *  always hold). Rain of Arrows is an ULTIMATE and pierces the blessing —
- *  its pick always kills. Returns the wound list (id + where the stone
- *  ended up) and the passive-mend list so the server can announce both
- *  without re-deriving. */
+ *  THE WOUND SPLIT RETIRED (2026-09-17, the wall rework): every capture in
+ *  `allCaptures` used to resolve as either a KILL or — when the victim
+ *  carried an unbroken Blessing — a WOUND that left the stone on the
+ *  board, earning the attacker nothing. Blessing is now a WALL (see
+ *  PowerState.walls): a walled stone can't be captured at all below
+ *  ultimate tier, so it never reaches `allCaptures` in the first place —
+ *  every capture here is unconditionally a real kill. `wounded` and
+ *  `mendedTokenIds` stay in the return shape, always empty, for the
+ *  callers (the wire, the client) that still read them. */
 function resolveTurn(
   state: GameState,
   power: PowerState,
@@ -2533,13 +2582,16 @@ function resolveTurn(
   power = streakResult.power;
   const rainOfArrows = streakResult.rainOfArrows;
 
-  // The wound split. Membership is the ONLY fork: everything a blessed
-  // victim would have suffered as a kill it instead survives as a wound.
-  const woundIds = allCaptures.filter((id) => power.vitality[id] === "blessed");
-  const kills = allCaptures.filter((id) => !woundIds.includes(id));
-  // Rain of Arrows pierces the blessing — the pick joins the kill list
+  // No wound split any more (2026-09-17): every capture-producing path
+  // (landing, Snipe, Charge sweep) already excludes a protected/walled
+  // stone via isProtected, so allCaptures can never include one — every
+  // capture here is a real kill. `wounded` stays in the return shape,
+  // always empty, for the callers that still read it.
+  const kills = [...allCaptures];
+  // Rain of Arrows pierces every protection — the pick joins the kill list
   // unconditionally (its pool already excluded allCaptures).
   if (rainOfArrows?.targetTokenId != null) kills.push(rainOfArrows.targetTokenId);
+  const wounded: { tokenId: number; to: number }[] = [];
 
   let tokens = state.tokens.map((t) => {
     if (t.id === tokenId) return { ...t, position: to };
@@ -2547,66 +2599,27 @@ function resolveTurn(
     return t;
   });
 
-  // Wounded stones: the landing-tile victim staggers back (the mover now
-  // stands there); everyone else holds their ground. Resolved sequentially
-  // against the working board so a staggered stone blocks the next one's
-  // walk — corpse explosion's exact working-state discipline. Position
-  // comparison is safe as a plain numeric match: captures only ever happen
-  // on contested tiles, where both numberings name the same square.
-  const wounded: { tokenId: number; to: number }[] = [];
-  for (const id of woundIds) {
-    const pre = state.tokens.find((t) => t.id === id)!;
-    if (pre.position === to) {
-      const current = tokens.find((t) => t.id === id)!;
-      const retreat = staggerBackTile(tokens, current);
-      tokens = tokens.map((t) => (t.id === id ? { ...t, position: retreat } : t));
-      wounded.push({ tokenId: id, to: retreat });
-    } else {
-      wounded.push({ tokenId: id, to: pre.position });
-    }
-  }
-
-  // A captured token's Bulwark must clear too — Rain of Arrows deliberately
-  // ignores isBulwarked (see getRainOfArrowsTargets), so a Bulwarked token
-  // CAN be sent home by it. Without this, the stale bulwarked[id] entry
-  // survives the trip to reserve and grants free, un-recast protection the
-  // instant that token re-enters the board later. (applyBlinkStrike and
-  // applyWarpath — the other Bulwark-piercing capture paths — carry the
-  // same cleanup themselves.) Kills only: a wounded stone never left the
-  // board (and can't be Bulwarked anyway — different classes' own stones).
-  let bulwarked = power.bulwarked;
-  let bulwarkSaves = power.bulwarkSaves;
-  if (kills.some((id) => bulwarked[id] !== undefined)) {
-    bulwarked = { ...bulwarked };
-    bulwarkSaves = { ...bulwarkSaves };
-    for (const id of kills) {
-      delete bulwarked[id];
-      delete bulwarkSaves[id]; // reinforced or not, a reserve trip clears it all
-    }
-  }
-
-  let nextPower: PowerState = { ...power, bulwarked, bulwarkSaves };
+  let nextPower: PowerState = clearWallsOnReserveTrip(power, kills);
   // A captured thrall's possession entry falls with it — before income, so
-  // the accounting below reads a settled board. (Kills only by
-  // construction: a thrall can never be blessed — see PowerState.vitality.)
+  // the accounting below reads a settled board.
   nextPower = clearThrallIfCaptured(nextPower, kills);
-  // Vitality bookkeeping: the dead lose their entries, the wounded gain
-  // theirs.
-  nextPower = clearVitality(nextPower, kills);
   // A dead stone's curse lifts (reserve-trip hygiene); so does the mover's
   // own if THIS move carried the cursed stone off the board entirely — an
   // escape drags no chains, and a stale entry on position 15 would draw a
   // curse ring on an escaped token until expiry.
   nextPower = clearCurseOnCapture(nextPower, kills);
+  // A walled or Vanished stone that escapes takes its status off the board
+  // with it (2026-09-17 — the wall system's own reserve-trip-shaped gap: an
+  // escape is not a reserve trip, so clearWallsOnReserveTrip(kills) above
+  // never sees the MOVER's own stone). Without this a home escapee would
+  // keep bleeding its owner's mana forever with nothing left to protect.
+  if (to >= PATH_LENGTH_PER_PLAYER) {
+    nextPower = clearWallsOnReserveTrip(nextPower, [tokenId]);
+  }
   if (to >= PATH_LENGTH_PER_PLAYER && isCursed(nextPower, tokenId)) {
     nextPower = clearCurseOnCapture(nextPower, [tokenId]);
     nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
     nextPower = clearInspireOnCapture(nextPower, [tokenId]);
-  }
-  if (woundIds.length > 0) {
-    const vitality = { ...nextPower.vitality };
-    for (const id of woundIds) vitality[id] = "wounded";
-    nextPower = { ...nextPower, vitality };
   }
 
   // Income + corpse. QUALIFYING kills (real owner = the foe — reclaiming
@@ -2617,17 +2630,12 @@ function resolveTurn(
   // landing capture is its only kill shape and the freshest kill simply
   // overwrites). Everyone else — and a necromancer's non-qualifying
   // reclaim — keeps the classic one-charge-per-qualifying-move economy.
-  // A WOUND pays the attacker the STANDARD capture charge — the blow
-  // landed and broke something real — but never the necromancer's bounty
-  // and never a corpse (those are for kills; a surviving stone has no
-  // grave). This is a tuned line, not a principle drifted into: the first
-  // shipped rule ("wounds pay nothing to anyone") made breaking a
-  // blessing strictly worthless, so opponents rationally stopped
-  // attacking blessed stones — which made every blessed runner a
-  // guaranteed escape and the cleric won 66-81% of everything except the
-  // mage matchup even at BLESS_COST=2 (see that constant's trace). Paying
-  // the breaker restores the attacker's engine while the cleric still
-  // keeps the stone.
+  // (HISTORICAL: this line used to also pay a WOUND the standard capture
+  // charge, back when a Blessing survived a hit as a wound instead of
+  // blocking it outright — see BLESSING_CAP's doc for the 66-81% blowout
+  // that taught the lesson. Walls retired the wound split 2026-09-17; the
+  // lesson — a breaker must be paid something, or defenders stop
+  // attacking — is why walls bleed instead of being free.)
   const foe = otherPlayerId(mover);
   const soulKills =
     power.classes[mover] === "necromancer"
@@ -2646,7 +2654,7 @@ function resolveTurn(
     // CHARGE_CAP clamp makes it a no-op whenever the bounty already filled
     // the soul gem — the common case).
     if (landsOnShield) nextPower = addCharge(nextPower, mover);
-  } else if (kills.length > 0 || woundIds.length > 0 || landsOnShield) {
+  } else if (kills.length > 0 || landsOnShield) {
     nextPower = addCharge(nextPower, mover);
   }
   // Escape pays — see ESCAPE_CHARGES.
@@ -2654,25 +2662,16 @@ function resolveTurn(
     for (let i = 0; i < ESCAPE_CHARGES; i++) nextPower = addCharge(nextPower, mover);
   }
 
-  // Cleric's Sanctified Ground (passive): the mover's shield-tile landing
-  // mends EVERY wounded stone of theirs back to blessed. Own stones only
-  // (a cleric mirror has two vitality ledgers on the board); the wounds
-  // inflicted THIS resolution always belong to the opponent, so a landing
-  // can never mend what it just broke. Nerf lever if sims blow out: mend
-  // only the landing stone.
+  // Cleric's Sanctified Ground (passive, reworked 2026-09-17 for the wall
+  // system): the mover's shield-tile LANDING sustains the light — this
+  // turn's wall upkeep is waived (wallGrace). A stone parked ON a shield
+  // tile is already protected for free, so the wall would have nothing to
+  // do there; it is the landing that earns the grace, not standing still.
+  // Bounded by construction: only 3 shield tiles exist. The old mend
+  // (wounded -> blessed on a shield landing) retired with the wound split.
   const mendedTokenIds: number[] = [];
   if (power.classes[mover] === "cleric" && landsOnShield) {
-    for (const [idStr, v] of Object.entries(nextPower.vitality)) {
-      const id = Number(idStr);
-      if (v === "wounded" && state.tokens.find((t) => t.id === id)?.owner === mover) {
-        mendedTokenIds.push(id);
-      }
-    }
-    if (mendedTokenIds.length > 0) {
-      const vitality = { ...nextPower.vitality };
-      for (const id of mendedTokenIds) vitality[id] = "blessed";
-      nextPower = { ...nextPower, vitality };
-    }
+    nextPower = { ...nextPower, wallGrace: { ...nextPower.wallGrace, [mover]: 1 } };
   }
 
   // Rogue's Larceny (passive): every REAL kill (never a wound — see
@@ -2718,22 +2717,17 @@ function resolveTurn(
       const working: GameState = { ...state, tokens };
       const victim = tokens.find((t) => t.id === tokenId)!;
       if (isProtected(working, nextPower, victim)) return null;
+      // No wound split any more (2026-09-17): isProtected already excludes
+      // a Blessed/walled stone, so a knockback that reaches here is always
+      // a real send-home if it lands home at all.
       const landing = computeKnockbackLanding(working, nextPower, victim, distance);
-      // A blessing absorbs the send-home exactly as it does for Push: the
-      // stone is wounded and holds its ground.
-      if (landing === -1 && isBlessed(nextPower, tokenId)) {
-        nextPower = { ...nextPower, vitality: { ...nextPower.vitality, [tokenId]: "wounded" } };
-        wounded.push({ tokenId, to: victim.position });
-        return false;
-      }
       tokens = tokens.map((t) => (t.id === tokenId ? { ...t, position: landing } : t));
       if (landing === -1) {
         nextPower = clearThrallIfCaptured(nextPower, [tokenId]);
-        nextPower = clearVitality(nextPower, [tokenId]);
         nextPower = clearCurseOnCapture(nextPower, [tokenId]);
         nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
         nextPower = clearInspireOnCapture(nextPower, [tokenId]);
-        nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
+        nextPower = clearWallsOnReserveTrip(nextPower, [tokenId]);
         // The trap is the FOE's kill of the mover's stone: bargainable.
         ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe, "ranged"));
       }
@@ -2757,24 +2751,17 @@ function resolveTurn(
       const working: GameState = { ...state, tokens };
       const victim = tokens.find((t) => t.id === tokenId)!;
       if (!isProtected(working, nextPower, victim)) {
-        if (WOLF_CAPTURES && isBlessed(nextPower, tokenId)) {
-          // A blessing absorbs the wolf exactly as it absorbs any other
-          // kill: wounded, holds its ground, and the hunter still earns
-          // the standard capture charge for breaking it (resolveTurn's own
-          // tuned wounds-pay-the-breaker line).
-          nextPower = { ...nextPower, vitality: { ...nextPower.vitality, [tokenId]: "wounded" } };
-          wounded.push({ tokenId, to: victim.position });
-          nextPower = addCharge(nextPower, foe);
-          wolfBite = { tokenId, sentHome: false };
-        } else if (WOLF_CAPTURES) {
+        // No wound split any more (2026-09-17): isProtected already
+        // excludes a Blessed/walled stone, so the wolf always bites for
+        // real when WOLF_CAPTURES is on.
+        if (WOLF_CAPTURES) {
           const bitten = tokens;
           tokens = tokens.map((t) => (t.id === tokenId ? { ...t, position: -1 } : t));
           nextPower = clearThrallIfCaptured(nextPower, [tokenId]);
-          nextPower = clearVitality(nextPower, [tokenId]);
           nextPower = clearCurseOnCapture(nextPower, [tokenId]);
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
           nextPower = clearInspireOnCapture(nextPower, [tokenId]);
-          nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
+          nextPower = clearWallsOnReserveTrip(nextPower, [tokenId]);
           ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe, "ranged"));
           nextPower = addCharge(nextPower, foe); // the kill pays the hunter, like any capture
           wolfBite = { tokenId, sentHome: true };
@@ -2930,55 +2917,33 @@ function computePushLanding(state: GameState, power: PowerState, target: TokenSt
  *  PUSH_DISTANCE/PUSH_WARD_DISTANCE values (the two abilities' Ward-tiers are
  *  independently tunable, per Kasen's requested strict ordering). Used by
  *  both getChargedShotTargets's Bulwark-aware filter and applyChargedShot. */
+/** RETIRED tier collapsed 2026-09-17 — see pushDistance's identical note:
+ *  a Warded target never reaches this any more, so the shot always flies
+ *  CHARGED_SHOT_DISTANCE. */
 function computeChargedShotLanding(state: GameState, power: PowerState, target: TokenState): number {
-  const distance = isWarded(state, power, target) ? CHARGED_SHOT_WARD_DISTANCE : CHARGED_SHOT_DISTANCE;
-  return computeKnockbackLanding(state, power, target, distance);
+  void power;
+  return computeKnockbackLanding(state, power, target, CHARGED_SHOT_DISTANCE);
 }
 
 /** Archer's Push: valid targets are enemy tokens on a contested tile that
- *  aren't shield-blocked. A warded token is ALSO a valid
- *  target, but only if the Archer can afford PUSH_WARD_COST — baking
- *  affordability into the target list itself (rather than a separate
- *  legality branch at the call site) so the UI's target highlights and the
- *  server's legality check can never drift apart. Ends the turn — no token
- *  of the pusher's moves (see applyPush's history note for why granting an
- *  extra turn here was tried and reverted).
- *
- *  A plain-Bulwarked token is ALSO a valid target — Bulwark deliberately
- *  does NOT give full Push immunity, since Push usually just knocks a token
- *  back a few tiles while it stays on the board (a "soft" effect the game
- *  already allows against plain-Bulwarked tokens). Bulwark only blocks the
- *  cases where THIS SPECIFIC push would send the target all the way home
- *  (the same collision math computePushLanding/applyPush use) — a live
- *  per-target check, not a blanket exclusion, mirroring exactly how the
- *  isWarded filter above gates on affordability rather than excluding
- *  warded targets outright.
- *
- *  A REINFORCED Bulwark, though, shrugs off a plain Push entirely — not
- *  even the soft shove — so those targets are excluded outright (no
- *  charge-burning no-op trap; the target ring simply never appears).
- *  Charged Shot is the Archer tool that still moves one (2026-07-17,
- *  Kasen's fix list). A Rogue's VANISH (see isVanished) gets the same full
- *  Push-immunity as a Reinforced Bulwark — Push is the Archer's main answer
- *  to Rogue and Vanish is the Rogue's only shield, so a soft-shoveable Vanish
- *  left archer-vs-rogue structurally unwinnable (2026-07-25).
- *
- *  Refunds its charge (see applyPush) specifically when it sends the target
- *  all the way home to reserve — that outcome is functionally a capture
- *  (the token is off the board, back to square one), so it earns the same
- *  refund any other capturing action gets under the shared charge economy.
- *  A partial shove that leaves the target on the board is NOT a capture and
+ *  aren't protected — walls are absolute now (2026-09-17), so there is no
+ *  more per-target Ward-affordability tier and no more "soft push still
+ *  reaches a plain Bulwark" carve-out: a walled, Warded or Vanished stone
+ *  simply never appears in this pool, the same single isProtected check
+ *  every other targeted ability now uses. Ends the turn — no token of the
+ *  pusher's moves (see applyPush's history note for why granting an extra
+ *  turn here was tried and reverted). Refunds its charge (see applyPush)
+ *  specifically when it sends the target all the way home to reserve —
+ *  that outcome is functionally a capture — so it earns the same refund
+ *  any other capturing action gets under the shared charge economy. A
+ *  partial shove that leaves the target on the board is NOT a capture and
  *  never refunds. */
 export function getPushTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !onShieldTile(t))
-    .filter((t) => !isWarded(state, power, t) || power.charges[mover] >= PUSH_WARD_COST)
-    .filter((t) => !isBulwarkReinforced(power, t))
-    .filter((t) => !isVanished(power, t))
-    .filter((t) => !isBulwarked(power, t) || computePushLanding(state, power, t) !== -1)
+    .filter((t) => !isProtected(state, power, t))
     .map((t) => t.id);
 }
 
@@ -2989,44 +2954,25 @@ export function applyPush(
   mover: PlayerId,
 ): { state: GameState; power: PowerState; woundedTokenId: number | null } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
-  const cost = pushCost(state, power, target);
   const landing = computePushLanding(state, power, target);
-  // A send-home is functionally a capture — which is exactly what a
-  // BLESSING absorbs (the wound split, see resolveTurn's doc): the blessed
-  // target is wounded and HOLDS ITS GROUND instead of going home — the
-  // whole knockback is eaten, the stone doesn't move at all (there is no
-  // legal tile for it: the landing collided, and "home" is the outcome the
-  // blessing exists to deny). Breaking the blessing still REFUNDS the
-  // charge, same as the send-home would have (resolveTurn's tuned
-  // wounds-pay-the-breaker line: a worthless break made blessed stones
-  // untouchable and the cleric ran the table). A SOFT shove (landing on a
-  // real tile) displaces a blessed target normally, blessing intact: the
-  // second life guards against death, not against being moved.
-  const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
-  const sendsHome = landing === -1 && !woundsInstead; // functionally a capture — refund below
+  // A send-home is functionally a capture — refunded below. No wound split
+  // any more (2026-09-17): a Blessed/walled target is excluded from
+  // getPushTargets outright, so it never reaches this code at all —
+  // `woundedTokenId` stays in the return shape (the wire, the client)
+  // always null.
+  const sendsHome = landing === -1;
 
-  let tokens = woundsInstead
-    ? state.tokens
-    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
+  let tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
+    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
   };
-  if (woundsInstead) {
-    spentPower = addCharge(
-      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
-      mover,
-    );
-  }
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
     // A pushed-home THRALL dies for real (incl. the below-row crumble in
-    // computeKnockbackLanding) — its possession entry falls with it. A
-    // WOUNDED stone's vitality entry dies with it too (reserve-trip
-    // hygiene, same as Bulwark's). Ditto a cursed one's chains, and the
-    // Blood Pact pays a warlock victim for the loss.
+    // computeKnockbackLanding) — its possession entry falls with it. Ditto
+    // a cursed one's chains, and the Blood Pact/Dark Bargain economy.
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
-    spentPower = clearVitality(spentPower, [targetTokenId]);
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
@@ -3052,49 +2998,29 @@ export function applyPush(
   return {
     state: nextState,
     power: resetTurnFlags(spentPower),
-    woundedTokenId: woundsInstead ? targetTokenId : null,
+    woundedTokenId: null,
   };
 }
 
-/** Archer's Charged Shot: same target pool shape as Push (contested-zone
- *  enemy, shield-tile/Bulwark-vs-would-this-specific-shot-
- *  send-home protections all mirrored exactly), but with TWO deliberate
- *  differences from getPushTargets:
- *
- *  A REINFORCED Bulwark does NOT exclude a target here the way it does for
- *  a plain Push — Charged Shot is precisely the tool that still moves a
- *  reinforced-Bulwarked stone (soft knockback only; the send-home immunity
- *  every Bulwark grants still applies via the landing filter below). And:
- *
- *  Gated on `power.charges[mover] === CHARGE_CAP` right here in the pure
- *  target-getter, unlike getPushTargets/getBulwarkTargets (whose baseline
- *  "at least 1 charge" gate is dispatch-layer/UI-only). Charged Shot's
- *  affordability isn't per-target the way PUSH_WARD_COST is (some targets
- *  cost more than others) — it's a single uniform "has the mover banked
- *  the full cap at all" check, identical for every target, so baking it
- *  in here means the server dispatch, the bot, and the client's target
- *  highlights can never drift on it independently — an empty pool below
- *  the cap is the whole answer, everywhere this is called.
- *
- *  A Warded token IS a legal target (changed 2026-07-16 — see
- *  CHARGED_SHOT_WARD_DISTANCE's doc): previously excluded outright with no
- *  affordability escape hatch, same as a shield tile. Now Ward only
- *  determines WHICH distance applies (CHARGED_SHOT_WARD_DISTANCE vs
- *  CHARGED_SHOT_DISTANCE, both handled inside computeChargedShotLanding),
- *  not whether the shot is legal at all.
- *
- *  The Bulwark filter uses computeChargedShotLanding — THIS ability's own
- *  distance/collision math — not computePushLanding's, so a Bulwarked token
- *  is excluded here only if Charged Shot's OWN distance (Ward-aware) would
- *  send it home, independent of whether a normal Push would. */
+/** Archer's Charged Shot: same target pool shape as Push — an enemy in
+ *  shared water that isn't protected (2026-09-17: walls are absolute now,
+ *  so the old Bulwark-vs-would-this-shot-send-home carve-out and the Ward
+ *  distance tier both retired; a single isProtected check does the whole
+ *  job). Gated on `power.charges[mover] === CHARGE_CAP` right here in the
+ *  pure target-getter, unlike getPushTargets/getBulwarkTargets (whose
+ *  baseline "at least 1 charge" gate is dispatch-layer/UI-only) — Charged
+ *  Shot's affordability is a single uniform "has the mover banked the full
+ *  cap at all" check, identical for every target, so baking it in here
+ *  means the server dispatch, the bot, and the client's target highlights
+ *  can never drift on it independently — an empty pool below the cap is
+ *  the whole answer, everywhere this is called. */
 export function getChargedShotTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < CHARGED_SHOT_COST) return [];
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !onShieldTile(t))
-    .filter((t) => !isBulwarked(power, t) || computeChargedShotLanding(state, power, t) !== -1)
+    .filter((t) => !isProtected(state, power, t))
     .map((t) => t.id);
 }
 
@@ -3115,30 +3041,19 @@ export function applyChargedShot(
 ): { state: GameState; power: PowerState; woundedTokenId: number | null } {
   const target = state.tokens.find((t) => t.id === targetTokenId)!;
   const landing = computeChargedShotLanding(state, power, target);
-  // Same blessing-absorbs-the-send-home rule as applyPush (see its doc),
-  // including the breaker's refund — the shot broke something real.
-  const woundsInstead = landing === -1 && isBlessed(power, targetTokenId);
-  const sendsHome = landing === -1 && !woundsInstead; // functionally a capture — refund below
+  // No wound split any more (2026-09-17) — see applyPush's identical note.
+  const sendsHome = landing === -1;
 
-  let tokens = woundsInstead
-    ? state.tokens
-    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
+  let tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
   let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - CHARGED_SHOT_COST },
   };
-  if (woundsInstead) {
-    spentPower = addCharge(
-      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
-      mover,
-    );
-  }
   if (sendsHome) {
     spentPower = addCharge(spentPower, mover);
     // Same thrall-death rule as Push's — see clearThrallIfCaptured. And
-    // the same vitality/curse reserve-trip hygiene + Blood Pact payout.
+    // the same curse reserve-trip hygiene + Blood Pact/Dark Bargain payout.
     spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
-    spentPower = clearVitality(spentPower, [targetTokenId]);
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
@@ -3155,7 +3070,7 @@ export function applyChargedShot(
   return {
     state: nextState,
     power: resetTurnFlags(spentPower),
-    woundedTokenId: woundsInstead ? targetTokenId : null,
+    woundedTokenId: null,
   };
 }
 
@@ -3201,21 +3116,24 @@ export function getWarpathTargets(state: GameState, power: PowerState, mover: Pl
   return getRainOfArrowsTargets(state, power, mover);
 }
 
-/** Shared by the ultimate capture paths (Blink Strike/Warpath): drop the
- *  bulwarked/bulwarkSaves entries of every captured token, so a pierced
- *  Bulwark can't ride along to reserve and come back as free, un-recast
- *  protection — the exact leak resolveTurn already guards against for
- *  Rain of Arrows. No-op (same reference back) when nothing captured was
- *  Bulwarked. */
-function clearCapturedBulwarks(power: PowerState, capturedIds: number[]): PowerState {
-  if (!capturedIds.some((id) => power.bulwarked[id] !== undefined)) return power;
-  const bulwarked = { ...power.bulwarked };
-  const bulwarkSaves = { ...power.bulwarkSaves };
+/** Every REAL kill (or escape) clears the dead/departed token's wall AND
+ *  Vanish entries (2026-09-17: replaces clearCapturedBulwarks +
+ *  clearVitality in one call — a walled stone can only ever leave the
+ *  board via an ultimate, since a wall blocks everything else, but the
+ *  hygiene has to hold structurally, not just by the current cast list).
+ *  Same call-site discipline as before: any path that sends a token home
+ *  for good, or off the board via an escape, must run this. No-op (same
+ *  reference back) when nothing in the list carried either entry. */
+function clearWallsOnReserveTrip(power: PowerState, capturedIds: number[]): PowerState {
+  const hit = capturedIds.some((id) => power.walls[id] !== undefined || power.vanished[id] !== undefined);
+  if (!hit) return power;
+  const walls = { ...power.walls };
+  const vanished = { ...power.vanished };
   for (const id of capturedIds) {
-    delete bulwarked[id];
-    delete bulwarkSaves[id];
+    delete walls[id];
+    delete vanished[id];
   }
-  return { ...power, bulwarked, bulwarkSaves };
+  return { ...power, walls, vanished };
 }
 
 /** Mage's Blink Strike: instantly relocates the mover's most-advanced
@@ -3239,7 +3157,7 @@ export function applyBlinkStrike(
     if (t.id === targetTokenId) return { ...t, position: -1 };
     return t;
   });
-  let nextPower: PowerState = clearCapturedBulwarks(
+  let nextPower: PowerState = clearWallsOnReserveTrip(
     {
       ...power,
       ultimateReady: { ...power.ultimateReady, [mover]: false },
@@ -3251,7 +3169,6 @@ export function applyBlinkStrike(
   // (the wound split is resolveTurn's, for mortal weapons), and the dead
   // token's vitality entry clears with it. Curse hygiene + Blood Pact,
   // the same every-kill-path pair.
-  nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
   nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
   nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
@@ -3317,7 +3234,7 @@ export function applyWarpath(
     return t;
   });
 
-  let nextPower: PowerState = clearCapturedBulwarks(
+  let nextPower: PowerState = clearWallsOnReserveTrip(
     {
       ...power,
       ultimateReady: { ...power.ultimateReady, [mover]: false },
@@ -3328,7 +3245,6 @@ export function applyWarpath(
   // Warpath pierces the blessing on everything it touches, primary and
   // swept alike — full kills, entries cleared (same rule as Blink Strike).
   // Curse hygiene + Blood Pact, the same every-kill-path pair.
-  nextPower = clearVitality(nextPower, allCaptures);
   nextPower = clearCurseOnCapture(nextPower, allCaptures);
   nextPower = clearHamstringOnCapture(nextPower, allCaptures);
   nextPower = clearInspireOnCapture(nextPower, allCaptures);
@@ -3345,69 +3261,54 @@ export function applyWarpath(
 
 // ============================================================================
 // WARRIOR'S BULWARK — a second charge-spend active for Warrior (alongside
-// Charge). The mover taps ONE OF THEIR OWN on-board tokens to flag it
-// Bulwarked: full immunity to a normal capture or a Charge sweep (folded
-// into isProtected/isBulwarked, so every existing capture-legality check
-// above already respects it for free), and immunity to a Push that would
-// send it home specifically (see getPushTargets) — but NOT to a soft,
-// on-board Push knockback, which is deliberately still allowed (a
-// REINFORCED Bulwark blocks even that — plain Push can't touch it at all),
-// and NOT to any ultimate: Rain of Arrows, Blink Strike, and Warpath all
-// punch straight through Bulwark (2026-07-17, Kasen's fix list). This is
-// the one power action that targets the MOVER'S OWN token instead of an
-// enemy's or having no target at all.
+// Charge). The mover taps ONE OF THEIR OWN on-board tokens to raise a wall
+// on it: full immunity to a normal capture, a Charge sweep or a Push
+// (folded into isProtected/isWalled, so every existing capture-legality
+// check above already respects it for free), and NOT to any ultimate —
+// Rain of Arrows, Blink Strike, and Warpath all punch straight through a
+// wall, the roster convention. This is the one power action that targets
+// the MOVER'S OWN token instead of an enemy's or having no target at all.
+// A wall is not free (2026-09-17): it bleeds wallUpkeepFor(power, mover)
+// every one of the owner's turns (tickWallUpkeepForNewTurn) and falls the
+// moment they can't pay it — no countdown, no save-count, no consumption
+// by blocking a capture any more.
 // ============================================================================
 
 /** Warrior's Bulwark: valid targets are the mover's own on-board tokens
- *  that aren't already Bulwarked — no point re-flagging one that's already
- *  protected, so it's excluded from the target list entirely. */
+ *  that aren't already walled and CAN hold one at all (canHoldWall — the
+ *  Barbarian's glass-cannon rule; moot here since only a Warrior ever
+ *  reaches this pool, but the guard is uniform across every wall-granting
+ *  pool). No point re-flagging an already-walled stone, so it's excluded
+ *  from the target list entirely. */
 export function getBulwarkTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   // Effective ownership: a warrior's token possessed against them is not
   // theirs to shield (and shielding the enemy's weapon would be absurd).
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
-    .filter((t) => !isBulwarked(power, t))
+    .filter((t) => !isWalled(power, t) && canHoldWall(power, t))
     .map((t) => t.id);
 }
 
-/** Warrior's Bulwark: spends a charge to flag one of the mover's own
- *  on-board tokens Bulwarked for BULWARK_TURNS of the mover's own turns
- *  (see tickBulwarkExpiry), or until it's consumed by actually blocking a
- *  capture (see getBulwarkBlockedIds/consumeBulwarkBlocks), whichever comes
- *  first. No board movement at all — never lands the mover on a shield, so
- *  (like Push) it always breaks any live shield streak and always ends the
- *  turn, no extra-turn interaction. Doesn't grant a charge back — it
- *  doesn't capture anything itself.
- *
- *  REINFORCED (the second-charge cast, chosen by simulation — see
- *  BULWARK_REINFORCED_TURNS): `reinforced` spends the full bank
- *  (CHARGE_CAP) on one Bulwark that lasts BULWARK_REINFORCED_TURNS of the
- *  caster's own turns and absorbs BULWARK_REINFORCED_SAVES blocks before
- *  fading — everything about the plain cast, doubled. Like every other
- *  pure apply* here, this doesn't self-guard on affordability; the caller
- *  (validateUsePower / the bot's charges gate) already verified it. */
+/** Warrior's Bulwark: spends a charge to raise a wall on one of the
+ *  mover's own on-board tokens (see WALL_BLEED for what it costs to keep
+ *  up, tickWallUpkeepForNewTurn for the tick that charges it). No board
+ *  movement at all — never lands the mover on a shield, so (like Push) it
+ *  always breaks any live shield streak and always ends the turn, no
+ *  extra-turn interaction. Doesn't grant a charge back — it doesn't
+ *  capture anything itself. (The reinforced second-charge tier retired
+ *  2026-09-13, before the wall rework; see BULWARK_REINFORCED_RETIRED.)
+ *  Like every other pure apply* here, this doesn't self-guard on
+ *  affordability; the caller already verified it. */
 export function applyBulwark(
   state: GameState,
   power: PowerState,
   targetTokenId: number,
   mover: PlayerId,
-  reinforced = false,
 ): { state: GameState; power: PowerState } {
-  const bulwarked = { ...power.bulwarked };
-  const bulwarkSaves = { ...power.bulwarkSaves };
-  let cost = 1;
-  if (reinforced) {
-    cost = BULWARK_REINFORCED_COST;
-    bulwarked[targetTokenId] = BULWARK_REINFORCED_TURNS;
-    bulwarkSaves[targetTokenId] = BULWARK_REINFORCED_SAVES;
-  } else {
-    bulwarked[targetTokenId] = BULWARK_TURNS;
-  }
   const spent: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - cost },
-    bulwarked,
-    bulwarkSaves,
+    charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
+    walls: { ...power.walls, [targetTokenId]: "bulwark" },
   };
   const broken = breakShieldStreak(spent, mover); // Bulwark never lands the mover on a shield
   const nextState: GameState = {
@@ -3420,69 +3321,37 @@ export function applyBulwark(
   return { state: nextState, power: resetTurnFlags(broken) };
 }
 
-/** Ticks down the countdown on every token `mover` currently has
- *  Bulwarked — one of THEIR OWN turns has just started. Any counter that
- *  reaches 0 expires (cleared) automatically — the "don't get free
- *  permanent insurance from a single cast" guard BULWARK_TURNS exists for.
- *  Call once per fresh flip dealt to `mover` at the START of a brand-new
- *  turn (see tickBulwarkForNewTurn) — NOT on a Re-flip's replacement roll,
- *  which is still the same turn and must not double-decrement. */
-export function tickBulwarkExpiry(state: GameState, power: PowerState, mover: PlayerId): PowerState {
-  const mine = Object.keys(power.bulwarked)
-    .map(Number)
-    .filter((id) => state.tokens.find((t) => t.id === id)?.owner === mover);
-  if (mine.length === 0) return power;
-  const bulwarked = { ...power.bulwarked };
-  const bulwarkSaves = { ...power.bulwarkSaves };
-  for (const id of mine) {
-    const remaining = bulwarked[id] - 1;
-    if (remaining <= 0) {
-      delete bulwarked[id];
-      delete bulwarkSaves[id]; // an expiring reinforced Bulwark takes its unused save with it
-    } else {
-      bulwarked[id] = remaining;
-    }
-  }
-  return { ...power, bulwarked, bulwarkSaves };
-}
-
-/** Ids of the CURRENT mover's opponent's Bulwarked tokens that Bulwark
- *  ACTUALLY blocked THIS flip — would have been captured by a normal move
- *  (including Snipe) or a Charge sweep (only if the mover can actually
- *  afford Charge this turn), had Bulwark not protected them. Ultimates are
- *  deliberately NOT considered: they pierce Bulwark outright (2026-07-17),
- *  so a Bulwark never "blocks" one and must never spend a save on one.
- *
- *  Push/Charged Shot send-home immunity is a STATIC property, NOT a block
- *  (CHANGED 2026-07-20 — Kasen's field report): the protected target
- *  simply never enters those pools (getPushTargets/getChargedShotTargets'
- *  own filters), the same rule the doc always applied to a reinforced
- *  cast's plain-Push immunity. The old reveal-time accounting counted
- *  those exclusions as consuming blocks, which let a full-bank archer
- *  MELT a Reinforced Bulwark by merely standing in send-home range: one
- *  save burned per archer flip, no shot ever fired, the two-save shield
- *  dead in two turns while the archer kept both charges — plus a phantom
- *  "Blocked!" announcement each time with nothing visible happening.
- *  Saves now spend only on threats a move could actually execute.
+/** Ids of the CURRENT mover's opponent's walled or Vanished tokens that
+ *  their protection ACTUALLY blocked THIS flip — would have been captured
+ *  by a normal move (including Snipe), a Charge sweep, or Push (only if
+ *  the mover can actually afford it this turn), had the protection not
+ *  been there. Ultimates are deliberately NOT considered: they pierce a
+ *  wall outright, so a wall never "blocks" one. ANNOUNCEMENT ONLY
+ *  (2026-09-17): a wall no longer expires or gets consumed by blocking —
+ *  it falls only when its owner can't pay wallUpkeepFor it
+ *  (tickWallUpkeepForNewTurn) — so this function is now a pure read with
+ *  no state to mutate; it exists purely to tell the client "that would
+ *  have connected."
  *
  *  Computed by diffing the real move lists against the SAME lists with
- *  every Bulwark switched off, rather than reimplementing any capture
- *  legality here — so this can never drift from the rules enforced above
- *  (isProtected/isBulwarked). A token surfacing as a NEW capture once
- *  Bulwark is switched off, that isn't in the real (Bulwark-respecting)
- *  result, means Bulwark was the thing blocking it. */
+ *  every wall and Vanish switched off, rather than reimplementing any
+ *  capture legality here — so this can never drift from the rules
+ *  enforced above (isProtected/isWalled/isVanished). A token surfacing as
+ *  a NEW capture once they're switched off, that isn't in the real
+ *  (protection-respecting) result, means the wall or Vanish was the thing
+ *  blocking it. */
 export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: number): number[] {
-  if (Object.keys(power.bulwarked).length === 0) return [];
+  if (Object.keys(power.walls).length === 0 && Object.keys(power.vanished).length === 0) return [];
   const mover = state.currentPlayer;
-  const unbulwarked: PowerState = { ...power, bulwarked: {} };
+  const unprotectedPower: PowerState = { ...power, walls: {}, vanished: {} };
   const blocked = new Set<number>();
 
   const realMoves = getLegalPowerMoves(state, power, flip);
-  const openMoves = getLegalPowerMoves(state, unbulwarked, flip);
+  const openMoves = getLegalPowerMoves(state, unprotectedPower, flip);
   for (const om of openMoves) {
     // Charge's sweep is only a live threat if the mover could actually
     // afford AND use it this turn — otherwise the sweep numbers are
-    // precomputed-but-unusable, and Bulwark isn't "blocking" anything real.
+    // precomputed-but-unusable, and nothing is "blocking" anything real.
     const canCharge = power.charges[mover] >= 1 && om.chargeAvailable;
     const openCaptures = [...om.captures, ...om.bonusCaptures, ...(canCharge ? om.chargeSweepCaptures : [])];
     if (openCaptures.length === 0) continue;
@@ -3491,62 +3360,40 @@ export function getBulwarkBlockedIds(state: GameState, power: PowerState, flip: 
       ? [...rm.captures, ...rm.bonusCaptures, ...(canCharge ? rm.chargeSweepCaptures : [])]
       : [];
     for (const id of openCaptures) {
-      if (power.bulwarked[id] !== undefined && !realCaptures.includes(id)) blocked.add(id);
+      if ((power.walls[id] !== undefined || power.vanished[id] !== undefined) && !realCaptures.includes(id)) {
+        blocked.add(id);
+      }
     }
   }
 
   return [...blocked];
 }
 
-/** Consumes Bulwark on every token id that just did its job — see
- *  getBulwarkBlockedIds. A plain Bulwark (no bulwarkSaves entry — treated
- *  as 1 block) is cleared outright, exactly as before; a REINFORCED one
- *  spends a save instead and stays up until its last save is gone. No-op
- *  (same reference back) if nothing blocked. */
-export function consumeBulwarkBlocks(power: PowerState, blockedIds: number[]): PowerState {
-  if (blockedIds.length === 0) return power;
-  const bulwarked = { ...power.bulwarked };
-  const bulwarkSaves = { ...power.bulwarkSaves };
-  for (const id of blockedIds) {
-    const saves = bulwarkSaves[id] ?? 1;
-    if (saves > 1) {
-      bulwarkSaves[id] = saves - 1; // survives this save — the reinforcement's whole point
-    } else {
-      delete bulwarked[id];
-      delete bulwarkSaves[id];
-    }
-  }
-  return { ...power, bulwarked, bulwarkSaves };
-}
-
-/** Bulwark bookkeeping for the START of a brand-new turn (a fresh flip
- *  dealt to state.currentPlayer, NOT a Re-flip): ticks the CURRENT mover's
- *  own Bulwark countdowns, then consumes any of the opponent's Bulwarks
- *  this exact flip's moves reveal as blocked. Returns the blocked ids too
- *  (empty if none) so callers can announce a block, same idea as
- *  lastRainOfArrows/lastUltimate. Call this once, right after computing
- *  this turn's real move/target lists, from both referee.ts and api/ws.ts
- *  so the two servers can't drift on Bulwark's lifecycle. */
+/** Wall/Vanish block bookkeeping for the START of a brand-new turn (a
+ *  fresh flip dealt to state.currentPlayer, NOT a Re-flip). No mutation
+ *  any more (2026-09-17 — see getBulwarkBlockedIds): `power` passes
+ *  through unchanged; only `blockedIds` is real, for the "Blocked!"
+ *  announcement (same idea as lastRainOfArrows/lastUltimate). Call this
+ *  once, right after tickWallUpkeepForNewTurn and move-list computation,
+ *  from every place that commits a fresh turn, so the servers can't drift
+ *  on it. */
 export function tickBulwarkForNewTurn(
   state: GameState,
   power: PowerState,
   flip: number,
 ): { power: PowerState; blockedIds: number[] } {
-  const ticked = tickBulwarkExpiry(state, power, state.currentPlayer);
-  const blocked = getBulwarkBlockedIds(state, ticked, flip);
-  return { power: blocked.length > 0 ? consumeBulwarkBlocks(ticked, blocked) : ticked, blockedIds: blocked };
+  return { power, blockedIds: getBulwarkBlockedIds(state, power, flip) };
 }
 
-/** Bulwark bookkeeping for a Re-flip's replacement roll — same turn, no
- *  expiry tick (that already ran once when the turn started), but the new
- *  flip can reveal a fresh Bulwark block that the original flip didn't. */
+/** Same announcement, for a Re-flip's replacement roll — a fresh flip can
+ *  reveal a block the original one didn't. No mutation, same as
+ *  tickBulwarkForNewTurn. */
 export function tickBulwarkForReflip(
   state: GameState,
   power: PowerState,
   flip: number,
 ): { power: PowerState; blockedIds: number[] } {
-  const blocked = getBulwarkBlockedIds(state, power, flip);
-  return { power: blocked.length > 0 ? consumeBulwarkBlocks(power, blocked) : power, blockedIds: blocked };
+  return { power, blockedIds: getBulwarkBlockedIds(state, power, flip) };
 }
 
 // ============================================================================
@@ -3701,12 +3548,9 @@ export function applyCorpseExplosion(
   const woundedTokenIds: number[] = [];
   let working: GameState = state;
   for (const victim of victims) {
-    // Lethal: every unprotected body in the radius goes home. A blessing
-    // absorbs it exactly as it absorbs any other kill — wounded in place.
-    if (isBlessed(power, victim.id)) {
-      woundedTokenIds.push(victim.id);
-      continue;
-    }
+    // Lethal: every body in the radius goes home. No wound split any more
+    // (2026-09-17) — a blessed/walled body is excluded from
+    // getCorpseExplosionTargets outright, so it never reaches this loop.
     sentHomeIds.push(victim.id);
     tokens = working.tokens.map((t) => (t.id === victim.id ? { ...t, position: -1 } : t));
     working = { ...working, tokens };
@@ -3718,14 +3562,8 @@ export function applyCorpseExplosion(
     corpse: { ...power.corpse, [mover]: null },
     grave: { ...power.grave, [mover]: null },
   };
-  if (woundedTokenIds.length > 0) {
-    const vitality = { ...nextPower.vitality };
-    for (const id of woundedTokenIds) vitality[id] = "wounded";
-    nextPower = { ...nextPower, vitality };
-  }
   nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
-  nextPower = clearCapturedBulwarks(nextPower, sentHomeIds); // unreachable while Bulwark blocks the blast, but a reserve trip must never carry protection — same guard as every send-home path
-  nextPower = clearVitality(nextPower, sentHomeIds); // a WOUNDED (unblessed) victim sent home loses its entry — reserve-trip hygiene
+  nextPower = clearWallsOnReserveTrip(nextPower, sentHomeIds); // unreachable while a wall blocks the blast, but a reserve trip must never carry protection — same guard as every send-home path
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
   nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
@@ -3803,66 +3641,68 @@ export function getExhumeTargets(state: GameState, power: PowerState, mover: Pla
 }
 
 // ============================================================================
-// CLERIC (added 2026-07-21 — Kasen's spec: "increase maximum hp to 2 and
-// heal them"). The class that refuses to trade. Passive: SANCTIFIED GROUND —
-// the cleric's own shield-tile landings mend every wounded stone of theirs
-// back to blessed (resolveTurn). Actives: BLESS (BLESS_COST = the full
-// bank) grants one stone the blessing — a second life; the first capture
-// that would kill it wounds it instead, denies the attacker every scrap of
-// the kill's economy, and at worst staggers the stone back a tile (see
-// resolveTurn's wound split, the one rule threaded through every capture
-// path). HEAL (HEAL_COST) mends a wounded stone back to blessed at a
-// discount. Ultimate: BENEDICTION — bless the whole on-board army at once.
-// Ultimates PIERCE the blessing (Rain of Arrows/Blink Strike/Warpath kill
-// through it); everything mortal wounds. The class's persistent footprint
-// is PowerState.vitality.
+// CLERIC (added 2026-07-21; RE-THEMED 2026-09-17 for the wall system —
+// Kasen's original spec was "increase maximum hp to 2 and heal them," and
+// the class kept that shape until Blessing joined the wall system). The
+// class that refuses to trade. Passive: SANCTIFIED GROUND — a shield-tile
+// landing waives the cleric's own wall upkeep for a turn (resolveTurn's
+// wallGrace grant; the old mend-wounded-to-blessed retired with the wound
+// split). Actives: BLESS (BLESS_COST, keeps the turn) raises a wall on one
+// stone — uncapturable except by an ultimate, same as a Warrior's Bulwark,
+// and it bleeds the same WALL_BLEED (Hold the Line's discount is
+// Warrior-only). VIGIL (VIGIL_COST, ends the turn, was HEAL) waives ALL of
+// the cleric's walls' upkeep for one turn — worthless with a single wall,
+// the reason to hold two or more. Ultimate: BENEDICTION — wall the whole
+// on-board army at once, with a turn of grace so the fresh walls don't
+// collapse the instant they're cast. Ultimates still pierce every wall.
 // ============================================================================
 
-/** How many of `mover`'s own stones currently carry a LIVE blessing —
- *  the BLESSING_CAP gate shared by Bless's and Heal's pools. Wounded
- *  entries don't count (the light there is broken); ownership is real
- *  ownership (vitality only ever marks the cleric's own stones, but the
- *  filter keeps a mirror's two ledgers separate). */
+/** How many of `mover`'s own stones currently carry a LIVE wall —
+ *  BLESSING_CAP's gate on Bless's pool (VIGIL_COST no longer cares —
+ *  waiving upkeep never adds a wall). Ownership is real ownership (walls
+ *  only ever mark the cleric's own stones for a Blessing, but the filter
+ *  keeps a mirror's two ledgers separate). */
 function liveBlessings(state: GameState, power: PowerState, mover: PlayerId): number {
-  return Object.entries(power.vitality).filter(
-    ([id, v]) => v === "blessed" && state.tokens.find((t) => t.id === Number(id))?.owner === mover,
+  return Object.entries(power.walls).filter(
+    ([id, kind]) => kind === "blessing" && state.tokens.find((t) => t.id === Number(id))?.owner === mover,
   ).length;
 }
 
-/** Cleric's Bless: valid targets are the cleric's own on-board stones with
- *  no vitality entry at all — not already blessed (nothing to add) and not
- *  wounded (that's Heal's job; keeping the two pools disjoint keeps the
- *  dock's two gems unambiguous). Affordability AND the BLESSING_CAP are
- *  baked in (Charged Shot's precedent — uniform checks, identical for
- *  every target), so an empty pool is the whole legality answer
- *  everywhere: server validation, bot, dock gate. Effective ownership: a
- *  stone possessed against the cleric is not theirs to bless (and
- *  blessing the enemy's weapon would be absurd — getBulwarkTargets's
- *  rule). Private-lane stones are eligible, same as Bulwark's pool:
- *  blessing a stone that can't be attacked is legal-but-wasteful, the
- *  bot's problem, not the rulebook's. */
+/** Cleric's Bless: valid targets are the cleric's own on-board stones that
+ *  aren't already walled and CAN hold one (canHoldWall — moot here, only a
+ *  Cleric ever reaches this pool, but uniform across every wall-granting
+ *  pool). Affordability AND the BLESSING_CAP are baked in (Charged Shot's
+ *  precedent — uniform checks, identical for every target), so an empty
+ *  pool is the whole legality answer everywhere: server validation, bot,
+ *  dock gate. Effective ownership: a stone possessed against the cleric is
+ *  not theirs to bless (and blessing the enemy's weapon would be absurd —
+ *  getBulwarkTargets's rule). Private-lane stones are eligible, same as
+ *  Bulwark's pool: blessing a stone that can't be attacked is
+ *  legal-but-wasteful, the bot's problem, not the rulebook's. */
 export function getBlessTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < BLESS_COST) return [];
   if (liveBlessings(state, power, mover) >= BLESSING_CAP) return [];
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
-    .filter((t) => power.vitality[t.id] === undefined)
+    .filter((t) => !isWalled(power, t) && canHoldWall(power, t))
     .map((t) => t.id);
 }
 
-/** Cleric's Bless: spends BLESS_COST to flag one own stone blessed. Does
- *  NOT end the turn — Revive's exact contract: the caller keeps the SAME
- *  flip and recomputes legal moves (the board itself is untouched — only
- *  a flag changed — but the recompute keeps the contract uniform), so the
- *  cleric blesses AND still marches. That turn-keeping is load-bearing
- *  balance, not a nicety: as a turn-ending cast the class lost 72.9/27.1
- *  to archer and 75.7/24.3 to mage at 1200/matchup even with BLESS_COST=1
- *  — a whole turn per cast against classes that spend none was the
- *  structural hole (the mana price is real; the tempo price was fatal).
- *  Like Revive: no resetTurnFlags, no streak interaction (a blessing is a
- *  prayer, not a landing — the streak lives or dies by the move that
- *  follows), no charge grant, and no affordability self-guard (the caller
- *  already consulted getBlessTargets). At most CHARGE_CAP casts can fund
+/** Cleric's Bless: spends BLESS_COST to raise a wall on one own stone
+ *  (kind "blessing" — uncapturable except by an ultimate, and it bleeds
+ *  WALL_BLEED like any wall). Does NOT end the turn — Revive's exact
+ *  contract: the caller keeps the SAME flip and recomputes legal moves
+ *  (the board itself is untouched — only a flag changed — but the
+ *  recompute keeps the contract uniform), so the cleric blesses AND still
+ *  marches. That turn-keeping is load-bearing balance, not a nicety: as a
+ *  turn-ending cast the class lost 72.9/27.1 to archer and 75.7/24.3 to
+ *  mage at 1200/matchup even with BLESS_COST=1 — a whole turn per cast
+ *  against classes that spend none was the structural hole (the mana
+ *  price is real; the tempo price was fatal). Like Revive: no
+ *  resetTurnFlags, no streak interaction (a blessing is a prayer, not a
+ *  landing — the streak lives or dies by the move that follows), no
+ *  charge grant, and no affordability self-guard (the caller already
+ *  consulted getBlessTargets). At most CHARGE_CAP casts can fund
  *  themselves in one turn, so the act-then-redecide loop is bounded by
  *  the bank exactly like Re-flip's is. */
 export function applyBless(
@@ -3874,41 +3714,39 @@ export function applyBless(
   const spent: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - BLESS_COST },
-    vitality: { ...power.vitality, [targetTokenId]: "blessed" },
+    walls: { ...power.walls, [targetTokenId]: "blessing" },
   };
   return { state, power: spent };
 }
 
-/** Cleric's Heal: valid targets are the cleric's own WOUNDED stones —
- *  vitality bookkeeping guarantees they're on-board (entries clear on
- *  every kill), but the position filter stays as defensive hygiene.
- *  Affordability and the BLESSING_CAP baked in, same as Bless (a mend
- *  re-lights a blessing, so it counts against the same finite light). */
-export function getHealTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (power.charges[mover] < HEAL_COST) return [];
-  if (liveBlessings(state, power, mover) >= BLESSING_CAP) return [];
-  return state.tokens
-    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
-    .filter((t) => power.vitality[t.id] === "wounded")
-    .map((t) => t.id);
+/** Cleric's Vigil (2026-09-17, replaces Heal under the wall rework): no
+ *  target — it waives upkeep for every wall the mover already holds, not
+ *  one stone specifically (the whole point is a multi-wall tool). Legal
+ *  only when the mover can afford it AND holds at least one wall — a
+ *  vigil over nothing is a misclick, Corpse Explosion's precedent. */
+export function canCastVigil(state: GameState, power: PowerState, mover: PlayerId): boolean {
+  if (power.charges[mover] < VIGIL_COST) return false;
+  return state.tokens.some((t) => t.owner === mover && power.walls[t.id] !== undefined);
 }
 
-/** Cleric's Heal: mend one wounded stone back to blessed at HEAL_COST.
- *  ENDS the turn — Bulwark's exact shape (no board movement, never lands
- *  on a shield, so it breaks any live streak) — deliberately NOT Bless's
- *  turn-keeping contract: see HEAL_COST's doc for the both-directions
- *  overshoot trace that pinned the tempo price on the mend, not the
- *  prayer. */
-export function applyHeal(
+/** Cleric's Vigil: spends VIGIL_COST to bank one turn of wall-upkeep grace
+ *  (consumed by tickWallUpkeepForNewTurn, front wall first, same order as
+ *  payment). ENDS the turn — Bulwark's exact shape (no board movement,
+ *  never lands on a shield, so it breaks any live streak) — deliberately
+ *  NOT Bless's turn-keeping contract, the same tempo-price discipline
+ *  HEAL_COST's old doc recorded (a turn-keeping mend/vigil let the class
+ *  farm blessings for free; ending the turn is what makes the trade real).
+ *  Worthless with a single wall (pay VIGIL_COST to skip one wall's
+ *  cheaper upkeep is a losing trade) — the tool is for two or more. */
+export function applyVigil(
   state: GameState,
   power: PowerState,
-  targetTokenId: number,
   mover: PlayerId,
 ): { state: GameState; power: PowerState } {
   const spent: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - HEAL_COST },
-    vitality: { ...power.vitality, [targetTokenId]: "blessed" },
+    charges: { ...power.charges, [mover]: power.charges[mover] - VIGIL_COST },
+    wallGrace: { ...power.wallGrace, [mover]: (power.wallGrace[mover] ?? 0) + 1 },
   };
   const broken = breakShieldStreak(spent, mover);
   const nextState: GameState = {
@@ -3922,36 +3760,43 @@ export function applyHeal(
 }
 
 /** Cleric's Benediction ultimate: the ids the cast would actually CHANGE —
- *  every own on-board stone that isn't already blessed (mortal and
- *  wounded alike). Empty pool = not castable (a benediction that blesses
- *  no one is a misclick, not a choice — Corpse Explosion's precedent).
+ *  every own on-board stone that isn't already walled (canHoldWall guard,
+ *  moot here). Empty pool = not castable (a benediction that walls no one
+ *  is a misclick, not a choice — Corpse Explosion's precedent).
  *  ultimateReady gating stays at the dispatch layer, same as Blink
  *  Strike/Warpath/Exhume. */
 export function getBenedictionTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
-    .filter((t) => power.vitality[t.id] !== "blessed")
+    .filter((t) => !isWalled(power, t) && canHoldWall(power, t))
     .map((t) => t.id);
 }
 
-/** Cleric's Benediction: spends the banked ultimateReady flag to bless the
- *  whole on-board army at once (getBenedictionTargets' pool). Ends the
- *  turn with no extra-turn interaction and — unlike the charge-spend
- *  actives — leaves the shield streak alone, exactly matching its Blink
- *  Strike/Warpath/Exhume siblings. Grants nothing (no capture). Returns
- *  the blessed ids so the server can announce the cast without
- *  re-deriving the pool. */
+/** Cleric's Benediction: spends the banked ultimateReady flag to wall the
+ *  whole on-board army at once (getBenedictionTargets' pool), with a turn
+ *  of grace so the fresh walls don't collapse to the very next upkeep tick
+ *  (2026-09-17 — an ultimate's privilege, consistent with "ultimates
+ *  ignore walls" cutting both ways: they also ignore the price of raising
+ *  one). Ends the turn with no extra-turn interaction and — unlike the
+ *  charge-spend actives — leaves the shield streak alone, exactly matching
+ *  its Blink Strike/Warpath/Exhume siblings. Grants nothing (no capture).
+ *  Returns the walled ids so the server can announce the cast without
+ *  re-deriving the pool. FLAG: mechanically this is Warrior's Shield Wall
+ *  twin (wall the army + a turn of free upkeep) — the difference is
+ *  Vigil/Sanctified Ground synergy vs Hold the Line's discount. If the
+ *  table can't tell them apart, that is a second ticket, not a bug here. */
 export function applyBenediction(
   state: GameState,
   power: PowerState,
   mover: PlayerId,
 ): { state: GameState; power: PowerState; blessedTokenIds: number[] } {
   const blessedTokenIds = getBenedictionTargets(state, power, mover);
-  const vitality = { ...power.vitality };
-  for (const id of blessedTokenIds) vitality[id] = "blessed";
+  const walls = { ...power.walls };
+  for (const id of blessedTokenIds) walls[id] = "blessing";
   const nextPower: PowerState = {
     ...power,
-    vitality,
+    walls,
+    wallGrace: { ...power.wallGrace, [mover]: (power.wallGrace[mover] ?? 0) + 1 },
     ultimateReady: { ...power.ultimateReady, [mover]: false },
   };
   const nextState: GameState = {
@@ -3978,11 +3823,12 @@ export function applyBenediction(
  *  ultimateReady (never a charge), grants nothing (no capture happened),
  *  ends the turn with no extra-turn interaction, and leaves the shield
  *  streak alone — all exactly matching its Blink Strike/Warpath siblings.
- *  Strips any stale bulwarked/bulwarkSaves entry the token carried off the
- *  board so it can't ride back as free un-recast protection (same leak
- *  resolveTurn already guards against for captured tokens). Returns
- *  `returnedTo` so the server can announce/animate the landing tile
- *  without re-deriving the walk client-side. */
+ *  Strips any stale wall the token carried off the board (an escaped
+ *  stone's wall is cleared on the way out — see resolveTurn's escape
+ *  branch — but this stays as the same belt-and-suspenders every
+ *  ultimate-capture path carries) so it can't ride back as free un-recast
+ *  protection. Returns `returnedTo` so the server can announce/animate
+ *  the landing tile without re-deriving the walk client-side. */
 export function applyExhume(
   state: GameState,
   power: PowerState,
@@ -4001,18 +3847,8 @@ export function applyExhume(
   }
 
   const tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: landing } : t));
-  let bulwarked = power.bulwarked;
-  let bulwarkSaves = power.bulwarkSaves;
-  if (bulwarked[targetTokenId] !== undefined) {
-    bulwarked = { ...bulwarked };
-    bulwarkSaves = { ...bulwarkSaves };
-    delete bulwarked[targetTokenId];
-    delete bulwarkSaves[targetTokenId];
-  }
   const nextPower: PowerState = {
-    ...power,
-    bulwarked,
-    bulwarkSaves,
+    ...clearWallsOnReserveTrip(power, [targetTokenId]),
     ultimateReady: { ...power.ultimateReady, [mover]: false },
   };
   const nextState: GameState = {
@@ -4089,48 +3925,42 @@ export function applyPickpocket(power: PowerState, mover: PlayerId): PowerState 
 }
 
 /** Rogue's Vanish: valid targets are the mover's own on-board tokens that
- *  aren't already protected — identical target shape to getBulwarkTargets
- *  (see VANISH_COST's doc for why this reuses Bulwark's mechanic wholesale
- *  rather than reimplementing it). No afford check here either, matching
- *  Bulwark's own established convention — the caller gates on charges
- *  (see every getBulwarkTargets call site). */
+ *  aren't already hidden — no afford check here, matching Bulwark's own
+ *  established convention — the caller gates on charges. */
 export function getVanishTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
-    .filter((t) => !isBulwarked(power, t))
+    .filter((t) => !isVanished(power, t))
     .map((t) => t.id);
 }
 
-/** Rogue's Vanish: spends VANISH_COST to flag one of the mover's own
- *  on-board tokens with the SAME protection Warrior's Bulwark grants (see
- *  VANISH_COST's doc) for VANISH_TURNS of the mover's own turns, or until
- *  it's consumed by actually blocking a capture (getBulwarkBlockedIds/
- *  consumeBulwarkBlocks — both already class-agnostic), whichever comes
- *  first. No board movement at all, so — exactly like Bulwark — it always
- *  breaks any live shield streak and always ends the turn; doesn't grant a
- *  charge back, since it doesn't capture anything itself. */
-/** Rogue's Backstab: valid targets are enemy stones in shared water, minus
- *  shield-tile occupants and Bulwarked/Vanished ones (both fully block it,
- *  same as every other non-ultimate strike) — Ward is deliberately never
- *  checked here at all, "pierced" by simple omission. Affordability baked
- *  in. */
+/** Rogue's Vanish: spends VANISH_COST to hide one of the mover's own
+ *  on-board tokens for VANISH_TURNS of the mover's own turns (own map since
+ *  2026-09-17 — see PowerState.vanished; a fixed-duration dodge, not a
+ *  paid wall). No board movement at all, so it always breaks any live
+ *  shield streak and always ends the turn; doesn't grant a charge back,
+ *  since it doesn't capture anything itself. */
+/** Rogue's Backstab: valid targets are enemy stones in shared water that
+ *  aren't protected — walls are absolute now (2026-09-17), so the old
+ *  "Ward pierced by simple omission" carve-out is gone: a single
+ *  isProtected check blocks it same as every other non-ultimate strike.
+ *  Affordability baked in. */
 export function getBackstabTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < BACKSTAB_COST) return [];
   return getRainOfArrowsTargets(state, power, mover).filter((id) => {
     const t = state.tokens.find((tok) => tok.id === id)!;
-    return !onShieldTile(t) && !isBulwarked(power, t);
+    return !isProtected(state, power, t);
   });
 }
 
 /** Rogue's Backstab: spends BACKSTAB_COST for a guaranteed hit — no
- *  distance/collision math (a direct strike, not a shove), so it resolves
- *  as either a WOUND (blessed target — the Cleric's split, as Push/Charged
- *  Shot honor it; still pays the breaker's standard charge) or a real
- *  kill. A real kill does NOT refund (an unconditional hit that also
- *  refunded was a net -1-mana always-available kill and blew out the
- *  first balance pass) but carries every reserve-trip hygiene a capture
- *  does and triggers Larceny's drain on top. The mover never moves, so it
- *  never lands on a shield: breaks any live streak. */
+ *  distance/collision math (a direct strike, not a shove), a real kill
+ *  every time (2026-09-17: no more wound split — a Blessed/walled target
+ *  is excluded from the pool outright). Does NOT refund (an unconditional
+ *  hit that also refunded was a net -1-mana always-available kill and blew
+ *  out the first balance pass) but carries every reserve-trip hygiene a
+ *  capture does and triggers Larceny's drain on top. The mover never
+ *  moves, so it never lands on a shield: breaks any live streak. */
 export function applyBackstab(
   state: GameState,
   power: PowerState,
@@ -4138,39 +3968,28 @@ export function applyBackstab(
   mover: PlayerId,
 ): { state: GameState; power: PowerState; woundedTokenId: number | null } {
   const foe = otherPlayerId(mover);
-  const woundsInstead = isBlessed(power, targetTokenId);
-  let tokens = woundsInstead
-    ? state.tokens
-    : state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
+  let tokens = state.tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
 
   let spentPower: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - BACKSTAB_COST },
   };
-  if (woundsInstead) {
-    spentPower = addCharge(
-      { ...spentPower, vitality: { ...spentPower.vitality, [targetTokenId]: "wounded" } },
-      mover,
-    );
-  } else {
-    spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
-    spentPower = clearCapturedBulwarks(spentPower, [targetTokenId]);
-    spentPower = clearVitality(spentPower, [targetTokenId]);
-    spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
-    spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
-    spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    // Larceny: a real kill drains the victim's bank (never a wound).
-    spentPower = {
-      ...spentPower,
-      charges: {
-        ...spentPower.charges,
-        [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE),
-      },
-    };
-    // Then the victim's own Dark Bargain, in Larceny's shadow (the ordering
-    // BLOOD_PACT_CHARGES's doc fixes for every kill).
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
-  }
+  spentPower = clearThrallIfCaptured(spentPower, [targetTokenId]);
+  spentPower = clearWallsOnReserveTrip(spentPower, [targetTokenId]);
+  spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
+  spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
+  spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
+  // Larceny: a real kill drains the victim's bank.
+  spentPower = {
+    ...spentPower,
+    charges: {
+      ...spentPower.charges,
+      [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE),
+    },
+  };
+  // Then the victim's own Dark Bargain, in Larceny's shadow (the ordering
+  // BLOOD_PACT_CHARGES's doc fixes for every kill).
+  ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState: GameState = {
     tokens,
@@ -4182,7 +4001,7 @@ export function applyBackstab(
   return {
     state: nextState,
     power: resetTurnFlags(spentPower),
-    woundedTokenId: woundsInstead ? targetTokenId : null,
+    woundedTokenId: null,
   };
 }
 
@@ -4195,7 +4014,7 @@ export function applyVanish(
   const spent: PowerState = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - VANISH_COST },
-    bulwarked: { ...power.bulwarked, [targetTokenId]: VANISH_TURNS },
+    vanished: { ...power.vanished, [targetTokenId]: VANISH_TURNS },
   };
   const broken = breakShieldStreak(spent, mover);
   const nextState: GameState = {
@@ -4240,12 +4059,11 @@ export function applyGrandHeist(
     if (t.id === targetTokenId) return { ...t, position: -1 };
     return t;
   });
-  let nextPower: PowerState = clearCapturedBulwarks(
+  let nextPower: PowerState = clearWallsOnReserveTrip(
     { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } },
     [targetTokenId],
   );
   nextPower = clearThrallIfCaptured(nextPower, [targetTokenId]);
-  nextPower = clearVitality(nextPower, [targetTokenId]);
   nextPower = clearCurseOnCapture(nextPower, [targetTokenId]);
   nextPower = clearHamstringOnCapture(nextPower, [targetTokenId]);
   nextPower = clearInspireOnCapture(nextPower, [targetTokenId]);
@@ -4344,13 +4162,14 @@ export function tickCurseForNewTurn(
   };
 }
 
-/** Warlock's Sacrifice: valid targets are enemy stones in shared water,
- *  INCLUDING Warded and Blessed ones (the pierce is the point — see
- *  SACRIFICE_COST) but never a shield-tile squatter, a Bulwarked stone, or
- *  a Vanished one (isBulwarked covers Vanish too — same underlying map).
- *  Empty when the warlock has no on-board stone to give (the ritual needs
- *  blood — findMostAdvancedToken's null, Blink Strike's shape) or can't
- *  afford the cast (baked in, Charged Shot's uniform-cost convention). */
+/** Warlock's Sacrifice: valid targets are enemy stones in shared water that
+ *  aren't protected — walls are absolute now (2026-09-17), so the ritual
+ *  LOST its Ward-and-Blessing pierce along with every other bespoke
+ *  breaker (a real identity loss for this cast; flagged, not fixed here —
+ *  the sim decides whether it needs a new lever). Empty when the warlock
+ *  has no on-board stone to give (the ritual needs blood —
+ *  findMostAdvancedToken's null, Blink Strike's shape) or can't afford the
+ *  cast (baked in, Charged Shot's uniform-cost convention). */
 export function getSacrificeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < SACRIFICE_COST) return [];
   if (!findMostAdvancedToken(state, power, mover)) return [];
@@ -4358,16 +4177,16 @@ export function getSacrificeTargets(state: GameState, power: PowerState, mover: 
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !onShieldTile(t))
-    .filter((t) => !isBulwarked(power, t))
+    .filter((t) => !isProtected(state, power, t))
     .map((t) => t.id);
 }
 
 /** Warlock's Sacrifice: sends the mover's own MOST-ADVANCED on-board stone
- *  home and kills the target outright — through Ward and a Blessing (a
- *  FULL kill, never a wound; the blessing's entry clears like any ultimate
- *  kill's). The kill banks no capture charge (desecrate economy — see
- *  SACRIFICE_COST), and Blood Pact deliberately does NOT pay for the stone
+ *  home and kills the target outright — a guaranteed kill at range on
+ *  whatever unprotected stone the ritual reaches (2026-09-17: no longer a
+ *  pierce, since the target pool already excludes every protection). The
+ *  kill banks no capture charge (desecrate economy — see SACRIFICE_COST),
+ *  and Blood Pact deliberately does NOT pay for the stone
  *  the warlock spends itself (see below). Ends the turn, breaks the shield
  *  streak. Returns the sacrificed stone's id so the server can announce
  *  both deaths.
@@ -4408,13 +4227,12 @@ export function applySacrifice(
   };
   // The full kill-path hygiene set: the target could be a thrall (a mercy
   // kill of the mover's own possessed stone — effectiveOwner made it an
-  // enemy) or blessed or cursed; the sacrificed stone could itself be
-  // cursed. Bulwark hygiene is a structural no-op (neither stone can carry
-  // one — the pool excludes Bulwarked targets and a warlock's own stones
-  // are never Bulwark/Vanish-eligible) but stays for uniform discipline.
-  nextPower = clearCapturedBulwarks(nextPower, killed);
+  // enemy) or cursed; the sacrificed stone could itself be cursed. Wall
+  // hygiene is a structural no-op (neither stone can carry one — the pool
+  // excludes every protected target and a warlock's own stones are never
+  // wall-eligible) but stays for uniform discipline.
+  nextPower = clearWallsOnReserveTrip(nextPower, killed);
   nextPower = clearThrallIfCaptured(nextPower, killed);
-  nextPower = clearVitality(nextPower, killed);
   nextPower = clearCurseOnCapture(nextPower, killed);
   nextPower = clearHamstringOnCapture(nextPower, killed);
   nextPower = clearInspireOnCapture(nextPower, killed);
@@ -4514,8 +4332,7 @@ export function applyFelStorm(
     ultimateReady: { ...power.ultimateReady, [mover]: false },
   };
   nextPower = clearThrallIfCaptured(nextPower, sentHomeIds);
-  nextPower = clearCapturedBulwarks(nextPower, sentHomeIds);
-  nextPower = clearVitality(nextPower, sentHomeIds);
+  nextPower = clearWallsOnReserveTrip(nextPower, sentHomeIds);
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
   nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
@@ -4684,10 +4501,10 @@ export function getPiercingShotTargets(state: GameState, power: PowerState, move
 }
 
 /** Hunter's Piercing Shot: spends the full bank; the arrow kills the stone
- *  piercingShotVictim picked. A real kill (not a knockback), so a BLESSED
- *  victim is wounded instead — a mortal weapon, not an ultimate. Grants the
- *  standard capture charge either way (resolveTurn's tuned
- *  wounds-pay-the-breaker line). No stone of the hunter's moves: ends the
+ *  piercingShotVictim picked — always a real kill now (2026-09-17: a
+ *  Blessed/walled victim is excluded by piercingShotVictim's own
+ *  isProtected check, so it never reaches this function at all). Grants
+ *  the standard capture charge. No stone of the hunter's moves: ends the
  *  turn and breaks the shield streak, Push's precedent exactly. */
 export function applyPiercingShot(
   state: GameState,
@@ -4701,22 +4518,15 @@ export function applyPiercingShot(
   };
   let tokens = state.tokens;
   let killedTokenId: number | null = null;
-  let woundedTokenId: number | null = null;
   if (victim) {
-    if (isBlessed(next, victim.id)) {
-      next = { ...next, vitality: { ...next.vitality, [victim.id]: "wounded" } };
-      woundedTokenId = victim.id;
-    } else {
-      tokens = tokens.map((t) => (t.id === victim.id ? { ...t, position: -1 } : t));
-      next = clearCapturedBulwarks(next, [victim.id]);
-      next = clearThrallIfCaptured(next, [victim.id]);
-      next = clearVitality(next, [victim.id]);
-      next = clearCurseOnCapture(next, [victim.id]);
-      next = clearHamstringOnCapture(next, [victim.id]);
-      next = clearInspireOnCapture(next, [victim.id]);
-      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover, "ranged"));
-      killedTokenId = victim.id;
-    }
+    tokens = tokens.map((t) => (t.id === victim.id ? { ...t, position: -1 } : t));
+    next = clearWallsOnReserveTrip(next, [victim.id]);
+    next = clearThrallIfCaptured(next, [victim.id]);
+    next = clearCurseOnCapture(next, [victim.id]);
+    next = clearHamstringOnCapture(next, [victim.id]);
+    next = clearInspireOnCapture(next, [victim.id]);
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover, "ranged"));
+    killedTokenId = victim.id;
     next = addCharge(next, mover);
   }
   next = breakShieldStreak(next, mover);
@@ -4730,7 +4540,7 @@ export function applyPiercingShot(
     },
     power: resetTurnFlags(next),
     killedTokenId,
-    woundedTokenId,
+    woundedTokenId: null,
   };
 }
 
@@ -4804,9 +4614,8 @@ export function applyWildHunt(
     next = { ...next, hamstrung };
   }
   if (quarry) {
-    next = clearCapturedBulwarks(next, [quarry.id]);
+    next = clearWallsOnReserveTrip(next, [quarry.id]);
     next = clearThrallIfCaptured(next, [quarry.id]);
-    next = clearVitality(next, [quarry.id]);
     next = clearCurseOnCapture(next, [quarry.id]);
     next = clearHamstringOnCapture(next, [quarry.id]);
     next = clearInspireOnCapture(next, [quarry.id]);
@@ -4857,28 +4666,30 @@ function recklessSwinger(state: GameState, power: PowerState, mover: PlayerId, v
 
 /** Barbarian's Reckless Swing: valid targets are enemy stones in shared
  *  water with one of the barbarian's own stones directly behind them.
- *  PIERCES Bulwark and Vanish (the physical half — see
- *  RECKLESS_SWING_COST); a Ward and a shield tile still stop it, and a
- *  Blessing still absorbs it as a wound, this being a mortal weapon.
- *  Affordability baked in, Charged Shot's uniform-cost convention. */
+ *  Walls are absolute now (2026-09-17): the swing LOST its Bulwark/Vanish
+ *  pierce along with every other bespoke breaker (the physical half of the
+ *  old defence-piercing split — a real identity loss, flagged, not fixed
+ *  here). A single isProtected check blocks it, same as every other
+ *  non-ultimate strike. Affordability baked in. */
 export function getRecklessSwingTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < RECKLESS_SWING_COST) return [];
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
-    .filter((t) => !onShieldTile(t))
-    .filter((t) => !isWarded(state, power, t))
+    .filter((t) => !isProtected(state, power, t))
     .filter((t) => recklessSwinger(state, power, mover, t) !== null)
     .map((t) => t.id);
 }
 
-/** Barbarian's Reckless Swing: the stone behind the victim kills it —
- *  through a Bulwark or a Vanish — and is thrown RECKLESS_SELF_KNOCKBACK
- *  tiles back along its own path for the effort, standard collision math,
- *  so a blocked recoil sends the swinger home too. Grants the usual capture
- *  charge. Ends the turn and breaks the shield streak (Push's precedent).
- *  Returns both halves so the server can announce the trade honestly. */
+/** Barbarian's Reckless Swing: the stone behind the victim kills it — a
+ *  real kill every time now (2026-09-17: no more wound split, the target
+ *  pool already excludes every protection) — and is thrown
+ *  RECKLESS_SELF_KNOCKBACK tiles back along its own path for the effort,
+ *  standard collision math, so a blocked recoil sends the swinger home
+ *  too. Grants the usual capture charge. Ends the turn and breaks the
+ *  shield streak (Push's precedent). Returns both halves so the server
+ *  can announce the trade honestly. */
 export function applyRecklessSwing(
   state: GameState,
   power: PowerState,
@@ -4899,25 +4710,16 @@ export function applyRecklessSwing(
     charges: { ...power.charges, [mover]: power.charges[mover] - RECKLESS_SWING_COST },
   };
   let tokens = state.tokens;
-  let killedTokenId: number | null = null;
-  let woundedTokenId: number | null = null;
 
-  if (isBlessed(next, targetTokenId)) {
-    // A mortal weapon: the blessing breaks and the stone holds its ground.
-    next = { ...next, vitality: { ...next.vitality, [targetTokenId]: "wounded" } };
-    woundedTokenId = targetTokenId;
-  } else {
-    tokens = tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
-    next = clearCapturedBulwarks(next, [targetTokenId]);
-    next = clearThrallIfCaptured(next, [targetTokenId]);
-    next = clearVitality(next, [targetTokenId]);
-    next = clearCurseOnCapture(next, [targetTokenId]);
-    next = clearHamstringOnCapture(next, [targetTokenId]);
-    next = clearInspireOnCapture(next, [targetTokenId]);
-    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover, "ranged"));
-    killedTokenId = targetTokenId;
-  }
-  next = addCharge(next, mover); // the blow landed, wound or kill
+  tokens = tokens.map((t) => (t.id === targetTokenId ? { ...t, position: -1 } : t));
+  next = clearWallsOnReserveTrip(next, [targetTokenId]);
+  next = clearThrallIfCaptured(next, [targetTokenId]);
+  next = clearCurseOnCapture(next, [targetTokenId]);
+  next = clearHamstringOnCapture(next, [targetTokenId]);
+  next = clearInspireOnCapture(next, [targetTokenId]);
+  ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover, "ranged"));
+  const killedTokenId: number | null = targetTokenId;
+  next = addCharge(next, mover); // the blow landed
 
   // The recoil, resolved against the post-kill board so the swinger can
   // fall back into the tile it just emptied.
@@ -4928,11 +4730,10 @@ export function applyRecklessSwing(
   const swingerSentHome = landing === -1;
   if (swingerSentHome) {
     next = clearThrallIfCaptured(next, [swinger.id]);
-    next = clearVitality(next, [swinger.id]);
     next = clearCurseOnCapture(next, [swinger.id]);
     next = clearHamstringOnCapture(next, [swinger.id]);
     next = clearInspireOnCapture(next, [swinger.id]);
-    next = clearCapturedBulwarks(next, [swinger.id]);
+    next = clearWallsOnReserveTrip(next, [swinger.id]);
   }
 
   next = breakShieldStreak(next, mover);
@@ -4947,7 +4748,7 @@ export function applyRecklessSwing(
     power: resetTurnFlags(next),
     swingerTokenId: swinger.id,
     killedTokenId,
-    woundedTokenId,
+    woundedTokenId: null,
     swingerSentHome,
   };
 }
@@ -5005,19 +4806,15 @@ export function applyWhirlwind(
   const capturedTokenIds: number[] = [];
   const woundedTokenIds: number[] = [];
 
+  // No wound split any more (2026-09-17): getWhirlwindTargets already
+  // excludes every protected stone, so every victim below is a real kill.
   for (const v of toCapture) {
-    if (isBlessed(next, v.id)) {
-      next = { ...next, vitality: { ...next.vitality, [v.id]: "wounded" } };
-      woundedTokenIds.push(v.id);
-      continue;
-    }
     tokens = tokens.map((t) => (t.id === v.id ? { ...t, position: -1 } : t));
     capturedTokenIds.push(v.id);
   }
   if (capturedTokenIds.length > 0) {
-    next = clearCapturedBulwarks(next, capturedTokenIds);
+    next = clearWallsOnReserveTrip(next, capturedTokenIds);
     next = clearThrallIfCaptured(next, capturedTokenIds);
-    next = clearVitality(next, capturedTokenIds);
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
     next = clearInspireOnCapture(next, capturedTokenIds);
@@ -5032,21 +4829,15 @@ export function applyWhirlwind(
     const working: GameState = { ...state, tokens };
     const current = tokens.find((t) => t.id === v.id)!;
     const landing = computeKnockbackLanding(working, next, current, 1);
-    if (landing === -1 && isBlessed(next, v.id)) {
-      next = { ...next, vitality: { ...next.vitality, [v.id]: "wounded" } };
-      woundedTokenIds.push(v.id);
-      continue;
-    }
     tokens = tokens.map((t) => (t.id === v.id ? { ...t, position: landing } : t));
     knockedTokenIds.push(v.id);
     if (landing === -1) {
       sentHomeIds.push(v.id);
       next = clearThrallIfCaptured(next, [v.id]);
-      next = clearVitality(next, [v.id]);
       next = clearCurseOnCapture(next, [v.id]);
       next = clearHamstringOnCapture(next, [v.id]);
       next = clearInspireOnCapture(next, [v.id]);
-      next = clearCapturedBulwarks(next, [v.id]);
+      next = clearWallsOnReserveTrip(next, [v.id]);
       ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover, "ranged"));
     }
   }
@@ -5119,9 +4910,8 @@ export function applyBloodbath(
 
   let next: PowerState = { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } };
   if (killedTokenIds.length > 0) {
-    next = clearCapturedBulwarks(next, killedTokenIds);
+    next = clearWallsOnReserveTrip(next, killedTokenIds);
     next = clearThrallIfCaptured(next, killedTokenIds);
-    next = clearVitality(next, killedTokenIds);
     next = clearCurseOnCapture(next, killedTokenIds);
     next = clearHamstringOnCapture(next, killedTokenIds);
     next = clearInspireOnCapture(next, killedTokenIds);
@@ -5285,19 +5075,12 @@ function advanceStones(
     const enemy = occupants.find((t) => effectiveOwner(next, t) !== mover);
     if (enemy && isProtected(state, next, enemy)) continue; // armour blocks the advance
     if (enemy) {
-      if (isBlessed(next, enemy.id)) {
-        // A mortal advance: the blessing breaks and the stone holds, so the
-        // singer cannot take the tile — it stays put, having spent its step.
-        next = { ...next, vitality: { ...next.vitality, [enemy.id]: "wounded" } };
-        next = addCharge(next, mover);
-        woundedIds.push(enemy.id);
-        continue;
-      }
+      // No wound split any more (2026-09-17): a Blessed/walled enemy is
+      // already caught by isProtected above, so this is always a real kill.
       const trampled = tokens;
       tokens = tokens.map((t) => (t.id === enemy.id ? { ...t, position: -1 } : t));
-      next = clearCapturedBulwarks(next, [enemy.id]);
+      next = clearWallsOnReserveTrip(next, [enemy.id]);
       next = clearThrallIfCaptured(next, [enemy.id]);
-      next = clearVitality(next, [enemy.id]);
       next = clearCurseOnCapture(next, [enemy.id]);
       next = clearHamstringOnCapture(next, [enemy.id]);
       next = clearInspireOnCapture(next, [enemy.id]);
