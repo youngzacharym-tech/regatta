@@ -2237,7 +2237,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bulwark",
     cost: "1 mana",
     klass: "warrior",
-    desc: "Wall one of your own stones: nothing short of an ultimate can capture, sweep, push, or otherwise touch it. Holding it costs mana every one of your own turns — let the bill go unpaid and the wall falls on its own. Hold the Line shaves a little off what your own wall costs you to keep.",
+    desc: "Wall one of your own stones: nothing short of an ultimate can capture, sweep, push, or otherwise touch it. Holding it costs mana every one of your own turns — let the bill go unpaid and the wall falls on its own. Hold the Line waives that very first bill for free.",
   },
   blinkStrike: {
     name: "Blink Strike",
@@ -2273,7 +2273,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Hold the Line",
     cost: "Passive · always on",
     klass: "warrior",
-    desc: "A wall you raise yourself is cheaper for you to keep standing than it is for anyone else — the front holds longest, and you're built to pay for it.",
+    desc: "Every Bulwark you raise banks a free turn of wall-upkeep grace — the very first bill on your walls costs nothing.",
   },
   revive: {
     name: "Revive",
@@ -6225,9 +6225,9 @@ const GUIDE_SPREADS: [string, string][] = [
   [
     `<h2>The Warrior</h2>
      <ul>
-       <li><b>Hold the Line</b> (passive, free): a wall you raise yourself
-       costs you less mana to keep standing than it would cost anyone
-       else — you're built to hold the front.</li>
+       <li><b>Hold the Line</b> (passive, free): every Bulwark you cast
+       banks a free turn of wall-upkeep grace — the front holds its very
+       first bill for nothing.</li>
        <li><b>Charge</b> (active, 1 mana): make your move a sweep — one
        unprotected enemy stone in shared water between where you started
        and where you land is captured too.</li>
@@ -6626,7 +6626,7 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
     items: [
       "<b>Bulwark and Blessing are one rule now.</b> A walled stone — the Warrior's Bulwark, the Cleric's Blessing — cannot be captured, swept, pushed, or otherwise touched by anything short of an ultimate. No countdown, no saves, no wounds: a wall simply holds.",
       "<b>But holding one costs you.</b> A wall bleeds its owner mana every one of their own turns. Let the bill go unpaid and it falls on its own — a wall that outlives its threat is a wall you can't afford to keep.",
-      "<b>Ward Breaker is retired.</b> The Warrior's new passive is <b>Hold the Line</b>: a wall you raise yourself costs you less to hold than it costs anyone else. Nothing below an ultimate pierces a Ward, a wall, or a Vanish any more — not a Warrior's step, not a thrall's blade, not a Cleric's own strike, not a Warlock's Sacrifice.",
+      "<b>Ward Breaker is retired.</b> The Warrior's new passive is <b>Hold the Line</b>: every Bulwark you cast banks a free turn of wall-upkeep grace, waiving that first bill outright. Nothing below an ultimate pierces a Ward, a wall, or a Vanish any more — not a Warrior's step, not a thrall's blade, not a Cleric's own strike, not a Warlock's Sacrifice.",
       "<b>Vanish stands on its own.</b> The Rogue's dodge is no longer a cut-rate wall — it's a fixed two-turn vanishing act, costing no mana to hold, immune to everything short of an ultimate.",
       "<b>Heal is retired. Vigil takes its place.</b> No target — it waives your NEXT wall-upkeep bill for your whole army at once, front stone first. Worthless with a single wall up; built for when you're juggling two or more.",
       "<b>Sanctified Ground keeps the lights on, not the bandages.</b> A shield-tile landing now waives your next wall bill instead of mending old wounds.",

@@ -57,33 +57,67 @@ export const CHARGE_CAP = 4;
  *  (see BLESSING_CAP's doc), where breaking a blessing paid the attacker
  *  nothing and every blessed runner became a guaranteed escape. WALL_BLEED
  *  must stay > 0; WALL_BLEED_MIN is the floor even Hold the Line's
- *  discount can't cross. Sim-tuned in Sweep 1 (see this constant's
- *  eventual trace) — the economy is wet (escapes pay 1, captures pay,
- *  zero-flips pay, shield landings pay), so the real question is drain
- *  rate MINUS income rate, not this number in isolation. */
-export const WALL_BLEED = 2;
+ *  discount can't cross.
+ *
+ *  SWEEP 1 (2026-09-17, 1000 games/matchup, HOLD_THE_LINE_DISCOUNT=0
+ *  throughout): {1, 2, 3} tested. wallLife (turns a warrior-mirror wall
+ *  survives its own upkeep) fell sharply, not linearly — 3.88 / 1.14 /
+ *  0.67 — meaning bleed=2 already leaves a wall barely surviving its own
+ *  first bill; 3 just kills it faster without changing the dynamic. Both
+ *  the Warrior's and the Cleric's average win% across their 9 non-mirror
+ *  matchups landed CLOSEST to 50 at bleed=1 (Warrior 50.7/49.0/48.1,
+ *  Cleric 38.7/36.2/35.3 for 1/2/3 — Cleric never gets close to 50 at any
+ *  bleed, the wound-economy loss dominates, exactly the risk this
+ *  constant's guardrail note above expects — but 1 is the least-bad
+ *  floor). Bar violations (excluding the pre-existing archer-vs-warlock
+ *  outlier) were fewest at bleed=1 too: only archer-vs-cleric (33.2%);
+ *  bleed=2 added cleric-vs-rogue/warlock; bleed=3 added cleric-vs-hunter
+ *  and pushed archer-vs-cleric to 28%. avgTurns held flat across all
+ *  three (~100-103, warrior mirror) — no turtling risk from the lower
+ *  price. Shipped 1. Known consequence: WALL_BLEED_MIN also = 1, so
+ *  Hold the Line's discount is now INERT (floored before it can ever
+ *  apply) — Sweep 2 reinterprets the passive as a waived first upkeep
+ *  instead of a per-payment discount, the fallback this note's earlier
+ *  draft already flagged. */
+export const WALL_BLEED = 1;
 /** The floor no discount (Hold the Line) can push WALL_BLEED below — see
  *  WALL_BLEED's guardrail. */
 export const WALL_BLEED_MIN = 1;
-/** Warrior's Hold the Line (passive, replaces Ward Breaker 2026-09-17):
- *  the discount on WALL_BLEED for a Bulwark the Warrior himself holds — a
- *  discount, never free (wallUpkeepFor floors at WALL_BLEED_MIN
- *  regardless). Plumbing value until Sweep 2 sim-tunes it; 0 here is not a
- *  design statement, just an unset dial. */
+/** RETIRED 2026-09-17, same day it was written: Sweep 1 shipped
+ *  WALL_BLEED === WALL_BLEED_MIN (both 1), which floors any per-payment
+ *  discount before it can ever apply — a Warrior's Hold the Line paying
+ *  "WALL_BLEED minus a discount" would always be a silent no-op. Kept at
+ *  0 for the historical record; wallUpkeepFor no longer reads it. See
+ *  HOLD_THE_LINE_FREE_TURNS for the passive's real shape now. */
 export const HOLD_THE_LINE_DISCOUNT = 0;
+/** Warrior's Hold the Line (passive, replaces Ward Breaker 2026-09-17;
+ *  RE-SHAPED same day per HOLD_THE_LINE_DISCOUNT's retirement note): a
+ *  fresh Bulwark cast banks this many turns of wallGrace for its caster —
+ *  the front holds its first turn for free, same "spent front-first"
+ *  grace pool Vigil/Sanctified Ground/Benediction already use (applyBulwark
+ *  is the sole caller, and only a Warrior ever reaches it, so no class
+ *  check is needed here — see wallUpkeepFor's own note on that). SWEEP 2
+ *  (2026-09-17, 1000 games/matchup, WALL_BLEED=1): {0, 1} tested. Warrior's
+ *  9-matchup average was 51.4% at 0 and 52.1% at 1 — a small, positive
+ *  move, inside this sim size's own ~1.6pt noise floor, and no matchup
+ *  left the 35/65 bar at either value (worst case both ways: warrior-vs-
+ *  warlock 42.9%/45.3%). Shipped 1 anyway: 0 makes the passive a true
+ *  no-op (nothing to point at when the client explains it), 1 costs
+ *  nothing and never regresses a matchup, so there's no reason to ship
+ *  the dead version. Re-visit with a larger sample if a future sweep
+ *  needs the extra precision. */
+export const HOLD_THE_LINE_FREE_TURNS = 1;
 
 /** What it costs `owner` to hold one wall through their next turn-start —
- *  WALL_BLEED, discounted for a Warrior's own Bulwark by
- *  HOLD_THE_LINE_DISCOUNT, floored at WALL_BLEED_MIN so a discount can
- *  shrink the price but never zero it (the guardrail every wall shares).
- *  Reads the WALL's kind, not just the owner's class: a Cleric's Blessing
- *  never gets the Warrior's discount even inside a warlock mirror... a
- *  necromancer mirror — no class but Warrior ever holds a "bulwark"-kind
- *  wall, so this is really just `classes[owner] === "warrior"`, spelled
- *  out for the day a second wall-granting class exists. */
+ *  flat WALL_BLEED, floored at WALL_BLEED_MIN (the guardrail every wall
+ *  shares; the floor and the bleed happen to be equal since Sweep 1, but
+ *  the floor stays as its own named constant for the day either one
+ *  re-tunes independently). The Warrior's own discount retired with
+ *  HOLD_THE_LINE_DISCOUNT — see HOLD_THE_LINE_FREE_TURNS for how Hold the
+ *  Line prices in now. */
 export function wallUpkeepFor(power: PowerState, owner: PlayerId): number {
-  const discount = power.classes[owner] === "warrior" ? HOLD_THE_LINE_DISCOUNT : 0;
-  return Math.max(WALL_BLEED_MIN, WALL_BLEED - discount);
+  void power;
+  return Math.max(WALL_BLEED_MIN, WALL_BLEED);
 }
 /** ESCAPE PAYS (2026-09-16, user rule: "when a token crosses the finish to
  *  make a point you get a mana"): every escape banks the mover this many
@@ -3291,14 +3325,18 @@ export function getBulwarkTargets(state: GameState, power: PowerState, mover: Pl
 
 /** Warrior's Bulwark: spends a charge to raise a wall on one of the
  *  mover's own on-board tokens (see WALL_BLEED for what it costs to keep
- *  up, tickWallUpkeepForNewTurn for the tick that charges it). No board
- *  movement at all — never lands the mover on a shield, so (like Push) it
- *  always breaks any live shield streak and always ends the turn, no
- *  extra-turn interaction. Doesn't grant a charge back — it doesn't
- *  capture anything itself. (The reinforced second-charge tier retired
- *  2026-09-13, before the wall rework; see BULWARK_REINFORCED_RETIRED.)
- *  Like every other pure apply* here, this doesn't self-guard on
- *  affordability; the caller already verified it. */
+ *  up, tickWallUpkeepForNewTurn for the tick that charges it). Hold the
+ *  Line banks HOLD_THE_LINE_FREE_TURNS of wallGrace on every cast — the
+ *  fresh wall's own first upkeep bill (or, if grace is already banked,
+ *  whichever wall is most-advanced when the tick runs — same front-first
+ *  spend order tickWallUpkeepForNewTurn always uses) rides for free. No
+ *  board movement at all — never lands the mover on a shield, so (like
+ *  Push) it always breaks any live shield streak and always ends the
+ *  turn, no extra-turn interaction. Doesn't grant a charge back — it
+ *  doesn't capture anything itself. (The reinforced second-charge tier
+ *  retired 2026-09-13, before the wall rework; see
+ *  BULWARK_REINFORCED_RETIRED.) Like every other pure apply* here, this
+ *  doesn't self-guard on affordability; the caller already verified it. */
 export function applyBulwark(
   state: GameState,
   power: PowerState,
@@ -3309,6 +3347,7 @@ export function applyBulwark(
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
     walls: { ...power.walls, [targetTokenId]: "bulwark" },
+    wallGrace: { ...power.wallGrace, [mover]: (power.wallGrace[mover] ?? 0) + HOLD_THE_LINE_FREE_TURNS },
   };
   const broken = breakShieldStreak(spent, mover); // Bulwark never lands the mover on a shield
   const nextState: GameState = {

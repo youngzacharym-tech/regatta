@@ -60,7 +60,7 @@ import {
   VANISH_TURNS,
   WALL_BLEED,
   WALL_BLEED_MIN,
-  HOLD_THE_LINE_DISCOUNT,
+  HOLD_THE_LINE_FREE_TURNS,
   wallUpkeepFor,
   applyBless,
   applyBenediction,
@@ -389,9 +389,13 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Warrior's Hold the Line (passive, replaces Ward Breaker 2026-09-17):
-//    a discount on wallUpkeepFor for a wall the Warrior himself holds,
-//    floored at WALL_BLEED_MIN — a discount, never free. Ward Breaker
+// 5. Warrior's Hold the Line (passive, replaces Ward Breaker 2026-09-17;
+//    RE-SHAPED the same day — see HOLD_THE_LINE_DISCOUNT's retirement
+//    note): every wall costs flat wallUpkeepFor regardless of class now
+//    (the old per-payment discount floored to a no-op once Sweep 1 landed
+//    WALL_BLEED === WALL_BLEED_MIN); Hold the Line instead banks
+//    HOLD_THE_LINE_FREE_TURNS of wallGrace on every Bulwark cast — covered
+//    by section 14's dedicated test, not re-proven here. Ward Breaker
 //    itself is fully retired: a Warrior no longer pierces Ward, or anything
 //    else below an ultimate — breaksWard stays on the wire but is always
 //    false now (see PowerMove's doc).
@@ -400,16 +404,12 @@ function check(name: string, cond: boolean, detail?: string) {
   const pwWarrior = power({ p1: "warrior" });
   const pwOther = power({ p1: "cleric" });
   check(
-    "Hold the Line: a Warrior's own wall is charged wallUpkeepFor at the discounted rate",
-    wallUpkeepFor(pwWarrior, "p1") === Math.max(WALL_BLEED_MIN, WALL_BLEED - HOLD_THE_LINE_DISCOUNT),
+    "Hold the Line: wallUpkeepFor no longer distinguishes the Warrior's own class at all",
+    wallUpkeepFor(pwWarrior, "p1") === wallUpkeepFor(pwOther, "p1") && wallUpkeepFor(pwWarrior, "p1") === WALL_BLEED,
   );
   check(
-    "Hold the Line: every other class pays the full WALL_BLEED, no discount at all",
-    wallUpkeepFor(pwOther, "p1") === WALL_BLEED,
-  );
-  check(
-    "Hold the Line: the discount can never push the price below WALL_BLEED_MIN",
-    Math.max(WALL_BLEED_MIN, WALL_BLEED - HOLD_THE_LINE_DISCOUNT) >= WALL_BLEED_MIN,
+    "Hold the Line: wallUpkeepFor is always at least WALL_BLEED_MIN",
+    wallUpkeepFor(pwWarrior, "p1") >= WALL_BLEED_MIN,
   );
 
   // REGRESSION (Ward Breaker's retirement): a Warrior landing on a Warded
@@ -966,6 +966,38 @@ function check(name: string, cond: boolean, detail?: string) {
       `got ${JSON.stringify(r.power.walls)}`,
     );
     check("Bulwark: ends the turn", r.state.currentPlayer === "p2" && r.state.extraTurn === false);
+  }
+
+  // --- Hold the Line: every Bulwark cast banks HOLD_THE_LINE_FREE_TURNS
+  //     of wallGrace for its caster (Sweep 2's re-shape — the discount
+  //     retired the same day WALL_BLEED landed on WALL_BLEED_MIN). -------
+  {
+    const s = state("p1", { 0: 4 });
+    const pw = power({ p1: "warrior" }, { p1: 2 });
+    const r = applyBulwark(s, pw, 0, "p1");
+    check(
+      `Hold the Line: banks HOLD_THE_LINE_FREE_TURNS (${HOLD_THE_LINE_FREE_TURNS}) of wallGrace`,
+      r.power.wallGrace.p1 === HOLD_THE_LINE_FREE_TURNS,
+      `got ${r.power.wallGrace.p1}`,
+    );
+    // Stacks with whatever grace was already banked, doesn't overwrite it.
+    const pwGraced: PowerState = { ...pw, wallGrace: { ...pw.wallGrace, p1: 1 } };
+    const r2 = applyBulwark(s, pwGraced, 0, "p1");
+    check(
+      "Hold the Line: stacks onto existing grace rather than resetting it",
+      r2.power.wallGrace.p1 === 1 + HOLD_THE_LINE_FREE_TURNS,
+      `got ${r2.power.wallGrace.p1}`,
+    );
+    // The grace it banks is real: a lone fresh wall survives its first
+    // upkeep tick even with an empty bank.
+    const pwPoor = power({ p1: "warrior" }, { p1: 1 }); // spends its last charge on the cast itself
+    const rCast = applyBulwark(s, pwPoor, 0, "p1");
+    const rTick = tickWallUpkeepForNewTurn(s, rCast.power);
+    check(
+      "Hold the Line: the banked grace covers the fresh wall's first bill even at 0 mana",
+      rTick.power.walls[0] === "bulwark" && rTick.droppedTokenIds.length === 0,
+      JSON.stringify({ walls: rTick.power.walls, dropped: rTick.droppedTokenIds }),
+    );
   }
 
   // --- Blocks a normal capturing move -------------------------------------

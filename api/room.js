@@ -330,12 +330,12 @@ function otherPlayerId(p) {
   return p === "p1" ? "p2" : "p1";
 }
 var CHARGE_CAP = 4;
-var WALL_BLEED = 2;
+var WALL_BLEED = 1;
 var WALL_BLEED_MIN = 1;
-var HOLD_THE_LINE_DISCOUNT = 0;
+var HOLD_THE_LINE_FREE_TURNS = 1;
 function wallUpkeepFor(power, owner) {
-  const discount = power.classes[owner] === "warrior" ? HOLD_THE_LINE_DISCOUNT : 0;
-  return Math.max(WALL_BLEED_MIN, WALL_BLEED - discount);
+  void power;
+  return Math.max(WALL_BLEED_MIN, WALL_BLEED);
 }
 var ESCAPE_CHARGES = 1;
 var CHARGED_SHOT_COST = 2;
@@ -1184,7 +1184,8 @@ function applyBulwark(state, power, targetTokenId, mover) {
   const spent = {
     ...power,
     charges: { ...power.charges, [mover]: power.charges[mover] - 1 },
-    walls: { ...power.walls, [targetTokenId]: "bulwark" }
+    walls: { ...power.walls, [targetTokenId]: "bulwark" },
+    wallGrace: { ...power.wallGrace, [mover]: (power.wallGrace[mover] ?? 0) + HOLD_THE_LINE_FREE_TURNS }
   };
   const broken = breakShieldStreak(spent, mover);
   const nextState = {
