@@ -147,6 +147,7 @@ import {
   tickHamstringForNewTurn,
   tickDarkBargainForNewTurn,
   DARK_BARGAIN_RETREAT,
+  DARK_BARGAIN_LANDING_ONLY,
   BLOOD_PACT_CHARGES,
   tickThrallForNewTurn,
   wolfGuardTile,
@@ -2810,8 +2811,20 @@ function check(name: string, cond: boolean, detail?: string) {
     const sPact = state("p1", { 0: 4, 4: 6, 5: 1 }); // warlock's 5 waits behind in its own lane: a stand-in
     const pwPact = power({ p1: "rogue", p2: "warlock" }, { p1: CHARGE_CAP, p2: 0 });
     const rp = applyBackstab(sPact, pwPact, 4, "p1");
-    check("Backstab: Larceny drains first, then the victim's Dark Bargain pays (warlock at 0 ends at 1)", rp.power.charges.p2 === 1, `got ${rp.power.charges.p2}`);
-    check("Backstab: the bargain saved the runner and took the stand-in", rp.state.tokens.find((t) => t.id === 4)!.position === 5 && rp.state.tokens.find((t) => t.id === 5)!.position === -1);
+    // Backstab is a blade never a bow, but it still delivers by LANDING NOWHERE
+    // — the rogue never occupies the victim's tile — so it is a RANGED kill.
+    // Under DARK_BARGAIN_LANDING_ONLY it is refused like Push/Charged Shot.
+    check(
+      "Backstab: Larceny drains first, then the victim's Dark Bargain pays (warlock at 0 ends at 1) unless landing-only",
+      DARK_BARGAIN_LANDING_ONLY ? rp.power.charges.p2 === 0 : rp.power.charges.p2 === 1,
+      `got ${rp.power.charges.p2}`,
+    );
+    check(
+      "Backstab: the bargain saved the runner and took the stand-in unless landing-only",
+      DARK_BARGAIN_LANDING_ONLY
+        ? rp.state.tokens.find((t) => t.id === 4)!.position === -1 && rp.state.tokens.find((t) => t.id === 5)!.position === 1
+        : rp.state.tokens.find((t) => t.id === 4)!.position === 5 && rp.state.tokens.find((t) => t.id === 5)!.position === -1,
+    );
     const pwLit: PowerState = { ...power({ p1: "rogue", p2: "bard" }, { p1: CHARGE_CAP, p2: 0 }), inspired: { 4: 3 } };
     const rl = applyBackstab(sPact, pwLit, 4, "p1");
     check("Backstab: a lit (inspired) victim loses the song on the reserve trip", rl.power.inspired[4] === undefined);
@@ -3012,6 +3025,76 @@ function check(name: string, cond: boolean, detail?: string) {
     const pwWound: PowerState = { ...pw, vitality: { 4: "wounded", 6: "wounded" } };
     const rW = applyPowerMove(s, pwWound, getLegalPowerMoves(s, pwWound, 2).find((mv) => mv.tokenId === 0 && mv.to === 8)!, "p1");
     check("Bargain: the saved runner keeps its wound, the stand-in's clears", rW.power.vitality[4] === "wounded" && rW.power.vitality[6] === undefined);
+
+    // --- The archer lever: DARK_BARGAIN_LANDING_ONLY ----------------------
+    // Flag is false by default (ships only after playtest Test 1), so these
+    // assert against the CURRENT value — flip it locally to exercise the
+    // other branch; both must stay green.
+
+    // Charge sweep (ranged: the sweep victim is never on the warrior's own
+    // landing tile). Warlock's runner 4 at 6 is swept by warrior 0's charge
+    // 4->8; warlock's 5 at 2 is the stand-in, strictly behind the runner,
+    // with a free retreat tile at 5.
+    {
+      const sSweep = state("p1", { 0: 4, 4: 6, 5: 2 });
+      const pwSweep = power({ p1: "warrior", p2: "warlock" }, { p1: 1 });
+      const mSweep = getLegalPowerMoves(sSweep, pwSweep, 4).find((mv) => mv.tokenId === 0 && mv.to === 8)!;
+      check("Bargain/lever: sanity — the sweep catches the runner", mSweep.chargeSweepCaptures.includes(4));
+      const rSweep = applyCharge(sSweep, pwSweep, mSweep, "p1");
+      if (DARK_BARGAIN_LANDING_ONLY) {
+        check("Bargain/lever: a ranged Charge-sweep kill is refused — the runner just dies", rSweep.state.tokens.find((t) => t.id === 4)!.position === -1);
+        check("Bargain/lever: the stand-in is untouched", rSweep.state.tokens.find((t) => t.id === 5)!.position === 2);
+      } else {
+        check("Bargain/lever: a Charge-sweep kill still bargains when the lever is off", rSweep.state.tokens.find((t) => t.id === 4)!.position === 5);
+        check("Bargain/lever: the stand-in pays for it", rSweep.state.tokens.find((t) => t.id === 5)!.position === -1);
+      }
+    }
+
+    // Push (ranged, send-home): warlock's runner 4 at 5, stand-in 5 sits
+    // exactly on the retreat tile (4) and is excluded from its own block —
+    // the push's collision math and the bargain's retreat math coincide by
+    // construction (both are one tile behind the victim).
+    {
+      const sPushLever = state("p1", { 4: 5, 5: 4 });
+      const rPushLever = applyPush(sPushLever, power({ p1: "archer", p2: "warlock" }, { p1: 1 }), 4, "p1");
+      check(
+        "Bargain/lever: sanity — the push forces a collision-home either way",
+        DARK_BARGAIN_LANDING_ONLY ? rPushLever.state.tokens.find((t) => t.id === 4)!.position === -1 : rPushLever.state.tokens.find((t) => t.id === 4)!.position === 4,
+      );
+      if (DARK_BARGAIN_LANDING_ONLY) {
+        check("Bargain/lever: a ranged Push send-home is refused", rPushLever.state.tokens.find((t) => t.id === 5)!.position === 4 && rPushLever.power.charges.p2 === 0);
+      } else {
+        check("Bargain/lever: a Push send-home still bargains when the lever is off — the runner retreats to the tile the push tried to send it to, vacated by the stand-in", rPushLever.state.tokens.find((t) => t.id === 5)!.position === -1 && rPushLever.power.charges.p2 === 1);
+      }
+    }
+
+    // Corpse Explosion (ranged): warlock's runner 4 stands on the grave (8),
+    // stand-in 5 waits behind at 3, retreat tile 7 is free.
+    {
+      const pwBlastLever: PowerState = {
+        ...power({ p1: "necromancer", p2: "warlock" }, { p1: CORPSE_EXPLOSION_COST }),
+        corpse: { p1: { tokenId: 6, tile: 8 }, p2: null },
+        grave: { p1: 8, p2: null },
+      };
+      const sBlastLever = state("p1", { 4: 8, 5: 3 });
+      const rBlastLever = applyCorpseExplosion(sBlastLever, pwBlastLever, "p1");
+      if (DARK_BARGAIN_LANDING_ONLY) {
+        check("Bargain/lever: the blast's ranged kill is refused", rBlastLever.state.tokens.find((t) => t.id === 4)!.position === -1 && rBlastLever.state.tokens.find((t) => t.id === 5)!.position === 3);
+      } else {
+        check("Bargain/lever: the blast still bargains when the lever is off", rBlastLever.state.tokens.find((t) => t.id === 4)!.position === 7 && rBlastLever.state.tokens.find((t) => t.id === 5)!.position === -1);
+      }
+    }
+
+    // A Bard march (LANDING) fires the bargain either way — the lever only
+    // narrows RANGED deliveries. Warlock's runner 4 at 8 stands on the
+    // march's landing tile; stand-in 5 waits at 3; retreat tile 7 is free.
+    {
+      const sMarchLever = state("p1", { 0: 6, 4: 8, 5: 3 });
+      let pwMarchLever = power({ p1: "bard", p2: "warlock" }, { p1: INSPIRE_COST + HASTE_COST });
+      pwMarchLever = applyInspire(pwMarchLever, 0, "p1");
+      const rMarchLever = applySongOfHaste(sMarchLever, pwMarchLever, "p1");
+      check("Bargain/lever: a Bard march is a landing capture and always bargains", rMarchLever.state.tokens.find((t) => t.id === 4)!.position === 7 && rMarchLever.state.tokens.find((t) => t.id === 5)!.position === -1);
+    }
   }
 
   // --- Curse of Chains: targeting -----------------------------------------
@@ -3141,7 +3224,12 @@ function check(name: string, cond: boolean, detail?: string) {
     // In a mirror, the ENEMY warlock is still paid for the stone it lost.
     const pwMirror = power({ p1: "warlock", p2: "warlock" }, { p1: SACRIFICE_COST });
     const rMirror = applySacrifice(sSac, pwMirror, 4, "p1");
-    check("Sacrifice: an enemy warlock's Dark Bargain still fires for the target", rMirror.power.charges.p2 === 1 && rMirror.state.tokens.find((t) => t.id === 5)!.position === -1 && rMirror.state.tokens.find((t) => t.id === 4)!.position === 7);
+    check(
+      "Sacrifice: an enemy warlock's Dark Bargain still fires for the target unless landing-only",
+      DARK_BARGAIN_LANDING_ONLY
+        ? rMirror.power.charges.p2 === 0 && rMirror.state.tokens.find((t) => t.id === 4)!.position === -1
+        : rMirror.power.charges.p2 === 1 && rMirror.state.tokens.find((t) => t.id === 5)!.position === -1 && rMirror.state.tokens.find((t) => t.id === 4)!.position === 7,
+    );
     check("Sacrifice: the caster still gets nothing for its own", rMirror.power.charges.p1 === 0);
   }
 

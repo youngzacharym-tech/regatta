@@ -776,7 +776,9 @@ export const BACKSTAB_COST = 4;
  *  sweep that kills two runners can cost two rear stones — the same two
  *  deaths, better-chosen). Ultimates take what they want (roster
  *  convention — Blink Strike, Warpath, Rain of Arrows, Grand Heist, Fel
- *  Storm, Wild Hunt, Bloodbath, Crescendo's blows all bypass it), and the
+ *  Storm, Wild Hunt, Bloodbath all bypass it; a Bard march that lands on
+ *  a warlock stone — Song of Haste or Crescendo — is an ordinary landing
+ *  capture and DOES bargain), and the
  *  warlock's own Sacrifice is suicide, never a bargain (killer === owner).
  *  Ordering vs Rogue's Larceny is unchanged from the pact: the drain
  *  resolves FIRST, then the bargain pays. Every sub-ultimate kill path
@@ -804,6 +806,42 @@ export const BLOOD_PACT_CHARGES = 1;
 /** How far the saved stone steps back along its own path. 1 = it ends
  *  directly behind whatever killed it, in flip-1 revenge range. */
 export const DARK_BARGAIN_RETREAT = 1;
+/** THE ARCHER LEVER (2026-09-17, playtest protocol): when true the fiend
+ *  intervenes only when an enemy stone physically LANDS on the warlock's
+ *  servant — ranged and indirect kills (Push and Charged Shot send-homes,
+ *  Snipe, a Charge sweep, Corpse Explosion, Backstab, Sacrifice, Piercing
+ *  Shot, Reckless Swing, Whirlwind, a sprung trap, the wolf) send home
+ *  for real. Why: the archer's whole win condition is the ranged send-home
+ *  and the bargain converts every one of them into a rear-stone kill plus
+ *  a one-tile retreat — archer vs warlock sat at 27/73, the roster's one
+ *  matchup outside 35/65, and teaching the bot archer to decline those
+ *  shots only made it worse (see scoreMove). Flavour and math agree:
+ *  the fiend answers a blade, not an arrow. The trap the protocol names:
+ *  landing-vs-ranged is a property of every capture, so this also frees
+ *  the necromancer's blast and the hunter's shot from the bargain — kept
+ *  pure on purpose; a Necro/Warlock inflation is its own ticket, not a
+ *  veto. SHIPS ONLY after playtest Test 1 confirms the 27/73 is
+ *  structural (a human archer can find no non-trading line); until then
+ *  the flag stays false and the sim measurement below is the record.
+ *
+ *  MEASURED 2026-09-17, flag flipped to true locally, 1000/matchup, then
+ *  restored to false. Warlock's win% against each class, baseline (flag
+ *  off) -> lever: archer 71.9->68.4 (i.e. archer 28.1->31.6 — climbing
+ *  toward the 35 bar but not over it at this sample size), mage 49->51,
+ *  warrior 62->57, necro 40->39 (flat — the watched Necro/Warlock cell did
+ *  NOT inflate), cleric 45->53, rogue 63->51 (rogue's Backstab is ranged;
+ *  it now lands for real and rogue stops feeding the bargain), hunter
+ *  48->54, barbarian 56->55, bard 44->59. Field-wide: warlock 54.7->51.2,
+ *  archer 45.7->46.5. WHOLE-GRID RESULT: zero matchups outside 35/65 (was
+ *  one — this cell). No Warlock matchup crossed ~65 the wrong way. Read:
+ *  a clean, ship-CANDIDATE batch by the pre-committed rule — but ships
+ *  only when Test 1 says the 27/73 is structural, not on this number
+ *  alone. */
+export const DARK_BARGAIN_LANDING_ONLY = false;
+/** How a kill reached the victim — the only thing DARK_BARGAIN_LANDING_ONLY
+ *  reads. "landing" = the killer's stone ends its move on the victim's tile
+ *  (a landing capture, a Bard march). Everything else is "ranged". */
+export type KillDelivery = "landing" | "ranged";
 
 /** The bargain a warlock struck most recently THIS turn — announcement
  *  state for the client (proc + activity log), cleared by
@@ -1809,7 +1847,10 @@ export function applyDarkBargain(
   nextPower: PowerState,
   killedIds: number[],
   killer: PlayerId,
+  delivery: KillDelivery,
 ): { tokens: TokenState[]; power: PowerState } {
+  // The archer lever: the fiend answers a blade, not an arrow.
+  if (DARK_BARGAIN_LANDING_ONLY && delivery !== "landing") return { tokens, power: nextPower };
   let out = tokens;
   let pw = nextPower;
   for (const id of killedIds) {
@@ -2651,7 +2692,13 @@ function resolveTurn(
   // runner that just died. AFTER Larceny by design — see
   // BLOOD_PACT_CHARGES's ordering note (the soul's price can't be
   // pickpocketed off the corpse).
-  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, kills, mover));
+  // Landing captures first (the victim stood on the landing tile), then
+  // the ranged ones of the same move (Snipe one tile ahead, a Charge
+  // sweep behind) — the split is what DARK_BARGAIN_LANDING_ONLY reads.
+  const landingKills = kills.filter((id) => state.tokens.find((t) => t.id === id)?.position === to);
+  const rangedKills = kills.filter((id) => !landingKills.includes(id));
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, landingKills, mover, "landing"));
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, rangedKills, mover, "ranged"));
   // A dead stone's freeze timer dies with it (reserve-trip hygiene).
   nextPower = clearHamstringOnCapture(nextPower, kills);
   nextPower = clearInspireOnCapture(nextPower, kills);
@@ -2688,7 +2735,7 @@ function resolveTurn(
         nextPower = clearInspireOnCapture(nextPower, [tokenId]);
         nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
         // The trap is the FOE's kill of the mover's stone: bargainable.
-        ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe));
+        ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe, "ranged"));
       }
       return landing === -1;
     };
@@ -2728,7 +2775,7 @@ function resolveTurn(
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
           nextPower = clearInspireOnCapture(nextPower, [tokenId]);
           nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-          ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe));
+          ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe, "ranged"));
           nextPower = addCharge(nextPower, foe); // the kill pays the hunter, like any capture
           wolfBite = { tokenId, sentHome: true };
         } else {
@@ -2983,7 +3030,7 @@ export function applyPush(
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   }
   spentPower = breakShieldStreak(spentPower, mover); // Push never lands the mover on a shield
   // TRIED AND REVERTED: granting Push an extra turn (same mechanism as a
@@ -3095,7 +3142,7 @@ export function applyChargedShot(
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   }
   spentPower = breakShieldStreak(spentPower, mover); // Charged Shot never lands the mover on a shield
   const nextState: GameState = {
@@ -3685,7 +3732,7 @@ export function applyCorpseExplosion(
   // Desecration denies the CASTER's income (no bounty, no corpse) — not
   // the VICTIM's compensation: a warlock's stones killed in the blast
   // may still strike their owner's Dark Bargain.
-  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, sentHomeIds, mover));
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, sentHomeIds, mover, "ranged"));
   nextPower = breakShieldStreak(nextPower, mover); // never lands the mover on a shield
 
   const nextState: GameState = {
@@ -4122,7 +4169,7 @@ export function applyBackstab(
     };
     // Then the victim's own Dark Bargain, in Larceny's shadow (the ordering
     // BLOOD_PACT_CHARGES's doc fixes for every kill).
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState: GameState = {
@@ -4397,6 +4444,7 @@ export function applySacrifice(
     nextPower,
     killed.filter((id) => id !== mine.id),
     mover,
+    "ranged",
   ));
   nextPower = breakShieldStreak(nextPower, mover); // an attack, not a placement
   const nextState: GameState = {
@@ -4666,7 +4714,7 @@ export function applyPiercingShot(
       next = clearCurseOnCapture(next, [victim.id]);
       next = clearHamstringOnCapture(next, [victim.id]);
       next = clearInspireOnCapture(next, [victim.id]);
-      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover));
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover, "ranged"));
       killedTokenId = victim.id;
     }
     next = addCharge(next, mover);
@@ -4866,7 +4914,7 @@ export function applyRecklessSwing(
     next = clearCurseOnCapture(next, [targetTokenId]);
     next = clearHamstringOnCapture(next, [targetTokenId]);
     next = clearInspireOnCapture(next, [targetTokenId]);
-    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover));
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover, "ranged"));
     killedTokenId = targetTokenId;
   }
   next = addCharge(next, mover); // the blow landed, wound or kill
@@ -4973,7 +5021,7 @@ export function applyWhirlwind(
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
     next = clearInspireOnCapture(next, capturedTokenIds);
-    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, capturedTokenIds, mover));
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, capturedTokenIds, mover, "ranged"));
   }
 
   // The shoves, resolved outward-in against the working board so a vacated
@@ -4999,7 +5047,7 @@ export function applyWhirlwind(
       next = clearHamstringOnCapture(next, [v.id]);
       next = clearInspireOnCapture(next, [v.id]);
       next = clearCapturedBulwarks(next, [v.id]);
-      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover));
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover, "ranged"));
     }
   }
 
@@ -5253,7 +5301,7 @@ function advanceStones(
       next = clearCurseOnCapture(next, [enemy.id]);
       next = clearHamstringOnCapture(next, [enemy.id]);
       next = clearInspireOnCapture(next, [enemy.id]);
-      ({ tokens, power: next } = applyDarkBargain(trampled, power, tokens, next, [enemy.id], mover));
+      ({ tokens, power: next } = applyDarkBargain(trampled, power, tokens, next, [enemy.id], mover, "landing"));
       next = addCharge(next, mover);
       capturedIds.push(enemy.id);
     }

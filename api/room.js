@@ -368,6 +368,7 @@ var VANISH_TURNS = BULWARK_TURNS;
 var BACKSTAB_COST = 4;
 var BLOOD_PACT_CHARGES = 1;
 var DARK_BARGAIN_RETREAT = 1;
+var DARK_BARGAIN_LANDING_ONLY = false;
 var CURSE_COST = 1;
 var CURSE_TURNS = 3;
 var CURSE_SLOW = 1;
@@ -517,7 +518,8 @@ function clearThrallIfCaptured(power, capturedIds) {
   for (const pl of hit) thrall[pl] = null;
   return { ...power, thrall };
 }
-function applyDarkBargain(preTokens, prePower, tokens, nextPower, killedIds, killer) {
+function applyDarkBargain(preTokens, prePower, tokens, nextPower, killedIds, killer, delivery) {
+  if (DARK_BARGAIN_LANDING_ONLY && delivery !== "landing") return { tokens, power: nextPower };
   let out = tokens;
   let pw = nextPower;
   for (const id of killedIds) {
@@ -897,7 +899,10 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
       }
     };
   }
-  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, kills, mover));
+  const landingKills = kills.filter((id) => state.tokens.find((t) => t.id === id)?.position === to);
+  const rangedKills = kills.filter((id) => !landingKills.includes(id));
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, landingKills, mover, "landing"));
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, rangedKills, mover, "ranged"));
   nextPower = clearHamstringOnCapture(nextPower, kills);
   nextPower = clearInspireOnCapture(nextPower, kills);
   let trapSprung = null;
@@ -921,7 +926,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
         nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
         nextPower = clearInspireOnCapture(nextPower, [tokenId]);
         nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-        ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe));
+        ({ tokens, power: nextPower } = applyDarkBargain(working.tokens, power, tokens, nextPower, [tokenId], foe, "ranged"));
       }
       return landing === -1;
     };
@@ -950,7 +955,7 @@ function resolveTurn(state, power, mover, tokenId, to, allCaptures, landsOnShiel
           nextPower = clearHamstringOnCapture(nextPower, [tokenId]);
           nextPower = clearInspireOnCapture(nextPower, [tokenId]);
           nextPower = clearCapturedBulwarks(nextPower, [tokenId]);
-          ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe));
+          ({ tokens, power: nextPower } = applyDarkBargain(bitten, power, tokens, nextPower, [tokenId], foe, "ranged"));
           nextPower = addCharge(nextPower, foe);
           wolfBite = { tokenId, sentHome: true };
         } else {
@@ -1054,7 +1059,7 @@ function applyPush(state, power, targetTokenId, mover) {
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -1098,7 +1103,7 @@ function applyChargedShot(state, power, targetTokenId, mover) {
     spentPower = clearCurseOnCapture(spentPower, [targetTokenId]);
     spentPower = clearHamstringOnCapture(spentPower, [targetTokenId]);
     spentPower = clearInspireOnCapture(spentPower, [targetTokenId]);
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -1366,7 +1371,7 @@ function applyCorpseExplosion(state, power, mover) {
   nextPower = clearCurseOnCapture(nextPower, sentHomeIds);
   nextPower = clearHamstringOnCapture(nextPower, sentHomeIds);
   nextPower = clearInspireOnCapture(nextPower, sentHomeIds);
-  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, sentHomeIds, mover));
+  ({ tokens, power: nextPower } = applyDarkBargain(state.tokens, power, tokens, nextPower, sentHomeIds, mover, "ranged"));
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
     tokens,
@@ -1558,7 +1563,7 @@ function applyBackstab(state, power, targetTokenId, mover) {
         [foe]: Math.max(0, spentPower.charges[foe] - ROGUE_STEAL_ON_CAPTURE)
       }
     };
-    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover));
+    ({ tokens, power: spentPower } = applyDarkBargain(state.tokens, power, tokens, spentPower, [targetTokenId], mover, "ranged"));
   }
   spentPower = breakShieldStreak(spentPower, mover);
   const nextState = {
@@ -1676,7 +1681,8 @@ function applySacrifice(state, power, targetTokenId, mover) {
     tokens,
     nextPower,
     killed.filter((id) => id !== mine.id),
-    mover
+    mover,
+    "ranged"
   ));
   nextPower = breakShieldStreak(nextPower, mover);
   const nextState = {
@@ -1835,7 +1841,7 @@ function applyPiercingShot(state, power, mover) {
       next = clearCurseOnCapture(next, [victim.id]);
       next = clearHamstringOnCapture(next, [victim.id]);
       next = clearInspireOnCapture(next, [victim.id]);
-      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover));
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [victim.id], mover, "ranged"));
       killedTokenId = victim.id;
     }
     next = addCharge(next, mover);
@@ -1944,7 +1950,7 @@ function applyRecklessSwing(state, power, targetTokenId, mover) {
     next = clearCurseOnCapture(next, [targetTokenId]);
     next = clearHamstringOnCapture(next, [targetTokenId]);
     next = clearInspireOnCapture(next, [targetTokenId]);
-    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover));
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [targetTokenId], mover, "ranged"));
     killedTokenId = targetTokenId;
   }
   next = addCharge(next, mover);
@@ -2013,7 +2019,7 @@ function applyWhirlwind(state, power, mover) {
     next = clearCurseOnCapture(next, capturedTokenIds);
     next = clearHamstringOnCapture(next, capturedTokenIds);
     next = clearInspireOnCapture(next, capturedTokenIds);
-    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, capturedTokenIds, mover));
+    ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, capturedTokenIds, mover, "ranged"));
   }
   const knockedTokenIds = [];
   const sentHomeIds = [];
@@ -2036,7 +2042,7 @@ function applyWhirlwind(state, power, mover) {
       next = clearHamstringOnCapture(next, [v.id]);
       next = clearInspireOnCapture(next, [v.id]);
       next = clearCapturedBulwarks(next, [v.id]);
-      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover));
+      ({ tokens, power: next } = applyDarkBargain(state.tokens, power, tokens, next, [v.id], mover, "ranged"));
     }
   }
   if (capturedTokenIds.length > 0 || woundedTokenIds.length > 0) next = addCharge(next, mover);
@@ -2176,7 +2182,7 @@ function advanceStones(state, power, mover, ids, distance) {
       next = clearCurseOnCapture(next, [enemy.id]);
       next = clearHamstringOnCapture(next, [enemy.id]);
       next = clearInspireOnCapture(next, [enemy.id]);
-      ({ tokens, power: next } = applyDarkBargain(trampled, power, tokens, next, [enemy.id], mover));
+      ({ tokens, power: next } = applyDarkBargain(trampled, power, tokens, next, [enemy.id], mover, "landing"));
       next = addCharge(next, mover);
       capturedIds.push(enemy.id);
     }
