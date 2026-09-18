@@ -30,7 +30,7 @@ export type ProcIconId =
   | "reflip"
   | "wardBlock"
   | "blinkStrike"
-  | "warpath"
+  | "shieldWall"
   | "charge"
   | "bulwark"
   | "bulwarkBlock"
@@ -242,18 +242,22 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<circle cx="30" cy="18" r="1.8" fill="${GOLD}"/>`,
   ),
 
-  // Warrior ultimate: the rampaging blade, swept victims in its wake.
-  warpath: wrap(
-    `<path d="M39 9 L13 35 L18 40 Z" ${MAIN} ${BODY}/>` +
-      `<path d="M11.5 33.5 L19.5 41.5" ${MAIN}/>` +
-      `<path d="M13 40 L8.5 44.5" ${MAIN}/>` +
-      diamond(8, 45, 2) +
-      // Trailing sweep arcs behind the swing.
-      `<path d="M20 45 A32 32 0 0 0 45 20" ${GOLD_DETAIL}/>` +
-      `<path d="M29 46 A30 30 0 0 0 46 29" ${GOLD_DETAIL}/>` +
-      // The swept: two slash ticks crossed on the swing path.
-      `<path d="M26 26 L30 30" ${DETAIL}/>` +
-      `<path d="M33 19 L37 23" ${DETAIL}/>`,
+  // Warrior ultimate (2026-09-17, replaces Warpath): three linked family
+  // shields — the whole army walled at once, Benediction's dome-over-the-
+  // army idea reworked around the Warrior's own heater-shield base path
+  // instead of a halo.
+  shieldWall: wrap(
+    `<g transform="translate(-2.5,10.5) scale(0.5)"><path d="${SHIELD_PATH}" ${DETAIL} ${BODY}/></g>` +
+      `<g transform="translate(12,8.5) scale(0.5)"><path d="${SHIELD_PATH}" ${MAIN} ${BODY}/></g>` +
+      `<g transform="translate(26.5,10.5) scale(0.5)"><path d="${SHIELD_PATH}" ${DETAIL} ${BODY}/></g>` +
+      // One linking band across the row — a wall, not three separate saves.
+      `<path d="M6 24 L42 24" ${GOLD_DETAIL}/>` +
+      diamond(24, 44, 2) +
+      // Grace banked over the whole line (Benediction's falling motes,
+      // echoed).
+      `<circle cx="24" cy="6" r="1.6" fill="${GOLD}"/>` +
+      `<circle cx="15" cy="9.5" r="1.1" fill="${GOLD}"/>` +
+      `<circle cx="33" cy="9.5" r="1.1" fill="${GOLD}"/>`,
   ),
 
   // Warrior active: the family heater tipped into a full-speed bash, a token

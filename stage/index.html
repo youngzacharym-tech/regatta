@@ -993,7 +993,7 @@
       #guide-dots span.on { background: #a06010; }
 
       /* --- Ability proc banner (Master Killer) ---
-         Big glowing class-colored callout ("Reroll!", "Warpath!") that pops
+         Big glowing class-colored callout ("Reroll!", "Shield Wall!") that pops
          on BOTH screens whenever a power fires: title text with the ability's
          ornamental icon beneath it (proc-icons.ts), both tinted by the
          caster's class via --proc-color. The icon's entrance trails the text
@@ -1057,7 +1057,7 @@
       /* Ultimates land bigger than the rest of the roster (scale the svg,
          not the container — proc-icon-in owns the container's transform). */
       #proc .proc-icon[data-icon="blinkStrike"] svg,
-      #proc .proc-icon[data-icon="warpath"] svg,
+      #proc .proc-icon[data-icon="shieldWall"] svg,
       #proc .proc-icon[data-icon="exhume"] svg { transform: scale(1.15); }
       /* Cheap halo bloom — transform/opacity only; never animate filter
          (iOS repaints the whole layer per frame). */
@@ -1710,7 +1710,7 @@
           <button class="class" data-class="warrior">
             <img src="/avatars/warrior.webp" alt="Warrior" draggable="false" />
             <b>Warrior</b>
-            <span class="class-desc">Hold the Line: your first wall bill is free. Charge (1⚡): sweep a stone on your way. Bulwark (1⚡): wall one of yours — nothing short of an ultimate touches it, but it bleeds mana every turn after that. Ult: Warpath.</span>
+            <span class="class-desc">Hold the Line: your first wall bill is free. Charge (1⚡): sweep a stone on your way. Bulwark (1⚡): wall one of yours — nothing short of an ultimate touches it, but it bleeds mana every turn after that. Ult: Shield Wall.</span>
           </button>
           <button class="class" data-class="necromancer">
             <img src="/avatars/necromancer.webp" alt="Necromancer" draggable="false" />

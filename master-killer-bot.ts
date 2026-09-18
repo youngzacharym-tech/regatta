@@ -5,7 +5,7 @@
 // across ALL available actions this turn — a normal/power-boosted move,
 // Archer's Push, Mage's Re-flip, Warrior's Charge or Bulwark, the
 // Necromancer's Raise Dead / Dark Resurrection, or (once banked) Mage's
-// Blink Strike / Warrior's Warpath / Necromancer's Exhume ultimate — and
+// Blink Strike / Warrior's Shield Wall / Necromancer's Exhume ultimate — and
 // takes whichever scores highest. Separate file from bot.ts so classic mode's bot
 // (and anything reading it, including Kasen's audit) stays untouched.
 //
@@ -54,7 +54,7 @@ import {
   applySacrifice,
   applySnare,
   applyVanish,
-  applyWarpath,
+  applyShieldWall,
   applyWildHunt,
   canCastVigil,
   canReflipAgain,
@@ -92,7 +92,7 @@ import {
   getSacrificeTargets,
   getSnareTiles,
   getVanishTargets,
-  getWarpathTargets,
+  getShieldWallTargets,
   getWildHuntTargets,
   WILD_HUNT_FREEZE_TURNS,
   isCursed,
@@ -334,13 +334,10 @@ function scoreChargedShot(state: GameState, power: PowerState, targetId: number,
   return score;
 }
 
-/** Score Mage's Blink Strike / Warrior's Warpath: both are a guaranteed hit
- *  that bypasses shield-tile protection and Ward outright — scored like a
- *  strong capture (same shape as scoreMove's capture bonus), plus a flat
- *  bonus so the bot doesn't sit on a banked ultimateReady flag once a legal
- *  target exists. Doesn't account for Warpath's extra sweep captures along
- *  the way — target choice among a rarely-more-than-one-deep candidate pool
- *  isn't worth the complexity of a speculative applyWarpath() call here. */
+/** Score Mage's Blink Strike: a guaranteed hit that bypasses shield-tile
+ *  protection and Ward outright — scored like a strong capture (same shape
+ *  as scoreMove's capture bonus), plus a flat bonus so the bot doesn't sit
+ *  on a banked ultimateReady flag once a legal target exists. */
 function scoreUltimateStrike(state: GameState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
   let score = 500 + target.position * 10;
@@ -597,6 +594,15 @@ function scoreBenediction(poolSize: number, rand: () => number): number {
   return 250 + 120 * poolSize + rand() * 20;
 }
 
+/** Score Warrior's Shield Wall (2026-09-17, replaces Warpath): Benediction's
+ *  exact twin (same "never sit on ultimateReady" temperament, same
+ *  pool-scaled value — every stone it would wall is a future kill denied),
+ *  scored identically on purpose so the two ultimates read the same way to
+ *  the bot as they do in the engine doc's own FLAG note. */
+function scoreShieldWall(poolSize: number, rand: () => number): number {
+  return 250 + 120 * poolSize + rand() * 20;
+}
+
 /** Score Rogue's Pickpocket — a TURN-KEEPING drain (Bless's contract) with
  *  zero board effect, so its value lives entirely in what the foe's bank
  *  was about to buy them. Every class's strongest tool needs the FULL
@@ -610,7 +616,7 @@ function scoreBenediction(poolSize: number, rand: () => number): number {
  *  positive reflexively out-competing a genuine capture chance every
  *  single turn. STARTING VALUES, not yet sim-tuned. */
 /** Score Rogue's Backstab (restored 2026-09-13): a guaranteed hit, scored
- *  like Blink Strike/Warpath's guaranteed capture. RETIRED the wound tier
+ *  like Blink Strike's guaranteed capture. RETIRED the wound tier
  *  2026-09-17 — getBackstabTargets now excludes every protected target
  *  outright (isProtected), so a target reaching this function is always a
  *  real kill. Costs half the 4-bank, so it competes with Pickpocket +
@@ -1110,11 +1116,14 @@ function pickStandardPowerAction(
   }
 
   if (cls === "warrior" && power.ultimateReady[mover]) {
-    for (const targetId of getWarpathTargets(state, power, mover)) {
-      const score = scoreUltimateStrike(state, targetId, rand);
+    // Shield Wall (2026-09-17, replaces Warpath outright): no target,
+    // Benediction's exact shape/scoring — see scoreShieldWall.
+    const pool = getShieldWallTargets(state, power, mover);
+    if (pool.length > 0) {
+      const score = scoreShieldWall(pool.length, rand);
       if (score > bestScore) {
         bestScore = score;
-        best = { kind: "warpath", targetTokenId: targetId };
+        best = { kind: "shieldWall" };
       }
     }
   }
@@ -1406,8 +1415,8 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
       out.push({ kind: "rainOfArrows", targetTokenId: id });
     }
   }
-  if (cls === "warrior" && power.ultimateReady[mover]) {
-    for (const id of getWarpathTargets(state, power, mover)) out.push({ kind: "warpath", targetTokenId: id });
+  if (cls === "warrior" && power.ultimateReady[mover] && getShieldWallTargets(state, power, mover).length > 0) {
+    out.push({ kind: "shieldWall" });
   }
   if (cls === "warrior" && charges >= 1) {
     const bulwarkTargets = getBulwarkTargets(state, power, mover);
@@ -1526,9 +1535,13 @@ const MK_EVAL_THREAT_PER_TILE = 6;
  *  capture's swing, so the bot spends when a spend beats holding, not
  *  reflexively either way. */
 const MK_EVAL_CHARGE = 24;
-/** A banked ultimate is a guaranteed future capture of a token of the bot's
- *  choosing (Blink Strike / Warpath both bypass shields and Ward) — priced
- *  near a mid-board capture's positional swing so it isn't spent on scraps. */
+/** The shared default price for a banked ultimateReady flag — for the
+ *  capture ultimates (Blink Strike, Rain of Arrows, Grand Heist, Bloodbath,
+ *  Wild Hunt) it's a guaranteed future kill of the bot's choosing; for the
+ *  army-wall ultimates (Benediction, Shield Wall) and the rest it's the
+ *  same flat option value, priced near a mid-board capture's positional
+ *  swing so a banked flag isn't spent on scraps. Necromancer's Exhume is
+ *  the one carve-out — see MK_EVAL_EXHUME_HELD. */
 const MK_EVAL_ULTIMATE = 70;
 /** A NECROMANCER'S banked charge, specifically — priced well under the
  *  shared MK_EVAL_CHARGE because the class has no other outlet for it: no
@@ -2034,8 +2047,8 @@ function mkSimulate(
       return applyBlinkStrike(state, power, c.targetTokenId, mover);
     case "rainOfArrows":
       return applyRainOfArrows(state, power, c.targetTokenId, mover);
-    case "warpath":
-      return applyWarpath(state, power, c.targetTokenId, mover);
+    case "shieldWall":
+      return applyShieldWall(state, power, mover);
     case "bulwark":
       return applyBulwark(state, power, c.tokenId, mover);
     case "revive":

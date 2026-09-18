@@ -36,7 +36,7 @@ import {
   applyVanish,
   applyBackstab,
   applyBlink,
-  applyWarpath,
+  applyShieldWall,
   breakShieldStreak,
   CHARGE_CAP,
   getLegalPowerMoves,
@@ -91,11 +91,11 @@ interface GameResult {
     charge: number;
     rainOfArrows: number;
     blinkStrike: number;
-    warpath: number;
+    shieldWall: number;
     bulwark: number;
     bulwarkReinforced: number; // RETIRED (BULWARK_REINFORCED_RETIRED) — always 0, kept for shape
     bulwarkBlock: number;
-    wallsRaised: number; // new walls raised this game (Bulwark + Bless + Benediction), the wallLife denominator
+    wallsRaised: number; // new walls raised this game (Bulwark + Bless + Benediction + Shield Wall), the wallLife denominator
     wallTurns: number; // sum, over every own-turn tick, of walls still up AFTER that turn's upkeep — wallLife = wallTurns/wallsRaised
     wallsDropped: number; // walls that fell because their owner couldn't pay wallUpkeepFor
     bleed: number; // total mana actually paid to wallUpkeepFor, summed over the game
@@ -424,14 +424,18 @@ function takeTurn(
         usage: { ...turnUsage, blinkStrike: 1 },
       };
     }
-    case "warpath": {
-      const r = applyWarpath(state, power, action.targetTokenId, mover);
+    case "shieldWall": {
+      const r = applyShieldWall(state, power, mover);
       return {
         state: r.state,
         power: r.power,
         flips,
-        sweepSize: 1 + r.sweptTokenIds.length,
-        usage: { ...turnUsage, warpath: 1 },
+        sweepSize: 0,
+        usage: {
+          ...turnUsage,
+          shieldWall: 1,
+          ...(r.walledTokenIds.length > 0 ? { wallsRaised: (turnUsage.wallsRaised ?? 0) + r.walledTokenIds.length } : {}),
+        },
       };
     }
     case "bulwark": {
@@ -634,7 +638,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     charge: 0,
     rainOfArrows: 0,
     blinkStrike: 0,
-    warpath: 0,
+    shieldWall: 0,
     bulwark: 0,
     bulwarkReinforced: 0,
     bulwarkBlock: 0,
@@ -700,7 +704,7 @@ function playOne(p1Class: PlayerClass, p2Class: PlayerClass): GameResult {
     if (r.usage.charge) usage.charge++;
     if (r.usage.rainOfArrows) usage.rainOfArrows++;
     if (r.usage.blinkStrike) usage.blinkStrike++;
-    if (r.usage.warpath) usage.warpath++;
+    if (r.usage.shieldWall) usage.shieldWall++;
     if (r.usage.bulwark) usage.bulwark++;
     if (r.usage.bulwarkReinforced) usage.bulwarkReinforced++;
     if (r.usage.bulwarkBlock) usage.bulwarkBlock++;
@@ -814,7 +818,7 @@ for (const [a, b] of matchups) {
   const avgCharge = mean(results.map((r) => r.usage.charge));
   const avgRainOfArrows = mean(results.map((r) => r.usage.rainOfArrows));
   const avgBlinkStrike = mean(results.map((r) => r.usage.blinkStrike));
-  const avgWarpath = mean(results.map((r) => r.usage.warpath));
+  const avgShieldWall = mean(results.map((r) => r.usage.shieldWall));
   const avgBulwark = mean(results.map((r) => r.usage.bulwark));
   const avgBulwarkReinforced = mean(results.map((r) => r.usage.bulwarkReinforced));
   const avgBulwarkBlock = mean(results.map((r) => r.usage.bulwarkBlock));
@@ -868,7 +872,7 @@ for (const [a, b] of matchups) {
     `  turns=${avgTurns.toFixed(1).padStart(6)}  maxTurns=${maxTurns}  flips=${avgFlips.toFixed(1).padStart(6)}  maxSweep=${maxSweep}` +
       `  snipe/g=${avgSnipe.toFixed(2)}  push/g=${avgPush.toFixed(2)}  chargedShot/g=${avgChargedShot.toFixed(3)}` +
       `  chargedShotHome/g=${avgChargedShotSendsHome.toFixed(3)}  reflip/g=${avgReflip.toFixed(2)}  blink/g=${avgBlink.toFixed(2)}  charge/g=${avgCharge.toFixed(2)}` +
-      `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  warpath/g=${avgWarpath.toFixed(4)}` +
+      `  rainOfArrows/g=${avgRainOfArrows.toFixed(4)}  blinkStrike/g=${avgBlinkStrike.toFixed(4)}  shieldWall/g=${avgShieldWall.toFixed(4)}` +
       `  bulwark/g=${avgBulwark.toFixed(2)}  bulwarkReinf/g=${avgBulwarkReinforced.toFixed(3)}  bulwarkBlock/g=${avgBulwarkBlock.toFixed(3)}` +
       `  wallLife=${wallLife.toFixed(2)}  wallDrop/g=${avgWallsDropped.toFixed(2)}  bleed/g=${avgBleed.toFixed(2)}` +
       `  revive/g=${avgRevive.toFixed(2)}  explode/g=${avgExplosion.toFixed(3)}  explodeHome/g=${avgExplosionHome.toFixed(3)}` +

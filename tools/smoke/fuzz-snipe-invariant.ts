@@ -24,7 +24,7 @@ import {
   applyPowerMove,
   applyPush,
   applyReflip,
-  applyWarpath,
+  applyShieldWall,
   getLegalPowerMoves,
   grantZeroFlipCharge,
   initialPowerState,
@@ -174,15 +174,11 @@ function takeTurn(
       checkApplied(before, r.state, mover, moved ? moved.id : null);
       return { state: r.state, power: r.power, captured: true };
     }
-    case "warpath": {
-      const before = state;
-      const r = applyWarpath(state, power, action.targetTokenId, mover);
-      const moved = before.tokens.find((bt) => {
-        const at = r.state.tokens.find((t) => t.id === bt.id)!;
-        return bt.owner === mover && bt.position !== at.position;
-      });
-      checkApplied(before, r.state, mover, moved ? moved.id : null);
-      return { state: r.state, power: r.power, captured: true };
+    case "shieldWall": {
+      // No target, no move, no capture (2026-09-17, replaces Warpath).
+      const r = applyShieldWall(state, power, mover);
+      checkApplied(state, r.state, mover, null);
+      return { state: r.state, power: r.power, captured: false };
     }
     case "bulwark": {
       const r = applyBulwark(state, power, action.tokenId, mover);

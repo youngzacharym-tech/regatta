@@ -2005,7 +2005,10 @@ let currentPower: {
   ultimateReady: Record<PlayerId, boolean>;
   blinkStrikeTargets: number[];
   rainOfArrowsTargets?: number[];
-  warpathTargets: number[];
+  /** Warrior's Shield Wall ultimate (2026-09-17, replaces Warpath): the
+   *  would-change pool (empty = not castable; ultimateReady-gated) —
+   *  Benediction's exact shape. */
+  shieldWallTargets?: number[];
   bulwarkTargets: number[];
   /** THE WALL SYSTEM (2026-09-17): every walled token, public board truth
    *  for both seats — replaces bulwarkedTokenIds + vitality. */
@@ -2098,7 +2101,6 @@ type ArmedKind =
   | "chargedShot"
   | "blinkStrike"
   | "rainOfArrows"
-  | "warpath"
   | "bulwark"
   | "charge"
   | "bless"
@@ -2245,11 +2247,11 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     klass: "mage",
     desc: "Teleport your furthest-along stone onto any enemy in shared water, capturing it — straight through shields, Wards, and walls.",
   },
-  warpath: {
-    name: "Warpath",
+  shieldWall: {
+    name: "Shield Wall",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "warrior",
-    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and walls.",
+    desc: "Wall your entire army on the board at once — every unwalled stone rises behind its shield together, and the whole army's next upkeep is waived too. No target, no capture: the wall takes the turn, and stands only as long as you keep paying for it.",
   },
   snipe: {
     name: "Snipe",
@@ -2539,7 +2541,7 @@ const DOCK_COST: Record<string, number> = {
   charge: 1,
   bulwark: 1,
   blinkStrike: 0,
-  warpath: 0,
+  shieldWall: 0,
   revive: REVIVE_COST,
   corpseExplosion: CORPSE_EXPLOSION_COST,
   exhume: 0,
@@ -2583,7 +2585,7 @@ const DOCK_NAMES: Record<string, string> = {
   charge: "Charge",
   bulwark: "Bulwark",
   blinkStrike: "Blink Strike",
-  warpath: "Warpath",
+  shieldWall: "Shield Wall",
   revive: "Revive",
   corpseExplosion: "Explosion",
   exhume: "Exhume",
@@ -2644,7 +2646,7 @@ const DOCK_SLOTS: Record<PlayerClass, { ability: string; ult?: boolean; passive?
     { ability: "holdTheLine", passive: true },
     { ability: "charge" },
     { ability: "bulwark" },
-    { ability: "warpath", ult: true },
+    { ability: "shieldWall", ult: true },
   ],
   necromancer: [
     { ability: "soulHarvest", passive: true },
@@ -2724,7 +2726,6 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   bulwark: "tap one of your stones to wall",
   blinkStrike: "tap an enemy to strike",
   rainOfArrows: "tap an enemy to rain on",
-  warpath: "tap an enemy to end on",
   bless: "tap one of your stones to wall",
   pickpocket: "tap a glowing enemy stone",
   vanish: "tap one of your stones to hide it",
@@ -2814,13 +2815,17 @@ function abilityState(ability: string, charges: number, reflipsUsed: number): { 
       if (p.bulwarkTargets.length === 0) return { state: "noafford", reason: "No stones to wall" };
       return { state: "ready" };
     case "blinkStrike":
-    case "rainOfArrows":
-    case "warpath": {
+    case "rainOfArrows": {
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
-      const targets = ability === "blinkStrike" ? p.blinkStrikeTargets : ability === "rainOfArrows" ? (p.rainOfArrowsTargets ?? []) : p.warpathTargets;
+      const targets = ability === "blinkStrike" ? p.blinkStrikeTargets : (p.rainOfArrowsTargets ?? []);
       if (targets.length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
     }
+    case "shieldWall":
+      if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
+      if ((p.shieldWallTargets ?? []).length === 0)
+        return { state: "noafford", reason: "Your army is already walled" };
+      return { state: "ready" };
     // The server's reviveSpawnTile is the single oracle; the client only
     // decomposes WHY it's null into a teachable reason, in the order the
     // player can actually act on: free the slot, mark a corpse, fill the
@@ -2992,7 +2997,7 @@ function updateDock(active?: boolean) {
     p.chargedShotTargets.join(),
     p.blinkStrikeTargets.join(),
     (p.rainOfArrowsTargets ?? []).join(),
-    p.warpathTargets.join(),
+    (p.shieldWallTargets ?? []).join(),
     p.bulwarkTargets.join(),
     p.reviveSpawnTile ?? "",
     (p.corpseExplosionTargets ?? []).join(),
@@ -3092,8 +3097,6 @@ function armAbility(kind: ArmedKind) {
           ? p.blinkStrikeTargets
           : kind === "rainOfArrows"
             ? (p.rainOfArrowsTargets ?? [])
-          : kind === "warpath"
-            ? p.warpathTargets
             : kind === "charge"
               ? [...chargeMoveIndexByToken.keys()]
               : kind === "bless"
@@ -3167,9 +3170,6 @@ function fireArmed(tokenId: number) {
       break;
     case "rainOfArrows":
       sendToServer({ type: "usePower", action: { kind: "rainOfArrows", targetTokenId: tokenId } });
-      break;
-    case "warpath":
-      sendToServer({ type: "usePower", action: { kind: "warpath", targetTokenId: tokenId } });
       break;
     case "bulwark":
       sendToServer({ type: "usePower", action: { kind: "bulwark", tokenId } });
@@ -3346,6 +3346,15 @@ dockEl.addEventListener("click", (e) => {
     // Instant, Revive's precedent: Vigil has no target at all — it waives
     // upkeep for every wall the mover already holds, not one stone.
     sendToServer({ type: "usePower", action: { kind: "vigil" } });
+    flashDockButton(ability, "fired");
+    return;
+  }
+  if (ability === "shieldWall") {
+    // Instant, Benediction's precedent (2026-09-17, replaces Warpath): the
+    // pool is "your whole unwalled on-board army" — a board tap would be a
+    // choice carrying no information. The server re-validates against the
+    // shared oracle.
+    sendToServer({ type: "usePower", action: { kind: "shieldWall" } });
     flashDockButton(ability, "fired");
     return;
   }
@@ -4063,7 +4072,7 @@ function showAnnouncement(text: string, klass?: string, ms = 1800) {
 }
 
 // --- Ability proc banner (Master Killer) -----------------------------------
-// The flashy class-colored callout ("Reroll!", "Warpath!") that pops center
+// The flashy class-colored callout ("Reroll!", "Shield Wall!") that pops center
 // screen when a power fires. It rides the same state events as the detail
 // banner above, so both players see every proc — the caster and the victim.
 const procEl = document.getElementById("proc") as HTMLDivElement;
@@ -4193,7 +4202,7 @@ function announceFromState(msg: {
   lastChargeEvent?: { player: PlayerId; delta: number } | null;
   lastRainOfArrows?: { targetTokenId: number | null } | null;
   lastUltimate?: {
-    kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
+    kind: "blinkStrike" | "grandHeist" | "rainOfArrows";
     targetTokenId: number;
     sweptTokenIds: number[];
     drained?: number;
@@ -4208,6 +4217,7 @@ function announceFromState(msg: {
   lastBless?: { tokenId: number } | null;
   lastVigil?: { player: PlayerId } | null;
   lastBenediction?: { tokenIds: number[] } | null;
+  lastShieldWall?: { tokenIds: number[] } | null;
   lastPickpocket?: { targetTokenId: number; stolen: number } | null;
   lastVanish?: { tokenId: number } | null;
   // Below: filled in from their declared shapes in room-engine.ts's
@@ -4405,6 +4415,20 @@ function announceFromState(msg: {
     if (classOf(msg.lastMovePlayer) === "cleric") showProc("cleric", "Benediction!", "benediction");
     showAnnouncement(
       `${subject} sang the Benediction — ${n} of ${target} stone${n === 1 ? "" : "s"} blessed at once!`,
+      "ultimate",
+    );
+    return;
+  }
+  if (msg.lastShieldWall && msg.lastMovePlayer) {
+    // Benediction's exact twin (2026-09-17, replaces Warpath) — same
+    // announce shape, "warrior"/"shieldWall" in place of "cleric"/"benediction".
+    const isMe = msg.lastMovePlayer === myRole;
+    const subject = isMe ? "You" : playerLabel(msg.lastMovePlayer);
+    const target = isMe ? "your" : "their";
+    const n = msg.lastShieldWall.tokenIds.length;
+    if (classOf(msg.lastMovePlayer) === "warrior") showProc("warrior", "Shield Wall!", "shieldWall");
+    showAnnouncement(
+      `${subject} raised a Shield Wall — ${n} of ${target} stone${n === 1 ? "" : "s"} walled at once!`,
       "ultimate",
     );
     return;
@@ -4677,11 +4701,9 @@ function announceFromState(msg: {
     const label =
       msg.lastUltimate.kind === "blinkStrike"
         ? "Blink Strike"
-        : msg.lastUltimate.kind === "warpath"
-          ? "Warpath"
-          : msg.lastUltimate.kind === "rainOfArrows"
-            ? "Rain of Arrows"
-            : "Grand Heist";
+        : msg.lastUltimate.kind === "rainOfArrows"
+          ? "Rain of Arrows"
+          : "Grand Heist";
     const sweptCount = msg.lastUltimate.sweptTokenIds.length;
     const sweepPhrase = sweptCount > 0 ? `, sweeping ${sweptCount} more` : "";
     const drained = msg.lastUltimate.drained ?? 0;
@@ -4696,7 +4718,7 @@ function announceFromState(msg: {
   }
 
   // Necromancer's Exhume — an ultimate resolving, so it sits with its
-  // Blink Strike/Warpath siblings (turn-ending, lastMovePlayer is the
+  // Blink Strike sibling (turn-ending, lastMovePlayer is the
   // caster). The landing tile is the server's own `returnedTo`, never the
   // occupancy walk re-derived here.
   if (msg.lastExhume && msg.lastMovePlayer) {
@@ -5188,15 +5210,14 @@ function summarizeEvent(ev: StateEvent): string {
       ? "Blink Strike"
       : ev.lastUltimate.kind === "rainOfArrows"
         ? "Rain of Arrows"
-        : ev.lastUltimate.kind === "grandHeist"
-          ? "Grand Heist"
-          : "Warpath";
+        : "Grand Heist";
   if (ev.lastRainOfArrows)
     return ev.lastRainOfArrows.targetTokenId === null ? "Rain of Arrows — no target" : "Rain of Arrows";
   if (ev.lastRevive) return `Revive — thrall rises on ${tileDisplay(ev.lastRevive.tile)}`;
   if (ev.lastCorpseExplosion) return `Corpse Explosion on ${tileDisplay(ev.lastCorpseExplosion.tile)}`;
   if (ev.lastChargeSweep) return `Charge — sweep of ${ev.lastChargeSweep.sweptTokenIds.length}`;
   if (ev.lastBenediction) return `Benediction — ${ev.lastBenediction.tokenIds.length} blessed`;
+  if (ev.lastShieldWall) return `Shield Wall — ${ev.lastShieldWall.tokenIds.length} walled`;
   if (ev.lastPush) return "Push";
   if (ev.lastChargedShot) return "Charged Shot";
   if (ev.lastBulwark) return "Bulwark cast";
@@ -5299,10 +5320,19 @@ function describeEffects(i: number): string[] {
         ? `<b>Rain of Arrows</b> fired — no valid target`
         : `<b>Rain of Arrows</b>: ${ownedLabel(ev.lastRainOfArrows.targetTokenId)} struck down`,
     );
-  if (ev.lastUltimate)
+  if (ev.lastUltimate) {
+    const label =
+      ev.lastUltimate.kind === "blinkStrike"
+        ? "Blink Strike"
+        : ev.lastUltimate.kind === "rainOfArrows"
+          ? "Rain of Arrows"
+          : "Grand Heist";
     fx.push(
-      `<b>${ev.lastUltimate.kind === "blinkStrike" ? "Blink Strike" : "Warpath"}</b>: target ${ownedLabel(ev.lastUltimate.targetTokenId)}${ev.lastUltimate.sweptTokenIds.length > 0 ? `, swept ${ev.lastUltimate.sweptTokenIds.map((id) => ownedLabel(id)).join(", ")}` : ""}`,
+      `<b>${label}</b>: target ${ownedLabel(ev.lastUltimate.targetTokenId)}${ev.lastUltimate.sweptTokenIds.length > 0 ? `, swept ${ev.lastUltimate.sweptTokenIds.map((id) => ownedLabel(id)).join(", ")}` : ""}`,
     );
+  }
+  if (ev.lastShieldWall)
+    fx.push(`<b>Shield Wall</b>: walled ${ev.lastShieldWall.tokenIds.map((id) => ownedLabel(id)).join(", ") || "no one"}`);
   if (ev.lastExhume)
     fx.push(`<b>Exhume</b>: escaped ${ownedLabel(ev.lastExhume.targetTokenId)} dragged back to ${tileDisplay(ev.lastExhume.returnedTo)}`);
 
@@ -5328,7 +5358,7 @@ function describeEffects(i: number): string[] {
   if (ev.flip === 0 && ev.lastChargeEvent && ev.lastChargeEvent.delta > 0)
     fx.push(`Zero flip — <b>consolation charge</b> banked`);
 
-  // Shield streak + ultimate readiness (the Exhume/Warpath/Blink gate).
+  // Shield streak + ultimate readiness (the Exhume/Shield Wall/Blink gate).
   if (ev.power?.shieldStreak && prev?.power?.shieldStreak) {
     for (const p of ["p1", "p2"] as PlayerId[]) {
       const a = prev.power.shieldStreak[p];
@@ -6238,10 +6268,10 @@ const GUIDE_SPREADS: [string, string][] = [
        nothing short of an ultimate can capture, sweep, push, or otherwise
        touch it. Holding it costs mana every one of your own turns; let
        the bill go unpaid and it falls on its own.</li>
-       <li><b>Warpath</b> (active, spends your ultimate): land on a shield
-       tile three times running, then teleport your least-advanced stone
-       onto any enemy in shared water, capturing it and every enemy in
-       between through every protection there is.</li>
+       <li><b>Shield Wall</b> (active, spends your ultimate): land on a
+       shield tile three times running, then wall your ENTIRE on-board army
+       at once — every unwalled stone rises behind its shield together, and
+       the whole army's next upkeep is waived too. No target, no capture.</li>
      </ul>`,
   ],
   [
@@ -6628,6 +6658,7 @@ const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[]
       "<b>But holding one costs you.</b> A wall bleeds its owner mana every one of their own turns. Let the bill go unpaid and it falls on its own — a wall that outlives its threat is a wall you can't afford to keep.",
       "<b>Ward Breaker is retired.</b> The Warrior's new passive is <b>Hold the Line</b>: every Bulwark you cast banks a free turn of wall-upkeep grace, waiving that first bill outright. Nothing below an ultimate pierces a Ward, a wall, or a Vanish any more — not a Warrior's step, not a thrall's blade, not a Cleric's own strike, not a Warlock's Sacrifice.",
       "<b>Vanish stands on its own.</b> The Rogue's dodge is no longer a cut-rate wall — it's a fixed two-turn vanishing act, costing no mana to hold, immune to everything short of an ultimate.",
+      "<b>Warpath is retired. Shield Wall takes its place.</b> No target — the Warrior's ultimate now raises a wall on the entire on-board army at once, with a free turn of upkeep grace to go with it.",
       "<b>Heal is retired. Vigil takes its place.</b> No target — it waives your NEXT wall-upkeep bill for your whole army at once, front stone first. Worthless with a single wall up; built for when you're juggling two or more.",
       "<b>Sanctified Ground keeps the lights on, not the bandages.</b> A shield-tile landing now waives your next wall bill instead of mending old wounds.",
       "<b>No more wounds, anywhere.</b> Every protection below an ultimate is absolute now — a Warlock's Sacrifice, a Rogue's Backstab, and a Barbarian's Reckless Swing all lost the pierce that used to reach a blessed or walled stone. Everyone's tools read the same way.",
@@ -7175,7 +7206,6 @@ if (dockDemoParam !== null) {
       chargedShotTargets: [4],
       ultimateReady: { p1: d.ult, p2: false },
       blinkStrikeTargets: d.ult ? [4, 5] : [],
-      warpathTargets: d.ult ? [4] : [],
       bulwarkTargets: [0, 1, 2],
       walls: {},
       vanished: {},
@@ -7276,7 +7306,6 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
     chargedShotTargets: [],
     ultimateReady: { p1: false, p2: false },
     blinkStrikeTargets: [],
-    warpathTargets: [],
     bulwarkTargets: [],
     walls: { 5: "bulwark" },
     vanished: {},

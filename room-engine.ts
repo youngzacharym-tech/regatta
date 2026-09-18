@@ -76,7 +76,7 @@ import {
   getBackstabTargets,
   applySnare,
   applyVanish,
-  applyWarpath,
+  applyShieldWall,
   applyWildHunt,
   BLESS_COST,
   breakShieldStreak,
@@ -110,7 +110,7 @@ import {
   getSacrificeTargets,
   getSnareTiles,
   getVanishTargets,
-  getWarpathTargets,
+  getShieldWallTargets,
   getWildHuntTargets,
   grantZeroFlipCharge,
   PIERCING_SHOT_COST,
@@ -332,7 +332,10 @@ export interface PublicPower {
   /** Archer's banked Rain of Arrows (2026-09-16): enemy ids in shared water,
    *  populated only while ultimateReady — the dock gate. ADDITIVE. */
   rainOfArrowsTargets?: number[];
-  warpathTargets: number[];
+  /** Warrior's Shield Wall ultimate (2026-09-17, replaces Warpath): the
+   *  would-change pool (empty = not castable; gated on ultimateReady like
+   *  every ultimate's list) — Benediction's exact shape. ADDITIVE. */
+  shieldWallTargets?: number[];
   bulwarkTargets: number[];
   /** THE WALL SYSTEM (2026-09-17, replaces bulwarkedTokenIds + vitality —
    *  a wall is now the one uncapturable-except-by-ultimate status, whether
@@ -483,12 +486,12 @@ export type RoomEvent =
       lastChargeEvent: { player: PlayerId; delta: number } | null;
       lastRainOfArrows: { targetTokenId: number | null } | null;
       lastUltimate: {
-        kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
+        kind: "blinkStrike" | "grandHeist" | "rainOfArrows";
         targetTokenId: number;
         sweptTokenIds: number[];
         /** Grand Heist only: how much of the target owner's bank was
          *  actually drained (before/after diff, server-computed). Absent
-         *  for blinkStrike/warpath — they don't touch charges at all. */
+         *  for blinkStrike — it doesn't touch charges at all. */
         drained?: number;
       } | null;
       /** Warrior's Charge was just EXECUTED this commit (vs the normal move
@@ -534,6 +537,9 @@ export type RoomEvent =
       lastVigil?: { player: PlayerId } | null;
       /** Cleric's Benediction ultimate — the ids it walled. */
       lastBenediction?: { tokenIds: number[] } | null;
+      /** Warrior's Shield Wall ultimate (2026-09-17, replaces Warpath) — the
+       *  ids it walled. Benediction's exact wire twin. */
+      lastShieldWall?: { tokenIds: number[] } | null;
       /** RETIRED 2026-09-17 (walls are absolute — no more wound split, see
        *  master-killer.ts's resolveTurn doc). Always null; kept on the wire
        *  so nothing downstream needs its own removal pass. */
@@ -675,7 +681,7 @@ export interface RoomDoc {
   zeroFlipChargeBefore: number | null;
   lastRainOfArrows: { targetTokenId: number | null } | null;
   lastUltimate: {
-    kind: "blinkStrike" | "warpath" | "grandHeist" | "rainOfArrows";
+    kind: "blinkStrike" | "grandHeist" | "rainOfArrows";
     targetTokenId: number;
     sweptTokenIds: number[];
     drained?: number;
@@ -704,6 +710,9 @@ export interface RoomDoc {
   lastBless?: { tokenId: number } | null;
   lastVigil?: { player: PlayerId } | null;
   lastBenediction?: { tokenIds: number[] } | null;
+  /** Warrior's Shield Wall ultimate (2026-09-17, replaces Warpath) —
+   *  Benediction's exact wire twin. */
+  lastShieldWall?: { tokenIds: number[] } | null;
   lastWound?: { tokenIds: number[] } | null;
   lastMend?: { tokenIds: number[] } | null;
   /** See RoomEvent's docs — the rogue's announcement slots (2026-07-21).
@@ -762,7 +771,10 @@ export type RoomActionInput =
         | { kind: "charge"; moveIndex: number }
         | { kind: "blinkStrike"; targetTokenId: number }
         | { kind: "rainOfArrows"; targetTokenId: number }
-        | { kind: "warpath"; targetTokenId: number }
+        /** Warrior's Shield Wall (2026-09-17, replaces Warpath): no
+         *  payload — getShieldWallTargets is the shared oracle (empty pool
+         *  = not castable), Benediction's exact shape. */
+        | { kind: "shieldWall" }
         /** The reinforced tier retired 2026-09-13, before the wall rework —
          *  Bulwark is the one plain cast now. */
         | { kind: "bulwark"; tokenId: number }
@@ -877,9 +889,9 @@ export function publicPower(doc: RoomDoc): PublicPower | null {
       doc.mk.classes[mover] === "mage" && doc.mk.ultimateReady[mover]
         ? getBlinkStrikeTargets(doc.state, p, mover)
         : [],
-    warpathTargets:
+    shieldWallTargets:
       doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover]
-        ? getWarpathTargets(doc.state, p, mover)
+        ? getShieldWallTargets(doc.state, p, mover)
         : [],
     bulwarkTargets:
       doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1
@@ -1079,7 +1091,7 @@ export function freshMatchFields(
   | "mk" | "classesPicked" | "currentPowerMoves" | "lastPush" | "lastChargedShot" | "lastChargeEvent"
   | "zeroFlipChargeBefore" | "lastRainOfArrows" | "lastUltimate" | "lastBulwark" | "lastBulwarkBlock"
   | "lastReflip" | "lastRevive" | "lastThrallExpired" | "lastCorpseDenied" | "lastCorpseExplosion" | "lastExhume"
-  | "lastBless" | "lastVigil" | "lastBenediction" | "lastWound" | "lastMend" | "rescueAttempted"
+  | "lastBless" | "lastVigil" | "lastBenediction" | "lastShieldWall" | "lastWound" | "lastMend" | "rescueAttempted"
   | "lastPickpocket" | "lastVanish" | "lastBackstab" | "lastBlink"
   | "lastCurse" | "lastCurseExpired" | "lastSacrifice" | "lastFelStorm"
   | "lastSnare" | "lastTrapSprung" | "lastWolfBite" | "lastPiercingShot" | "lastThaw" | "lastWallBleed" | "lastWildHunt"
@@ -1118,6 +1130,7 @@ export function freshMatchFields(
     lastBless: null,
     lastVigil: null,
     lastBenediction: null,
+    lastShieldWall: null,
     lastWound: null,
     lastMend: null,
     lastPickpocket: null,
@@ -1275,7 +1288,6 @@ export function applyAction(
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "rainOfArrows") return { doc: applyMkSimple(doc, seat, "rainOfArrows", a.targetTokenId, now) };
-      if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
       if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
@@ -1283,6 +1295,7 @@ export function applyAction(
       if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
       if (a.kind === "vigil") return { doc: applyMkVigil(doc, seat, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
+      if (a.kind === "shieldWall") return { doc: applyMkShieldWall(doc, seat, now) };
       if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
       if (a.kind === "vanish") return { doc: applyMkSimple(doc, seat, "vanish", a.tokenId, now, rand) };
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
@@ -1353,11 +1366,6 @@ function validateUsePower(
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (!getBlinkStrikeTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Blink Strike target";
       return null;
-    case "warpath":
-      if (cls !== "warrior") return "Only a Warrior can Warpath";
-      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
-      if (!getWarpathTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Warpath target";
-      return null;
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
       // The reinforced tier retired 2026-09-13 (BULWARK_REINFORCED_RETIRED)
@@ -1411,6 +1419,13 @@ function validateUsePower(
       if (cls !== "cleric") return "Only a Cleric can cast Benediction";
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (getBenedictionTargets(doc.state, p(), seat).length === 0) return "Benediction would bless no one";
+      return null;
+    case "shieldWall":
+      // No target (2026-09-17, replaces Warpath) — getShieldWallTargets is
+      // the whole gate, Benediction's exact shape.
+      if (cls !== "warrior") return "Only a Warrior can raise a Shield Wall";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getShieldWallTargets(doc.state, p(), seat).length === 0) return "Shield Wall would wall no one";
       return null;
     case "pickpocket":
       if (cls !== "rogue") return "Only a Rogue can Pickpocket";
@@ -1538,6 +1553,7 @@ const CLEAR_SLOTS = {
   lastBless: null,
   lastVigil: null,
   lastBenediction: null,
+  lastShieldWall: null,
   lastWound: null,
   lastMend: null,
   lastPickpocket: null,
@@ -1635,16 +1651,17 @@ function applyMkCharge(doc: RoomDoc, seat: PlayerId, move: PowerMove, now: numbe
   return commitFrame(next, now, stateEventOf(next));
 }
 
-/** Push / Charged Shot / Blink Strike / Warpath / Bulwark / Exhume share
+/** Push / Charged Shot / Blink Strike / Bulwark / Exhume share
  *  one commit shape and differ only in which apply-fn runs and which slot
  *  announces. (Bless and Vigil are NOT here — Bless keeps the turn, see
- *  applyMkBlessing; Vigil has no target at all, see applyMkVigil. The
- *  reinforced Bulwark tier retired 2026-09-13, before the wall rework —
+ *  applyMkBlessing; Vigil has no target at all, see applyMkVigil. Shield
+ *  Wall has no target either, Benediction's shape — see applyMkShieldWall.
+ *  The reinforced Bulwark tier retired 2026-09-13, before the wall rework —
  *  see BULWARK_REINFORCED_RETIRED.) */
 function applyMkSimple(
   doc: RoomDoc,
   seat: PlayerId,
-  kind: "push" | "chargedShot" | "blinkStrike" | "rainOfArrows" | "warpath" | "bulwark" | "exhume" | "vanish" | "grandHeist",
+  kind: "push" | "chargedShot" | "blinkStrike" | "rainOfArrows" | "bulwark" | "exhume" | "vanish" | "grandHeist",
   tokenId: number,
   now: number,
   rand: () => number = Math.random,
@@ -1686,13 +1703,6 @@ function applyMkSimple(
       r = rr;
       capsGained = 1;
       slots = { lastUltimate: { kind: "rainOfArrows", targetTokenId: tokenId, sweptTokenIds: [] } };
-      break;
-    }
-    case "warpath": {
-      const rr = applyWarpath(doc.state, power, tokenId, seat);
-      r = rr;
-      capsGained = 1 + rr.sweptTokenIds.length;
-      slots = { lastUltimate: { kind: "warpath", targetTokenId: tokenId, sweptTokenIds: rr.sweptTokenIds } };
       break;
     }
     case "bulwark":
@@ -2311,6 +2321,25 @@ function applyMkBenediction(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc 
   return commitFrame(next, now, stateEventOf(next));
 }
 
+/** Shield Wall ends the turn (its ultimate siblings' shape) — Benediction's
+ *  exact commit twin, own fn for the same reason: the announce payload is
+ *  the walled id list, not a single token slot. No charge delta possible
+ *  (spends ultimateReady, not charges), so lastChargeEvent stays null. */
+function applyMkShieldWall(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+  const r = applyShieldWall(doc.state, fromWirePower(doc.mk!), seat);
+  let next: RoomDoc = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastShieldWall: { tokenIds: r.walledTokenIds },
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
+
 // ============================================================================
 // PHASE RESOLUTION (delay-0 transitions, chained from actions and ticks)
 // ============================================================================
@@ -2605,8 +2634,8 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
       return applyMkSimple(doc, seat, "blinkStrike", action.targetTokenId, now);
     case "rainOfArrows":
       return applyMkSimple(doc, seat, "rainOfArrows", action.targetTokenId, now);
-    case "warpath":
-      return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
+    case "shieldWall":
+      return applyMkShieldWall(doc, seat, now);
     case "bulwark":
       return applyMkSimple(doc, seat, "bulwark", action.tokenId, now);
     case "revive":

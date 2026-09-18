@@ -92,7 +92,7 @@ import {
   applyBackstab,
   BACKSTAB_COST,
   getBackstabTargets,
-  applyWarpath,
+  applyShieldWall,
   breakShieldStreak,
   canReflipAgain,
   canCastVigil,
@@ -128,7 +128,7 @@ import {
   applyRainOfArrows,
   getReviveSpawnTile,
   getVanishTargets,
-  getWarpathTargets,
+  getShieldWallTargets,
   grantZeroFlipCharge,
   initialPowerState,
   isCursed,
@@ -778,9 +778,11 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 13. Ultimates: Mage's Blink Strike & Warrior's Warpath — the active
-//     payoffs spent from a banked ultimateReady flag (see section 12 for how
-//     that flag gets set).
+// 13. Ultimates: Mage's Blink Strike & Warrior's Shield Wall (2026-09-17,
+//     replaces Warpath) — the active payoffs spent from a banked
+//     ultimateReady flag (see section 12 for how that flag gets set). Shield
+//     Wall's own tests live with Benediction's (its exact twin) — see the
+//     Cleric wall-system block below.
 // ---------------------------------------------------------------------------
 {
   const readyPower = (cls: "mage" | "warrior"): PowerState => {
@@ -833,92 +835,6 @@ function check(name: string, cond: boolean, detail?: string) {
     getBlinkStrikeTargets(sBlinkNone, readyPower("mage"), "p1").length === 0,
   );
 
-  // --- Warpath (Warrior) ----------------------------------------------------
-
-  // Basic + sweep: the mover's on-board token teleports onto the target,
-  // capturing it AND sweeping an unprotected enemy caught strictly between
-  // start and destination — grants exactly 1 charge regardless.
-  const sWarSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between); target enemy5 at 9
-  const rWarSweep = applyWarpath(sWarSweep, readyPower("warrior"), 5, "p1");
-  check("Warpath: relocates the mover's token onto the target's tile", rWarSweep.state.tokens.find((t) => t.id === 0)!.position === 9);
-  check("Warpath: captures the primary target", rWarSweep.state.tokens.find((t) => t.id === 5)!.position === -1);
-  check("Warpath: sweeps an unprotected enemy caught in between", rWarSweep.state.tokens.find((t) => t.id === 4)!.position === -1);
-  check(
-    "Warpath: reports the swept token in sweptTokenIds",
-    rWarSweep.sweptTokenIds.length === 1 && rWarSweep.sweptTokenIds[0] === 4,
-    JSON.stringify(rWarSweep.sweptTokenIds),
-  );
-  check("Warpath: grants exactly 1 charge regardless of sweep size", rWarSweep.power.charges.p1 === 1, `got ${rWarSweep.power.charges.p1}`);
-  check("Warpath: clears ultimateReady on use", rWarSweep.power.ultimateReady.p1 === false);
-  check("Warpath: always ends the turn", rWarSweep.state.currentPlayer === "p2" && rWarSweep.state.extraTurn === false);
-
-  // Uncapped sweep: more enemies caught in between than CHARGE_SWEEP_CAP
-  // would allow for an ordinary Charge — Warpath takes all of them.
-  const sWarUncapped = state("p1", { 0: 4, 4: 5, 5: 6, 6: 8, 7: 10 }); // enemies at 5,6,8 between mover(4) and target(10)
-  const rWarUncapped = applyWarpath(sWarUncapped, readyPower("warrior"), 7, "p1");
-  check(
-    `Warpath: sweep is uncapped (CHARGE_SWEEP_CAP is ${CHARGE_SWEEP_CAP}, this sweeps more)`,
-    rWarUncapped.sweptTokenIds.length === 3,
-    JSON.stringify(rWarUncapped.sweptTokenIds),
-  );
-
-  // Bypasses shield-tile protection AND Ward for a SWEPT token (not just the
-  // primary target). Teleporting
-  // BACKWARD (target behind the mover) puts the swept token closer to the
-  // mover's start — i.e. at a HIGHER raw position than the target — which is
-  // exactly what it takes for it to be p2's most-advanced on-board token
-  // (and thus Warded) while the target itself isn't.
-  const sWarWard = state("p1", { 0: 10, 4: 7, 5: 4 }); // mover token0 at 10; enemy4 ON shield tile 7 (between, p2's most-advanced -> warded); target enemy5 at 4
-  const pwWarWard: PowerState = { ...readyPower("warrior"), classes: { p1: "warrior", p2: "mage" }, charges: { p1: 0, p2: CHARGE_CAP } };
-  check("Warpath: sanity — the swept token really is warded", isWarded(sWarWard, pwWarWard, sWarWard.tokens.find((t) => t.id === 4)!));
-  check(
-    "Warpath: sanity — the primary target is NOT warded (it's not p2's most-advanced token)",
-    !isWarded(sWarWard, pwWarWard, sWarWard.tokens.find((t) => t.id === 5)!),
-  );
-  const rWarWard = applyWarpath(sWarWard, pwWarWard, 5, "p1");
-  check("Warpath: sweeps a warded token sitting on a shield tile", rWarWard.state.tokens.find((t) => t.id === 4)!.position === -1);
-  // REGRESSION (safety removal): breaking a Ward along the way grants the
-  // landing token nothing anymore — p2 can capture it right back (a fresh
-  // p2 token entering at tile 4, where the Warpath landed p1's token0).
-  const movesAfterWard = getLegalPowerMoves(rWarWard.state, rWarWard.power, 5); // p2's turn; reserve entry lands at 4
-  const mRecapture = movesAfterWard.find((mv) => mv.to === 4 && mv.captures.includes(0));
-  check(
-    "Warpath: a Ward broken along the way grants NO protection to the landing token",
-    !!mRecapture,
-    JSON.stringify(movesAfterWard),
-  );
-
-  // Direction-agnostic: teleporting BACKWARD (target behind the mover) still
-  // sweeps whatever's caught strictly between, same as forward.
-  const sWarBackward = state("p1", { 0: 9, 4: 6, 5: 4 }); // mover token0 at 9; enemy4 at 6 (between); target enemy5 at 4
-  const rWarBackward = applyWarpath(sWarBackward, readyPower("warrior"), 5, "p1");
-  check(
-    "Warpath: works backward (target behind the mover), sweeping what's between",
-    rWarBackward.state.tokens.find((t) => t.id === 4)!.position === -1,
-  );
-
-  // Picks the LEAST advanced on-board token when the mover has more than one.
-  const sWarPick = state("p1", { 0: 4, 1: 9, 4: 6 }); // token0 (4) is less advanced than token1 (9)
-  const rWarPick = applyWarpath(sWarPick, readyPower("warrior"), 4, "p1");
-  check(
-    "Warpath: relocates the LEAST advanced on-board token, not just any",
-    rWarPick.state.tokens.find((t) => t.id === 0)!.position === 6 && rWarPick.state.tokens.find((t) => t.id === 1)!.position === 9,
-  );
-
-  // Target eligibility mirrors Blink Strike's (same underlying rule).
-  const sWarTargets = state("p1", { 0: 4, 4: 9 });
-  check(
-    "Warpath: target eligibility matches Blink Strike's / Rain of Arrows' rule (reused)",
-    JSON.stringify(getWarpathTargets(sWarTargets, readyPower("warrior"), "p1")) ===
-      JSON.stringify(getBlinkStrikeTargets(sWarTargets, readyPower("mage"), "p1")),
-  );
-
-  // No on-board token to relocate -> no legal targets at all.
-  const sWarNone = state("p1", { 4: 9 }); // p1 has zero on-board tokens
-  check(
-    "Warpath: no targets when the mover has no on-board token",
-    getWarpathTargets(sWarNone, readyPower("warrior"), "p1").length === 0,
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,30 +983,10 @@ function check(name: string, cond: boolean, detail?: string) {
     );
   }
 
-  // --- Warpath pierces Bulwark too (primary target AND swept tokens) -------
-  {
-    const sTarget = state("p1", { 0: 4, 4: 9 });
-    const baseW = power({ p1: "warrior" });
-    const pwTarget: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, walls: { 4: "bulwark" } };
-    check(
-      "Bulwark: a walled token IS a legal Warpath primary target (ultimates pierce)",
-      getWarpathTargets(sTarget, pwTarget, "p1").includes(4),
-    );
-
-    // Sweep victim walled (the primary target itself is unprotected) — the
-    // sweep takes it anyway, and its wall clears with it.
-    const sSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between, walled); target enemy5 at 9
-    const pwSweep: PowerState = { ...baseW, ultimateReady: { ...baseW.ultimateReady, p1: true }, walls: { 4: "bulwark" } };
-    const r = applyWarpath(sSweep, pwSweep, 5, "p1");
-    check("Bulwark: a walled token in Warpath's path IS swept", r.state.tokens.find((t) => t.id === 4)!.position === -1);
-    check("Bulwark: the swept walled id appears in sweptTokenIds", r.sweptTokenIds.includes(4));
-    check("Bulwark: the primary target is still captured", r.state.tokens.find((t) => t.id === 5)!.position === -1);
-    check(
-      "Bulwark: Warpath clears the swept token's wall",
-      r.power.walls[4] === undefined,
-      JSON.stringify(r.power.walls),
-    );
-  }
+  // --- Shield Wall doesn't touch enemy walls at all (no target, no capture)
+  // — see the dedicated Shield Wall block (with Benediction's) for its own
+  // pool/apply coverage; there is no "pierces Bulwark" question for an
+  // ultimate that never captures anything.
 
   // --- Rain of Arrows pierces Bulwark (always has; cast form since 2026-09-16)
   {
@@ -2070,9 +1966,10 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Cleric: ultimates still pierce the wall (Rain of Arrows / Blink Strike /
-// Warpath) — unchanged in spirit from the old "ultimates pierce the
-// blessing," renamed for the wall vocabulary.
+// Cleric: ultimates still pierce the wall (Rain of Arrows / Blink Strike) —
+// unchanged in spirit from the old "ultimates pierce the blessing," renamed
+// for the wall vocabulary. Shield Wall/Benediction don't belong here — they
+// never capture anything, so "pierce" doesn't apply to them.
 // ---------------------------------------------------------------------------
 {
   // Rain of Arrows (banked cast) kills a blessed stone for real.
@@ -2098,18 +1995,6 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Pierce: Blink Strike lists the blessed stone", getBlinkStrikeTargets(s2, pw2, "p2").includes(0));
   const r2 = applyBlinkStrike(s2, pw2, 0, "p2");
   check("Pierce: Blink Strike kills through the blessing", r2.state.tokens.find((t) => t.id === 0)!.position === -1 && r2.power.walls[0] === undefined);
-
-  // Warpath: primary AND swept blessed stones both die.
-  const s3 = state("p2", { 0: 9, 1: 7 + 1, 4: 5, 5: 11 });
-  const pw3: PowerState = {
-    ...power({ p1: "cleric", p2: "warrior" }),
-    ultimateReady: { p1: false, p2: true },
-    walls: { 0: "blessing", 1: "blessing" },
-  };
-  const r3 = applyWarpath(s3, pw3, 0, "p2");
-  check("Pierce: Warpath primary blessed target dies", r3.state.tokens.find((t) => t.id === 0)!.position === -1);
-  check("Pierce: Warpath swept blessed target dies too", r3.state.tokens.find((t) => t.id === 1)!.position === -1 && r3.sweptTokenIds.includes(1));
-  check("Pierce: both walls clear", r3.power.walls[0] === undefined && r3.power.walls[1] === undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -2159,6 +2044,35 @@ function check(name: string, cond: boolean, detail?: string) {
   const pwAll: PowerState = { ...pwB, walls: { 0: "blessing", 1: "blessing", 2: "blessing" } };
   const sAll = state("p1", { 0: 5, 1: 2, 2: 8 });
   check("Benediction: empty pool when nothing would change", getBenedictionTargets(sAll, pwAll, "p1").length === 0);
+}
+
+// ---------------------------------------------------------------------------
+// Warrior: Shield Wall ultimate (2026-09-17, replaces Warpath outright) —
+// Benediction's exact twin, "bulwark" kind instead of "blessing". Own block
+// because the class differs, but the shape is a straight mirror.
+// ---------------------------------------------------------------------------
+{
+  const sSW = state("p1", { 0: 5, 1: 2, 2: 8 });
+  const pwSW: PowerState = {
+    ...power({ p1: "warrior" }),
+    ultimateReady: { p1: true, p2: false },
+    shieldStreak: { p1: 2, p2: 0 },
+    walls: { 0: "bulwark" },
+  };
+  const poolSW = getShieldWallTargets(sSW, pwSW, "p1");
+  check("Shield Wall: pool is the unwalled on-board army", poolSW.includes(1) && poolSW.includes(2) && !poolSW.includes(0));
+  const rSW = applyShieldWall(sSW, pwSW, "p1");
+  check("Shield Wall: walls the army", rSW.power.walls[1] === "bulwark" && rSW.power.walls[2] === "bulwark" && rSW.power.walls[0] === "bulwark");
+  check("Shield Wall: spends the flag, ends the turn", rSW.power.ultimateReady.p1 === false && rSW.state.currentPlayer === "p2");
+  check("Shield Wall: leaves the shield streak alone (ultimate rule)", rSW.power.shieldStreak.p1 === 2);
+  check("Shield Wall: reports who it walled", rSW.walledTokenIds.length === 2);
+  check("Shield Wall: banks a turn of wallGrace for the whole army", rSW.power.wallGrace.p1 === 1);
+  check("Shield Wall: grants no charge (no capture — Warpath's economy is gone)", rSW.power.charges.p1 === pwSW.charges.p1);
+
+  // All-walled army: empty pool = not castable.
+  const pwSWAll: PowerState = { ...pwSW, walls: { 0: "bulwark", 1: "bulwark", 2: "bulwark" } };
+  const sSWAll = state("p1", { 0: 5, 1: 2, 2: 8 });
+  check("Shield Wall: empty pool when nothing would change", getShieldWallTargets(sSWAll, pwSWAll, "p1").length === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2558,8 +2472,8 @@ function check(name: string, cond: boolean, detail?: string) {
   check("Grand Heist: captures a walled target", rBulwark.state.tokens.find((t) => t.id === 4)!.position === -1);
   check("Grand Heist: clears the captured token's wall", rBulwark.power.walls[4] === undefined);
 
-  // Pierces Blessing — a REAL kill (every ultimate kills straight through
-  // a wall, same as Rain of Arrows/Blink Strike/Warpath).
+  // Pierces Blessing — a REAL kill (every capturing ultimate kills straight
+  // through a wall, same as Rain of Arrows/Blink Strike).
   const sBlessed = state("p1", { 0: 5, 4: 9 });
   const pwBlessed: PowerState = {
     ...power({ p1: "rogue", p2: "cleric" }, { p1: 0, p2: 2 }),

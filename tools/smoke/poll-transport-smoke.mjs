@@ -68,7 +68,7 @@ async function stepSeat(client, view, cls) {
       if (myCls === "archer" && p.chargedShotTargets.length) opts.push({ op: "usePower", action: { kind: "chargedShot", targetTokenId: pickRandom(p.chargedShotTargets) } });
       if (myCls === "warrior" && p.bulwarkTargets.length) opts.push({ op: "usePower", action: { kind: "bulwark", tokenId: pickRandom(p.bulwarkTargets) } });
       if (myCls === "mage" && p.blinkStrikeTargets.length) opts.push({ op: "usePower", action: { kind: "blinkStrike", targetTokenId: pickRandom(p.blinkStrikeTargets) } });
-      if (myCls === "warrior" && p.warpathTargets.length) opts.push({ op: "usePower", action: { kind: "warpath", targetTokenId: pickRandom(p.warpathTargets) } });
+      if (myCls === "warrior" && p.shieldWallTargets?.length) opts.push({ op: "usePower", action: { kind: "shieldWall" } });
       if (myCls === "rogue" && p.pickpocketTargets?.length) opts.push({ op: "usePower", action: { kind: "pickpocket", targetTokenId: pickRandom(p.pickpocketTargets) } });
       // Vanish, not Backstab — that ability was retired on 2026-07-22 and
       // this line still named it, so the rogue's second active was never

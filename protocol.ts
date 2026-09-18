@@ -514,7 +514,11 @@ export type ClientMessage =
         | { kind: "charge"; moveIndex: number }
         | { kind: "blinkStrike"; targetTokenId: number }
         | { kind: "rainOfArrows"; targetTokenId: number }
-        | { kind: "warpath"; targetTokenId: number }
+        /** Warrior's Shield Wall (2026-09-17, replaces Warpath outright —
+         *  the teleport-capture identity is gone): no payload — the client
+         *  gates on power.shieldWallTargets being non-empty, Benediction's
+         *  exact shape. */
+        | { kind: "shieldWall" }
         /** Warrior's Bulwark: raises a wall on one of the caster's own
          *  stones (2026-09-17, the wall rework — see master-killer.ts's
          *  WallKind). The old Reinforced tier (`reinforced?: boolean`) is

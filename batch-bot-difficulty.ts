@@ -62,7 +62,7 @@ import {
   applyRevive,
   applySacrifice,
   applyVanish,
-  applyWarpath,
+  applyShieldWall,
   breakShieldStreak,
   CHARGE_CAP,
   getLegalPowerMoves,
@@ -242,8 +242,8 @@ function takeTurnMK(
       const r = applyBlinkStrike(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };
     }
-    case "warpath": {
-      const r = applyWarpath(state, power, action.targetTokenId, mover);
+    case "shieldWall": {
+      const r = applyShieldWall(state, power, mover);
       return { state: r.state, power: r.power };
     }
     case "bulwark":

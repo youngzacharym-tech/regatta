@@ -1089,10 +1089,6 @@ function getBlinkStrikeTargets(state, power, mover) {
   if (!findMostAdvancedToken(state, power, mover)) return [];
   return getRainOfArrowsTargets(state, power, mover);
 }
-function getWarpathTargets(state, power, mover) {
-  if (!findLeastAdvancedToken(state, power, mover)) return [];
-  return getRainOfArrowsTargets(state, power, mover);
-}
 function clearWallsOnReserveTrip(power, capturedIds) {
   const hit = capturedIds.some((id) => power.walls[id] !== void 0 || power.vanished[id] !== void 0);
   if (!hit) return power;
@@ -1133,49 +1129,27 @@ function applyBlinkStrike(state, power, targetTokenId, mover) {
   };
   return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: [] };
 }
-function applyWarpath(state, power, targetTokenId, mover) {
-  const mine = findLeastAdvancedToken(state, power, mover);
-  const target = state.tokens.find((t) => t.id === targetTokenId);
-  const from = mine.position;
-  const to = target.position;
-  const lo = Math.min(from, to);
-  const hi = Math.max(from, to);
-  const sweepCaptures = [];
-  for (let i = lo + 1; i < hi; i++) {
-    if (!BOARD_LAYOUT[i].isContested) continue;
-    const foe = state.tokens.find(
-      (t) => t.position === i && effectiveOwner(power, t) !== mover && t.id !== mine.id && t.id !== targetTokenId
-    );
-    if (foe) {
-      sweepCaptures.push(foe.id);
-    }
-  }
-  const allCaptures = [targetTokenId, ...sweepCaptures];
-  const tokens = state.tokens.map((t) => {
-    if (t.id === mine.id) return { ...t, position: to };
-    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
-    return t;
-  });
-  let nextPower = clearWallsOnReserveTrip(
-    {
-      ...power,
-      ultimateReady: { ...power.ultimateReady, [mover]: false }
-    },
-    allCaptures
-  );
-  nextPower = clearThrallIfCaptured(nextPower, allCaptures);
-  nextPower = clearCurseOnCapture(nextPower, allCaptures);
-  nextPower = clearHamstringOnCapture(nextPower, allCaptures);
-  nextPower = clearInspireOnCapture(nextPower, allCaptures);
-  nextPower = addCharge(nextPower, mover);
+function getShieldWallTargets(state, power, mover) {
+  return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => !isWalled(power, t) && canHoldWall(power, t)).map((t) => t.id);
+}
+function applyShieldWall(state, power, mover) {
+  const walledTokenIds = getShieldWallTargets(state, power, mover);
+  const walls = { ...power.walls };
+  for (const id of walledTokenIds) walls[id] = "bulwark";
+  const nextPower = {
+    ...power,
+    walls,
+    wallGrace: { ...power.wallGrace, [mover]: (power.wallGrace[mover] ?? 0) + 1 },
+    ultimateReady: { ...power.ultimateReady, [mover]: false }
+  };
   const nextState = {
-    tokens,
+    tokens: state.tokens,
     currentPlayer: otherPlayerId(mover),
     lastFlip: null,
     winner: null,
     extraTurn: false
   };
-  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: sweepCaptures };
+  return { state: nextState, power: resetTurnFlags(nextPower), walledTokenIds };
 }
 function getBulwarkTargets(state, power, mover) {
   return state.tokens.filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => !isWalled(power, t) && canHoldWall(power, t)).map((t) => t.id);
@@ -2255,6 +2229,9 @@ function scoreVigil(state, power, mover, rand) {
 function scoreBenediction(poolSize, rand) {
   return 250 + 120 * poolSize + rand() * 20;
 }
+function scoreShieldWall(poolSize, rand) {
+  return 250 + 120 * poolSize + rand() * 20;
+}
 function scoreBackstab(state, power, targetId, rand) {
   void power;
   const target = state.tokens.find((t) => t.id === targetId);
@@ -2464,11 +2441,12 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
     }
   }
   if (cls === "warrior" && power.ultimateReady[mover]) {
-    for (const targetId of getWarpathTargets(state, power, mover)) {
-      const score = scoreUltimateStrike(state, targetId, rand);
+    const pool = getShieldWallTargets(state, power, mover);
+    if (pool.length > 0) {
+      const score = scoreShieldWall(pool.length, rand);
       if (score > bestScore) {
         bestScore = score;
-        best = { kind: "warpath", targetTokenId: targetId };
+        best = { kind: "shieldWall" };
       }
     }
   }
@@ -2709,8 +2687,8 @@ function enumerateCandidates(state, power, moves) {
       out.push({ kind: "rainOfArrows", targetTokenId: id });
     }
   }
-  if (cls === "warrior" && power.ultimateReady[mover]) {
-    for (const id of getWarpathTargets(state, power, mover)) out.push({ kind: "warpath", targetTokenId: id });
+  if (cls === "warrior" && power.ultimateReady[mover] && getShieldWallTargets(state, power, mover).length > 0) {
+    out.push({ kind: "shieldWall" });
   }
   if (cls === "warrior" && charges >= 1) {
     const bulwarkTargets = getBulwarkTargets(state, power, mover);
@@ -3030,8 +3008,8 @@ function mkSimulate(state, power, c, mover) {
       return applyBlinkStrike(state, power, c.targetTokenId, mover);
     case "rainOfArrows":
       return applyRainOfArrows(state, power, c.targetTokenId, mover);
-    case "warpath":
-      return applyWarpath(state, power, c.targetTokenId, mover);
+    case "shieldWall":
+      return applyShieldWall(state, power, mover);
     case "bulwark":
       return applyBulwark(state, power, c.tokenId, mover);
     case "revive":
@@ -3245,7 +3223,7 @@ function publicPower(doc) {
     ultimateReady: { ...doc.mk.ultimateReady },
     rainOfArrowsTargets: doc.mk.classes[mover] === "archer" && doc.mk.ultimateReady[mover] ? getRainOfArrowsTargets(doc.state, p, mover) : [],
     blinkStrikeTargets: doc.mk.classes[mover] === "mage" && doc.mk.ultimateReady[mover] ? getBlinkStrikeTargets(doc.state, p, mover) : [],
-    warpathTargets: doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover] ? getWarpathTargets(doc.state, p, mover) : [],
+    shieldWallTargets: doc.mk.classes[mover] === "warrior" && doc.mk.ultimateReady[mover] ? getShieldWallTargets(doc.state, p, mover) : [],
     bulwarkTargets: doc.mk.classes[mover] === "warrior" && doc.mk.charges[mover] >= 1 ? getBulwarkTargets(doc.state, p, mover) : [],
     // No more block-consumption timing gap to paper over (2026-09-17): a
     // wall only ever falls at the upkeep tick or a reserve trip, both
@@ -3414,6 +3392,7 @@ function freshMatchFields(variant) {
     lastBless: null,
     lastVigil: null,
     lastBenediction: null,
+    lastShieldWall: null,
     lastWound: null,
     lastMend: null,
     lastPickpocket: null,
@@ -3534,7 +3513,6 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "chargedShot") return { doc: applyMkSimple(doc, seat, "chargedShot", a.targetTokenId, now) };
       if (a.kind === "blinkStrike") return { doc: applyMkSimple(doc, seat, "blinkStrike", a.targetTokenId, now) };
       if (a.kind === "rainOfArrows") return { doc: applyMkSimple(doc, seat, "rainOfArrows", a.targetTokenId, now) };
-      if (a.kind === "warpath") return { doc: applyMkSimple(doc, seat, "warpath", a.targetTokenId, now) };
       if (a.kind === "bulwark") return { doc: applyMkSimple(doc, seat, "bulwark", a.tokenId, now) };
       if (a.kind === "revive") return { doc: applyMkRevive(doc, seat, now) };
       if (a.kind === "corpseExplosion") return { doc: applyMkCorpseExplosion(doc, seat, now) };
@@ -3542,6 +3520,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "bless") return { doc: applyMkBlessing(doc, seat, a.targetTokenId, now) };
       if (a.kind === "vigil") return { doc: applyMkVigil(doc, seat, now) };
       if (a.kind === "benediction") return { doc: applyMkBenediction(doc, seat, now) };
+      if (a.kind === "shieldWall") return { doc: applyMkShieldWall(doc, seat, now) };
       if (a.kind === "pickpocket") return { doc: applyMkPickpocket(doc, seat, a.targetTokenId, now) };
       if (a.kind === "vanish") return { doc: applyMkSimple(doc, seat, "vanish", a.tokenId, now, rand) };
       if (a.kind === "grandHeist") return { doc: applyMkSimple(doc, seat, "grandHeist", a.targetTokenId, now) };
@@ -3602,11 +3581,6 @@ function validateUsePower(doc, seat, a) {
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (!getBlinkStrikeTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Blink Strike target";
       return null;
-    case "warpath":
-      if (cls !== "warrior") return "Only a Warrior can Warpath";
-      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
-      if (!getWarpathTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Warpath target";
-      return null;
     case "bulwark":
       if (cls !== "warrior") return "Only a Warrior can Bulwark";
       if (doc.mk.charges[seat] < 1) return "No charge available";
@@ -3647,6 +3621,11 @@ function validateUsePower(doc, seat, a) {
       if (cls !== "cleric") return "Only a Cleric can cast Benediction";
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
       if (getBenedictionTargets(doc.state, p(), seat).length === 0) return "Benediction would bless no one";
+      return null;
+    case "shieldWall":
+      if (cls !== "warrior") return "Only a Warrior can raise a Shield Wall";
+      if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
+      if (getShieldWallTargets(doc.state, p(), seat).length === 0) return "Shield Wall would wall no one";
       return null;
     case "pickpocket":
       if (cls !== "rogue") return "Only a Rogue can Pickpocket";
@@ -3754,6 +3733,7 @@ var CLEAR_SLOTS = {
   lastBless: null,
   lastVigil: null,
   lastBenediction: null,
+  lastShieldWall: null,
   lastWound: null,
   lastMend: null,
   lastPickpocket: null,
@@ -3877,13 +3857,6 @@ function applyMkSimple(doc, seat, kind, tokenId, now, rand = Math.random) {
       r = rr;
       capsGained = 1;
       slots = { lastUltimate: { kind: "rainOfArrows", targetTokenId: tokenId, sweptTokenIds: [] } };
-      break;
-    }
-    case "warpath": {
-      const rr = applyWarpath(doc.state, power, tokenId, seat);
-      r = rr;
-      capsGained = 1 + rr.sweptTokenIds.length;
-      slots = { lastUltimate: { kind: "warpath", targetTokenId: tokenId, sweptTokenIds: rr.sweptTokenIds } };
       break;
     }
     case "bulwark":
@@ -4362,6 +4335,20 @@ function applyMkBenediction(doc, seat, now) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
+function applyMkShieldWall(doc, seat, now) {
+  const r = applyShieldWall(doc.state, fromWirePower(doc.mk), seat);
+  let next = {
+    ...doc,
+    ...CLEAR_SLOTS,
+    state: r.state,
+    mk: toWirePower(r.power),
+    currentFlip: null,
+    currentPowerMoves: null,
+    lastMovePlayer: seat,
+    lastShieldWall: { tokenIds: r.walledTokenIds }
+  };
+  return commitFrame(next, now, stateEventOf(next));
+}
 function maybeResolveClassPick(doc, now) {
   if (doc.phase !== "classPick" || !doc.mk) return doc;
   if (!doc.classesPicked.p1 || !doc.classesPicked.p2 && !doc.vsCpu) return doc;
@@ -4538,8 +4525,8 @@ function applyBotAction(doc, seat, action, now, rand) {
       return applyMkSimple(doc, seat, "blinkStrike", action.targetTokenId, now);
     case "rainOfArrows":
       return applyMkSimple(doc, seat, "rainOfArrows", action.targetTokenId, now);
-    case "warpath":
-      return applyMkSimple(doc, seat, "warpath", action.targetTokenId, now);
+    case "shieldWall":
+      return applyMkShieldWall(doc, seat, now);
     case "bulwark":
       return applyMkSimple(doc, seat, "bulwark", action.tokenId, now);
     case "revive":

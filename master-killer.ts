@@ -202,8 +202,9 @@ export const REFLIP_COST = 2;
  *  those reactive layers resolve on a MOVE's landing and a blink is not
  *  one — the shadows don't fall where a trap waits. A frozen stone cannot
  *  blink (frozen means it does not move at all). Which stone: the
- *  rearmost on the board, Warpath's convention, so the cast is a
- *  development tool rather than a way to rush the Warded leader home. */
+ *  rearmost on the board (findLeastAdvancedToken, auto-selected same as
+ *  Blink Strike's own source stone) so the cast is a development tool
+ *  rather than a way to rush the Warded leader home. */
 export const BLINK_COST = 1;
 /** How far ahead a Blink may reach, in tiles. The first matrix run had it
  *  unbounded and the Mage went to 88.7% (5 blinks/game; mage-vs-warlock
@@ -863,8 +864,9 @@ export const BACKSTAB_COST = 4;
  *  and the strictly-behind rule bounds it by construction (a Warrior
  *  sweep that kills two runners can cost two rear stones — the same two
  *  deaths, better-chosen). Ultimates take what they want (roster
- *  convention — Blink Strike, Warpath, Rain of Arrows, Grand Heist, Fel
- *  Storm, Wild Hunt, Bloodbath all bypass it; a Bard march that lands on
+ *  convention — Blink Strike, Rain of Arrows, Grand Heist, Fel
+ *  Storm, Wild Hunt, Bloodbath all bypass it (Shield Wall/Benediction never
+ *  kill, so the question doesn't arise); a Bard march that lands on
  *  a warlock stone — Song of Haste or Crescendo — is an ordinary landing
  *  capture and DOES bargain), and the
  *  warlock's own Sacrifice is suicide, never a bargain (killer === owner).
@@ -966,8 +968,8 @@ export const CURSE_SLOW = 1;
 
 /** Warlock's Sacrifice: the full-bank cast (Charged Shot / Reinforced
  *  Bulwark / Bless's spend pattern) that sends the warlock's own
- *  MOST-ADVANCED on-board stone home (auto-selected — Blink Strike/
- *  Warpath's convention, keeping the one-tap targeting UI; WHICH stone was
+ *  MOST-ADVANCED on-board stone home (auto-selected — Blink Strike's
+ *  convention, keeping the one-tap targeting UI; WHICH stone was
  *  a load-bearing balance choice, see applySacrifice's doc) to kill one
  *  enemy stone in shared water THROUGH Ward and Blessing — a full kill,
  *  never a Cleric wound. Bulwark, Vanish, and shield tiles still block it:
@@ -1192,8 +1194,8 @@ export const WHIRLWIND_CAP = 1;
 /** Barbarian's Bloodbath ultimate: the lead stone charges to the END of
  *  shared water, taking every enemy in its path through every protection
  *  there is — the uncapped version of Charge, which is exactly what an
- *  ultimate is for (Warpath's own doc makes the same argument for its
- *  uncapped sweep). This is the last contested tile it runs to; a blocked
+ *  ultimate is for (Blink Strike's doc makes the same argument for its own
+ *  full pierce). This is the last contested tile it runs to; a blocked
  *  destination walks back the way Exhume's occupancy walk does. */
 export const BLOODBATH_END_POSITION = 11;
 
@@ -1541,7 +1543,10 @@ export type PowerAction =
   | { kind: "rainOfArrows"; targetTokenId: number }
   | { kind: "charge"; move: PowerMove }
   | { kind: "blinkStrike"; targetTokenId: number }
-  | { kind: "warpath"; targetTokenId: number }
+  /** Warrior's Shield Wall ultimate (2026-09-17, replaces Warpath): no
+   *  target — walls the warrior's whole on-board army. Benediction's exact
+   *  twin, see getShieldWallTargets. */
+  | { kind: "shieldWall" }
   /** Warrior's Bulwark: the reinforced tier retired 2026-09-13, before the
    *  wall rework — there is only the one 1-charge cast now. */
   | { kind: "bulwark"; tokenId: number }
@@ -1579,8 +1584,8 @@ export type PowerAction =
   /** Rogue's Vanish: targets one of the mover's own on-board stones, same
    *  shape as Bulwark's tokenId (see getVanishTargets/applyVanish). */
   | { kind: "vanish"; tokenId: number }
-  /** Rogue's Grand Heist ultimate: teleport-capture like Blink Strike/
-   *  Warpath, plus draining the target owner's entire bank. */
+  /** Rogue's Grand Heist ultimate: teleport-capture like Blink Strike,
+   *  plus draining the target owner's entire bank. */
   | { kind: "grandHeist"; targetTokenId: number }
   /** Warlock's Curse of Chains: targets an enemy in shared water (see
    *  getCurseTargets). Keeps the turn — Bless's commit contract. */
@@ -1718,12 +1723,12 @@ function findMostAdvancedToken(state: GameState, power: PowerState, mover: Playe
   return mine.reduce((best, t) => (t.position > best.position ? t : best));
 }
 
-/** Warrior's Warpath ultimate always moves the mover's LEAST-advanced
- *  on-board token — the one that benefits most from an instant reposition —
- *  null if they have no on-board tokens at all. Same effective-ownership
- *  rule as findMostAdvancedToken. NOTE: a mover's THRALL is never a
- *  candidate here either — only mage/warrior reach these finders and only
- *  a necromancer can hold a thrall, so effectiveOwner alone settles it. */
+/** The mover's LEAST-advanced on-board token — the one that benefits most
+ *  from an instant reposition (Mage's Blink, via blinkStone) — null if they
+ *  have no on-board tokens at all. Same effective-ownership rule as
+ *  findMostAdvancedToken. NOTE: a mover's THRALL is never a candidate here
+ *  either — only a necromancer can hold a thrall, so effectiveOwner alone
+ *  settles it. */
 function findLeastAdvancedToken(state: GameState, power: PowerState, mover: PlayerId): TokenState | null {
   const mine = state.tokens.filter(
     (t) =>
@@ -1770,11 +1775,11 @@ export function isWalled(power: PowerState, token: TokenState): boolean {
 
 /** May `token`'s owner ever hold a wall on it? The Barbarian's whole
  *  identity is having none, by rule (2026-09-17) — not a kit gap, a
- *  guardrail against a future wall-granting ability (a Warpath retheme, a
- *  cross-class buff) silently handing him one. Checked at every
- *  wall-granting pool AND apply (Bulwark, Bless, Benediction, Shield
- *  Wall) — a shield TILE still protects him; only the paid-for kind is
- *  denied. */
+ *  guardrail against a future wall-granting ability (a cross-class buff,
+ *  the Warpath-into-Shield-Wall retheme was exactly this risk) silently
+ *  handing him one. Checked at every wall-granting pool AND apply (Bulwark,
+ *  Bless, Benediction, Shield Wall) — a shield TILE still protects him;
+ *  only the paid-for kind is denied. */
 export function canHoldWall(power: PowerState, token: TokenState): boolean {
   return power.classes[token.owner] !== "barbarian";
 }
@@ -1952,8 +1957,8 @@ function grantKillBounty(power: PowerState, mover: PlayerId, count: number): Pow
  *  that enabled the possession). Same call-site discipline as
  *  clearCapturedBulwarks: every path that sends tokens home must run this —
  *  resolveTurn (landing captures, Snipe, sweeps, Rain of Arrows),
- *  applyPush/applyChargedShot (sendsHome branch), applyBlinkStrike,
- *  applyWarpath. No-op (same reference back) when no thrall was hit. */
+ *  applyPush/applyChargedShot (sendsHome branch), applyBlinkStrike.
+ *  No-op (same reference back) when no thrall was hit. */
 function clearThrallIfCaptured(power: PowerState, capturedIds: number[]): PowerState {
   const hit = (["p1", "p2"] as PlayerId[]).filter((pl) => {
     const th = power.thrall[pl];
@@ -1971,7 +1976,7 @@ function clearThrallIfCaptured(power: PowerState, capturedIds: number[]): PowerS
  *  still their blood, and the pact still pays (mercy kills included).
  *  Same call-site discipline as clearThrallIfCaptured/clearVitality:
  *  every path that sends tokens home for good must run this — resolveTurn
- *  kills, Push/Charged Shot send-homes, Blink Strike, Warpath, Corpse
+ *  kills, Push/Charged Shot send-homes, Blink Strike, Corpse
  *  Explosion, Grand Heist (whose drain-to-zero then robs the grant right
  *  back — see BLOOD_PACT_CHARGES's ordering note), Sacrifice, and Fel
  *  Storm's thrall-crumble deaths. Not the non-kill returns (thrall
@@ -3122,13 +3127,14 @@ export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
 
 // ============================================================================
 // ULTIMATES — see ULTIMATE_STREAK. Archer's Rain of Arrows (above) is
-// passive and fully automatic; Mage's Blink Strike and Warrior's Warpath
-// are active — completing the shield-streak combo banks ultimateReady, and
-// these two are what a Mage/Warrior spends it on. Both auto-select WHICH of
-// the mover's own tokens relocates (Mage: most-advanced/Ward-carrying,
-// Warrior: least-advanced — the one that benefits most from a free
-// reposition) rather than letting the player choose a source token, keeping
-// the target-selection UI identical to Push's "tap one target" flow.
+// passive and fully automatic; the rest are active — completing the
+// shield-streak combo banks ultimateReady, and each class spends it on its
+// own ultimate. Mage's Blink Strike auto-selects WHICH of the mover's own
+// tokens relocates (most-advanced/Ward-carrying) rather than letting the
+// player choose a source token, keeping the target-selection UI identical
+// to Push's "tap one target" flow. Warrior's Shield Wall (below, with
+// Bulwark) and Cleric's Benediction take no target at all — the whole
+// on-board army is the subject, Corpse Explosion's instant-cast shape.
 // ============================================================================
 
 /** Mage's Blink Strike ultimate: valid targets are exactly Rain of Arrows'
@@ -3139,14 +3145,6 @@ export function applyReflip(power: PowerState, mover: PlayerId): PowerState {
  *  relocate at all. */
 export function getBlinkStrikeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (!findMostAdvancedToken(state, power, mover)) return [];
-  return getRainOfArrowsTargets(state, power, mover);
-}
-
-/** Warrior's Warpath ultimate: same target eligibility as Blink Strike —
- *  the sweep along the way (see applyWarpath) pierces everything too.
- *  Empty if the mover has no on-board token to relocate at all. */
-export function getWarpathTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (!findLeastAdvancedToken(state, power, mover)) return [];
   return getRainOfArrowsTargets(state, power, mover);
 }
 
@@ -3215,82 +3213,66 @@ export function applyBlinkStrike(
     extraTurn: false,
   };
   // sweptTokenIds is always empty for Blink Strike — kept in the return
-  // shape purely so callers can treat it and applyWarpath's result
-  // uniformly, since Blink Strike never sweeps.
+  // shape purely so callers that once handled applyWarpath's sweeps too
+  // stayed uniform; Blink Strike itself never sweeps.
   return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: [] };
 }
 
-/** Warrior's Warpath: instantly relocates the mover's LEAST-advanced
- *  on-board token onto the target's tile, capturing it, AND sweeps every
- *  enemy on a contested tile strictly between where that token
- *  started and where it lands (either direction — this is a teleport, not
- *  a real move, so "forward" doesn't matter) — uncapped, unlike Charge's
- *  CHARGE_SWEEP_CAP. Same bypass rules as Blink Strike (shield + Ward +
- *  Bulwark — everything) for every token it hits, primary or swept.
- *  Spends ultimateReady, not a charge; still grants exactly 1 charge back
- *  on a successful capture, matching Charge's own sweep economy (one
- *  capturing move = one charge, regardless of how many tokens it takes
- *  down). Always ends the turn — no extra-turn interaction. */
-export function applyWarpath(
+/** Warrior's Shield Wall ultimate (2026-09-17, replaces Warpath outright —
+ *  the teleport-capture identity is gone, not kept alongside this): the
+ *  ids the cast would actually CHANGE — every own on-board stone that
+ *  isn't already walled (canHoldWall guard, moot here — only a Warrior
+ *  ever reaches this). Empty pool = not castable, Benediction's misclick
+ *  rule — this is mechanically Benediction's exact twin, see
+ *  applyShieldWall's FLAG note. */
+export function getShieldWallTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
+  return state.tokens
+    .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
+    .filter((t) => !isWalled(power, t) && canHoldWall(power, t))
+    .map((t) => t.id);
+}
+
+/** Warrior's Shield Wall: spends the banked ultimateReady flag to wall the
+ *  whole on-board army at once (getShieldWallTargets' pool), with a turn
+ *  of grace so the fresh walls don't collapse to the very next upkeep tick
+ *  (an ultimate's privilege, same as Benediction's). Ends the turn with no
+ *  extra-turn interaction and leaves the shield streak alone, matching its
+ *  Blink Strike/Exhume/Benediction siblings. Grants nothing (no capture —
+ *  Warpath's charge-on-capture economy is gone with it). FLAG: mechanically
+ *  this is Cleric's Benediction twin (wall the army + a turn of free
+ *  upkeep) — the difference is Hold the Line's discount vs Vigil/
+ *  Sanctified Ground synergy; see Benediction's own doc for the same flag
+ *  from the other side. Returns the walled ids so the server can announce
+ *  the cast without re-deriving the pool.
+ *
+ *  C4 SIM CHECK (2026-09-17, 1000 games/matchup): Warrior's 9-matchup
+ *  average landed at 51.68% (archer 51.5 / mage 49.6 / necromancer 52.7 /
+ *  cleric 59.5 / rogue 46.1 / warlock 45.2 / hunter 54.1 / barbarian 55.0 /
+ *  bard 51.4) — inside the 47-53 target band, every matchup inside the
+ *  35/65 bar, shieldWall/g firing at a healthy low rate. Shipped as-is,
+ *  no further tuning needed. */
+export function applyShieldWall(
   state: GameState,
   power: PowerState,
-  targetTokenId: number,
   mover: PlayerId,
-): { state: GameState; power: PowerState; sweptTokenIds: number[] } {
-  const mine = findLeastAdvancedToken(state, power, mover)!;
-  const target = state.tokens.find((t) => t.id === targetTokenId)!;
-  const from = mine.position;
-  const to = target.position;
-  const lo = Math.min(from, to);
-  const hi = Math.max(from, to);
-
-  const sweepCaptures: number[] = [];
-  for (let i = lo + 1; i < hi; i++) {
-    if (!BOARD_LAYOUT[i].isContested) continue;
-    // Effective ownership: the warrior's own possessed token in the path
-    // of the Warpath is an enemy combatant — swept like any other.
-    const foe = state.tokens.find(
-      (t) =>
-        t.position === i &&
-        effectiveOwner(power, t) !== mover &&
-        t.id !== mine.id &&
-        t.id !== targetTokenId,
-    );
-    if (foe) {
-      sweepCaptures.push(foe.id);
-    }
-  }
-
-  const allCaptures = [targetTokenId, ...sweepCaptures];
-  const tokens = state.tokens.map((t) => {
-    if (t.id === mine.id) return { ...t, position: to };
-    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
-    return t;
-  });
-
-  let nextPower: PowerState = clearWallsOnReserveTrip(
-    {
-      ...power,
-      ultimateReady: { ...power.ultimateReady, [mover]: false },
-    },
-    allCaptures,
-  );
-  nextPower = clearThrallIfCaptured(nextPower, allCaptures);
-  // Warpath pierces the blessing on everything it touches, primary and
-  // swept alike — full kills, entries cleared (same rule as Blink Strike).
-  // Curse hygiene + Blood Pact, the same every-kill-path pair.
-  nextPower = clearCurseOnCapture(nextPower, allCaptures);
-  nextPower = clearHamstringOnCapture(nextPower, allCaptures);
-  nextPower = clearInspireOnCapture(nextPower, allCaptures);
-  nextPower = addCharge(nextPower, mover);
+): { state: GameState; power: PowerState; walledTokenIds: number[] } {
+  const walledTokenIds = getShieldWallTargets(state, power, mover);
+  const walls = { ...power.walls };
+  for (const id of walledTokenIds) walls[id] = "bulwark";
+  const nextPower: PowerState = {
+    ...power,
+    walls,
+    wallGrace: { ...power.wallGrace, [mover]: (power.wallGrace[mover] ?? 0) + 1 },
+    ultimateReady: { ...power.ultimateReady, [mover]: false },
+  };
   const nextState: GameState = {
-    tokens,
+    tokens: state.tokens,
     currentPlayer: otherPlayerId(mover),
     lastFlip: null,
     winner: null,
     extraTurn: false,
   };
-  return { state: nextState, power: resetTurnFlags(nextPower), sweptTokenIds: sweepCaptures };
+  return { state: nextState, power: resetTurnFlags(nextPower), walledTokenIds };
 }
 
 // ============================================================================
@@ -3299,8 +3281,9 @@ export function applyWarpath(
 // on it: full immunity to a normal capture, a Charge sweep or a Push
 // (folded into isProtected/isWalled, so every existing capture-legality
 // check above already respects it for free), and NOT to any ultimate —
-// Rain of Arrows, Blink Strike, and Warpath all punch straight through a
-// wall, the roster convention. This is the one power action that targets
+// Rain of Arrows and Blink Strike punch straight through a wall, the
+// roster convention (Shield Wall/Benediction never capture at all, so the
+// question doesn't arise for them). This is the one power action that targets
 // the MOVER'S OWN token instead of an enemy's or having no target at all.
 // A wall is not free (2026-09-17): it bleeds wallUpkeepFor(power, mover)
 // every one of the owner's turns (tickWallUpkeepForNewTurn) and falls the
@@ -3670,7 +3653,7 @@ export function tickThrallForNewTurn(
  *  itself (resolveTurn clears the mover's), and a stale Bulwark entry is
  *  deliberately ignored here AND stripped on the way back (see
  *  applyExhume) — death claims all. ultimateReady gating stays at the
- *  dispatch layer, same as Blink Strike/Warpath. */
+ *  dispatch layer, same as Blink Strike. */
 export function getExhumeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   void power; // uniform target-getter signature; nothing in PowerState gates this pool
   const foe = otherPlayerId(mover);
@@ -3803,7 +3786,7 @@ export function applyVigil(
  *  moot here). Empty pool = not castable (a benediction that walls no one
  *  is a misclick, not a choice — Corpse Explosion's precedent).
  *  ultimateReady gating stays at the dispatch layer, same as Blink
- *  Strike/Warpath/Exhume. */
+ *  Strike/Exhume (and Shield Wall's own version of this same pool). */
 export function getBenedictionTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === mover && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
@@ -3818,7 +3801,7 @@ export function getBenedictionTargets(state: GameState, power: PowerState, mover
  *  ignore walls" cutting both ways: they also ignore the price of raising
  *  one). Ends the turn with no extra-turn interaction and — unlike the
  *  charge-spend actives — leaves the shield streak alone, exactly matching
- *  its Blink Strike/Warpath/Exhume siblings. Grants nothing (no capture).
+ *  its Blink Strike/Exhume/Shield Wall siblings. Grants nothing (no capture).
  *  Returns the walled ids so the server can announce the cast without
  *  re-deriving the pool. FLAG: mechanically this is Warrior's Shield Wall
  *  twin (wall the army + a turn of free upkeep) — the difference is
@@ -3861,7 +3844,7 @@ export function applyBenediction(
  *  the reserve — a harmless degenerate fallback, not a crash. Spends
  *  ultimateReady (never a charge), grants nothing (no capture happened),
  *  ends the turn with no extra-turn interaction, and leaves the shield
- *  streak alone — all exactly matching its Blink Strike/Warpath siblings.
+ *  streak alone — all exactly matching its Blink Strike sibling.
  *  Strips any stale wall the token carried off the board (an escaped
  *  stone's wall is cleared on the way out — see resolveTurn's escape
  *  branch — but this stays as the same belt-and-suspenders every
@@ -4066,8 +4049,8 @@ export function applyVanish(
   return { state: nextState, power: resetTurnFlags(broken) };
 }
 
-/** Rogue's Grand Heist ultimate: same target eligibility as Blink Strike/
- *  Warpath — Rain of Arrows' pool (every protection pierced), empty if the
+/** Rogue's Grand Heist ultimate: same target eligibility as Blink Strike —
+ *  Rain of Arrows' pool (every protection pierced), empty if the
  *  mover has no on-board token to relocate. */
 export function getGrandHeistTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (!findMostAdvancedToken(state, power, mover)) return [];
@@ -4082,7 +4065,7 @@ export function getGrandHeistTargets(state: GameState, power: PowerState, mover:
  *  applied here — this supersedes it as the bigger, ultimate-tier version
  *  of the same idea, not a stack on top of it). Spends ultimateReady, not
  *  a charge; still grants exactly 1 charge back on the capture, matching
- *  Blink Strike/Warpath's own economy. Always ends the turn — no
+ *  Blink Strike's own economy. Always ends the turn — no
  *  extra-turn interaction. */
 export function applyGrandHeist(
   state: GameState,
@@ -4627,7 +4610,7 @@ export function getWildHuntTargets(state: GameState, power: PowerState, mover: P
  *  through shield tiles, Ward, Bulwark, Vanish and a Blessing alike, the
  *  ultimate convention. Unlike the teleport-capture ultimates the hunter's
  *  own stones do not move: the wolf hunts, the hunter stands. Grants 1
- *  charge on the kill (Blink Strike/Warpath's economy). Spends the hunter's
+ *  charge on the kill (Blink Strike's economy). Spends the hunter's
  *  own armed trap too — the ability is every trap firing, including theirs.
  *  Ends the turn, breaks the shield streak. */
 export function applyWildHunt(
@@ -4920,7 +4903,8 @@ export function getBloodbathTargets(state: GameState, power: PowerState, mover: 
  *  from Charge. If the destination is occupied by a stone the charge does
  *  not take (one of the barbarian's own), it walks back the way Exhume's
  *  occupancy walk does. Grants exactly one charge however many it kills
- *  (Warpath's economy). Ends the turn, breaks the shield streak. */
+ *  (the roster's one-capturing-action-one-charge convention). Ends the
+ *  turn, breaks the shield streak. */
 export function applyBloodbath(
   state: GameState,
   power: PowerState,
