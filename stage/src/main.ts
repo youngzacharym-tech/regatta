@@ -71,7 +71,6 @@ import {
   NECRO_CHARGE_CAP,
   PICKPOCKET_COST,
   PICKPOCKET_STEAL,
-  REFLIPS_PER_TURN,
   REFLIP_COST,
   REVIVE_COST,
   SACRIFICE_COST,
@@ -2018,9 +2017,9 @@ let currentPower: {
   /** What each player would pay per wall at their next upkeep tick — the
    *  gem-rail "-N next turn" preview. */
   wallUpkeep?: Record<PlayerId, number>;
-  /** Optional (older servers omit it): how many Re-flips the current
-   *  player has already fired this turn — gates the Re-flip button
-   *  together with charges (see renderPowerActions). */
+  /** How many Re-flips the current player has already fired this turn —
+   *  bookkeeping only since 2026-09-17 (no more per-turn cap; charges
+   *  alone gate the Re-flip button now, see abilityState). */
   reflipsUsedThisTurn?: number;
   /** Necromancer rework (2026-07-19): each player's banked corpse (only
    *  while raisable — the server hides a dead-lettered marker), the active
@@ -2213,9 +2212,9 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   reflip: {
     name: "Re-flip",
-    cost: "1 mana each · keeps your turn",
+    cost: `${REFLIP_COST} mana each · keeps your turn`,
     klass: "mage",
-    desc: `Don't like your roll? Flip all four coins again instead of moving — ${REFLIPS_PER_TURN === 1 ? "once a turn" : `up to ${REFLIPS_PER_TURN} times a turn`}, ${REFLIP_COST} mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it. A zero on the new flip still pays one mana back.`,
+    desc: `Don't like your roll? Flip all four coins again instead of moving — as many times as your bank can pay for, ${REFLIP_COST} mana each. Mind your Ward: it only holds at full mana, so any re-flip from full drops it. A zero on the new flip still pays one mana back.`,
   },
   push: {
     name: "Push",
@@ -2776,9 +2775,7 @@ function buildDock(cls: PlayerClass) {
     const cost = DOCK_COST[slot.ability];
     btn.innerHTML =
       `<span class="dock-gem"><span class="dock-icon">${PROC_ICONS[slot.ability as ProcIconId]}</span>` +
-      (slot.ability === "reflip"
-        ? `<span class="dock-uses">${"<i></i>".repeat(REFLIPS_PER_TURN)}</span><span class="dock-warn"></span>`
-        : "") +
+      (slot.ability === "reflip" ? `<span class="dock-warn"></span>` : "") +
       (cost > 0 ? `<span class="dock-cost">${"<i></i>".repeat(cost)}</span>` : "") +
       `</span><span class="dock-name">${DOCK_NAMES[slot.ability]}</span>`;
     wrap.appendChild(btn);
@@ -2789,13 +2786,14 @@ function buildDock(cls: PlayerClass) {
 type DockState = "ready" | "noafford" | "spent";
 /** Pure affordability: can `ability` be cast RIGHT NOW, and if not, why.
  *  (Whether it's even my turn is the caller's `.off` gate, not this.) */
-function abilityState(ability: string, charges: number, reflipsUsed: number): { state: DockState; reason?: string } {
+function abilityState(ability: string, charges: number): { state: DockState; reason?: string } {
   const p = currentPower!;
   const mySide: PlayerId = myRole ?? "p1";
   const needCharges = (n: number) => (n === 1 ? "Need 1 mana" : `Need ${n} mana`);
   switch (ability) {
     case "reflip":
-      if (reflipsUsed >= REFLIPS_PER_TURN) return { state: "spent", reason: "No re-flips left this turn" };
+      // No per-turn cap any more (2026-09-17, Zach's add): re-flip as long
+      // as you can pay — canReflipAgain's server-side mirror.
       if (charges < 1) return { state: "noafford", reason: needCharges(1) };
       return { state: "ready" };
     case "push":
@@ -2972,9 +2970,6 @@ function updateDock(active?: boolean) {
 
   const p = currentPower!;
   const charges = p.charges[mySide];
-  // Off-turn the server's count describes the OPPONENT's turn — show my
-  // Re-flip as unspent (full ticks) until my turn actually starts.
-  const reflipsUsed = dockActive ? (p.reflipsUsedThisTurn ?? 0) : 0;
 
   // Warrior: which of my tokens can Charge this roll, with which move index.
   chargeMoveIndexByToken.clear();
@@ -2991,7 +2986,6 @@ function updateDock(active?: boolean) {
     dockActive,
     cls,
     charges,
-    reflipsUsed,
     p.ultimateReady[mySide],
     p.pushTargets.join(),
     p.chargedShotTargets.join(),
@@ -3035,7 +3029,7 @@ function updateDock(active?: boolean) {
       btn.dataset.reason = "";
       continue;
     }
-    const s = abilityState(ability, charges, reflipsUsed);
+    const s = abilityState(ability, charges);
     // Off-turn the dock is glanceable, not judgmental: the whole row dims
     // (.off) and the per-button ready/noafford treatments stand down.
     btn.classList.toggle("ready", dockActive && s.state === "ready");
@@ -3046,8 +3040,8 @@ function updateDock(active?: boolean) {
     const cost = DOCK_COST[ability];
     btn.querySelectorAll(".dock-cost i").forEach((pip, i) => pip.classList.toggle("lit", i < Math.min(charges, cost)));
     if (ability === "reflip") {
-      const remaining = Math.max(0, REFLIPS_PER_TURN - reflipsUsed);
-      btn.querySelectorAll(".dock-uses i").forEach((tickEl, i) => tickEl.classList.toggle("lit", i < remaining));
+      // No more per-turn pip row (2026-09-17: re-flip has no cap, just a
+      // price) — the warn badge (Ward about to drop) is all that's left.
       (btn.querySelector(".dock-warn") as HTMLSpanElement).classList.toggle("show", charges === CHARGE_CAP);
     }
   }
@@ -6242,9 +6236,9 @@ const GUIDE_SPREADS: [string, string][] = [
     `<div class="runner">The Mage &middot; continued</div>
      <ul>
        <li><b>Re-flip</b> (active, ${REFLIP_COST} mana): dislike your roll? Flip
-       again instead of moving — your turn continues — up to
-       ${REFLIPS_PER_TURN} time${REFLIPS_PER_TURN === 1 ? "" : "s"} a turn. Mind the price: Ward only holds
-       at a full bank, so spending below it unwards your lead stone.</li>
+       again instead of moving — your turn continues — as many times as
+       your bank can pay for, no cap of its own. Mind the price: Ward only
+       holds at a full bank, so spending below it unwards your lead stone.</li>
        <li><b>Blink Strike</b> (active, spends your ultimate): land on a
        shield tile three times in a row, turn never once passing to the
        opponent, and you may teleport your furthest-along stone straight

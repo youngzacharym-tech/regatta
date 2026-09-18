@@ -49,7 +49,6 @@ import {
   PICKPOCKET_RETIRED,
   PICKPOCKET_STEAL,
   PUSH_DISTANCE,
-  REFLIPS_PER_TURN,
   REFLIP_COST,
   REVIVE_COST,
   ROGUE_STEAL_ON_CAPTURE,
@@ -337,22 +336,30 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Re-flip: spends REFLIP_COST per use (2 since 2026-09-16), counts uses, and is capped
-//    at REFLIPS_PER_TURN per turn (see canReflipAgain — the shared gate the
-//    server's validation, the bot, and the client button all consult)
+// 4. Re-flip: spends REFLIP_COST per use (2 since 2026-09-16), still counts
+//    uses (reflipsUsedThisTurn, bookkeeping only now), but is NO LONGER
+//    capped per turn (2026-09-17, Zach's add) — canReflipAgain gates purely
+//    on charges >= REFLIP_COST (the shared gate the server's validation,
+//    the bot, and the client button all consult). REFLIPS_PER_TURN survives
+//    only as the sim loops' own safety bound — see its own doc.
 // ---------------------------------------------------------------------------
 {
   const pw = power({ p1: "mage" }, { p1: CHARGE_CAP });
   const after = applyReflip(pw, "p1");
   check("Re-flip: spends exactly REFLIP_COST", after.charges.p1 === CHARGE_CAP - REFLIP_COST, `got ${after.charges.p1}`);
   check("Re-flip: not offered below REFLIP_COST", !canReflipAgain(power({ p1: "mage" }, { p1: REFLIP_COST - 1 }), "p1") && canReflipAgain(power({ p1: "mage" }, { p1: REFLIP_COST }), "p1"));
-  check("Re-flip: increments the per-turn use counter", after.reflipsUsedThisTurn === 1);
+  check("Re-flip: increments the use counter (bookkeeping, no longer a gate)", after.reflipsUsedThisTurn === 1);
   check("Re-flip: does not touch the other player's charges", after.charges.p2 === pw.charges.p2);
 
-  // REFLIPS_PER_TURN is 1 (2026-09-13): no second re-flip, charges or not.
-  check("Re-flip: a SECOND re-flip is NOT offered (once a turn)", !canReflipAgain(after, "p1"));
-  const afterSecond = applyReflip(after, "p1"); // the pure fn still spends if forced; the gate above is what the engine honors
-  check("Re-flip: the pure apply still counts a forced second use", afterSecond.reflipsUsedThisTurn === 2);
+  // No per-turn cap any more: a second re-flip IS offered as long as the
+  // bank can still pay for it.
+  const afterTwoCharges: PowerState = { ...after, charges: { ...after.charges, p1: REFLIP_COST } };
+  check("Re-flip: a SECOND re-flip IS offered when the bank can still pay (no cap)", canReflipAgain(afterTwoCharges, "p1"));
+  const afterSecond = applyReflip(afterTwoCharges, "p1");
+  check("Re-flip: the use counter keeps climbing", afterSecond.reflipsUsedThisTurn === 2);
+  // ...and a third, a fourth — nothing short of the bank stops it.
+  const afterFourCharges: PowerState = { ...afterSecond, charges: { ...afterSecond.charges, p1: REFLIP_COST } };
+  check("Re-flip: a THIRD re-flip is offered too — the only gate is affordability", canReflipAgain(afterFourCharges, "p1"));
 
   // Ward tension: spending below the full bank drops Ward that instant —
   // the whole built-in cost of double-re-flipping (isWarded gates on
@@ -369,22 +376,21 @@ function check(name: string, cond: boolean, detail?: string) {
     !isWarded(sWard, pwMageSpent, sWard.tokens.find((t) => t.id === 4)!),
   );
 
-  // Denied with no charge left: one banked charge, one re-flip, done.
+  // Denied with no charge left: one banked charge, one re-flip, done —
+  // affordability is still the real (and now only) gate.
   const pwOne = power({ p1: "mage" }, { p1: 1 });
   const afterOne = applyReflip(pwOne, "p1");
-  check("Re-flip: denied a second use when the bank is empty (1 spent, 0 left)", !canReflipAgain(afterOne, "p1"));
+  check("Re-flip: denied when the bank can't cover the next one (1 spent, 0 left)", !canReflipAgain(afterOne, "p1"));
 
-  // Denied a third time even with a charge available: the REFLIPS_PER_TURN
-  // cap is a hard per-turn ceiling, not a charge-affordability check — a
-  // re-rolled zero can refund a charge mid-turn (grantZeroFlipCharge in the
-  // reflip path), and without the cap that refund loop would allow
-  // unbounded re-flips in a single turn.
-  const refunded: PowerState = { ...afterSecond, charges: { ...afterSecond.charges, p1: 1 } };
-  check("Re-flip: denied a third use this turn even with a refunded charge banked", !canReflipAgain(refunded, "p1"));
-  check(`Re-flip: sanity — the cap under test is REFLIPS_PER_TURN (${REFLIPS_PER_TURN})`, REFLIPS_PER_TURN === 1);
+  // A re-rolled zero refunding a charge mid-turn (grantZeroFlipCharge in the
+  // reflip path) now legitimately re-opens the gate — that's the point of
+  // dropping the cap, not a loophole to guard against any more.
+  const refunded: PowerState = { ...afterSecond, charges: { ...afterSecond.charges, p1: REFLIP_COST } };
+  check("Re-flip: a refunded charge mid-turn re-opens the gate (no cap to stop it)", canReflipAgain(refunded, "p1"));
 
   // A fresh turn resets the counter (resetTurnFlags is what every
-  // turn-ending resolve calls).
+  // turn-ending resolve calls) — still true, still exercised, even though
+  // nothing reads it as a gate any more.
   check("Re-flip: a fresh turn resets the use counter", resetTurnFlags(afterSecond).reflipsUsedThisTurn === 0);
 }
 

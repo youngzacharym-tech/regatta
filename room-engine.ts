@@ -443,11 +443,10 @@ export interface PublicPower {
   crescendoTargets?: number[];
   inspired?: Record<number, number>;
   /** How many Re-flips the CURRENT player has already fired this turn —
-   *  drives the client's Re-flip button gate (charges alone can't: a Mage
-   *  at the REFLIPS_PER_TURN cap may still hold a charge, e.g. after a
-   *  re-rolled zero refunds one). ADDITIVE field: older clients ignore it
-   *  and fall back to their charges>=1 gate, exactly the pre-existing
-   *  behavior. */
+   *  bookkeeping only since 2026-09-17 (Zach's add dropped the per-turn
+   *  cap; canReflipAgain gates purely on charges now, and so does the
+   *  client's button). Kept on the wire for shape/telemetry, not read as a
+   *  gate by anything any more. */
   reflipsUsedThisTurn: number;
 }
 

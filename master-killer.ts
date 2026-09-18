@@ -170,7 +170,29 @@ export const BULWARK_REINFORCED_RETIRED = true;
  *  54.5-54.7/45.3-45.5 at 30000-60000 games. Archer-vs-mage remains the
  *  known open thread it already was pre-change (see
  *  CHARGED_SHOT_WARD_DISTANCE's ship-now-reopen-later note).) */
-export const REFLIPS_PER_TURN = 1;
+export const REFLIPS_PER_TURN = CHARGE_CAP;
+/* RETIRED as a gameplay cap 2026-09-17 (Zach's add, shipped after C2 so the
+ * read wasn't confounded with Ward's new wall-rework immunity): canReflipAgain
+ * gates purely on charges >= REFLIP_COST now — every history note above this
+ * one describes a real per-turn rule that no longer exists. The constant
+ * survives only as the SIM LOOPS' own safety bound (takeTurn's re-flip/
+ * revive loop in batch-random-master-killer-games.ts, mirrored in
+ * batch-bot-difficulty.ts) — set to CHARGE_CAP so the bound can never be
+ * tighter than what REFLIP_COST could ever actually buy from a full bank
+ * (at cost 2 that's at most 2 re-flips from CHARGE_CAP=4, 3 if a zero
+ * mid-turn refunds one; the loop's own formula already adds slack on top
+ * of this constant for exactly that case). room-engine.ts needs no such
+ * bound at all — each Re-flip is one client-initiated action, re-validated
+ * live by canReflipAgain every time, so there's no loop to run away.
+ * C5 SIM CHECK (2026-09-17, 1000 games/matchup): Mage's 9-matchup average
+ * landed at 55.56% (archer 57.1 / warrior 50.6 / necromancer 56.2 /
+ * cleric 60.2 / rogue 49.1 / warlock 51.4 / hunter 56.9 / barbarian 59.4 /
+ * bard 59.1) — up from the pre-change ~53.3 but still under the 58
+ * watch-list trigger, every matchup inside the 35/65 bar (archer-vs-mage,
+ * the roster's known open thread, sits at 42.9/57.1). reflip/g climbed to
+ * 4.2-9.5 across Mage's matchups (was capped at ~1/turn), confirming the
+ * mechanic is actually exercised, not just theoretically uncapped. Shipped
+ * as-is; re-open if a later change pushes Mage past 58. */
 /** Mana per Re-flip (2026-09-16, was a hardcoded 1). The bot only ever
  *  re-flips as a RESCUE — a zero flip or a blocked turn — and a zero flip
  *  pays a charge on commit before the decision, so at 1 the rescue was net
@@ -1657,11 +1679,13 @@ export function resetTurnFlags(power: PowerState): PowerState {
 
 /** THE Re-flip legality gate, shared by the server's validation, the bot,
  *  and the client's button so the three can never drift: another Re-flip is
- *  legal while the Mage still holds a charge AND hasn't hit the per-turn
- *  cap. (Class gating stays at the call sites — this answers "may THIS
- *  mage re-flip again," not "is this player a mage.") */
+ *  legal as long as the Mage can still pay for it (2026-09-17, Zach's add —
+ *  the old per-turn cap is gone; REFLIPS_PER_TURN survives only as the
+ *  sim loops' own safety bound, see its doc). (Class gating stays at the
+ *  call sites — this answers "may THIS mage re-flip again," not "is this
+ *  player a mage.") */
 export function canReflipAgain(power: PowerState, mover: PlayerId): boolean {
-  return power.charges[mover] >= REFLIP_COST && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
+  return power.charges[mover] >= REFLIP_COST;
 }
 
 /** Which player's thrall this token currently is — null when unpossessed.

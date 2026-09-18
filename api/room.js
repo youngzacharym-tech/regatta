@@ -339,7 +339,6 @@ function wallUpkeepFor(power, owner) {
 }
 var ESCAPE_CHARGES = 1;
 var CHARGED_SHOT_COST = 2;
-var REFLIPS_PER_TURN = 1;
 var REFLIP_COST = 2;
 var BLINK_COST = 1;
 var BLINK_RANGE = 4;
@@ -425,7 +424,7 @@ function resetTurnFlags(power) {
   return { ...power, reflipsUsedThisTurn: 0 };
 }
 function canReflipAgain(power, mover) {
-  return power.charges[mover] >= REFLIP_COST && power.reflipsUsedThisTurn < REFLIPS_PER_TURN;
+  return power.charges[mover] >= REFLIP_COST;
 }
 function possessorOf(power, tokenId) {
   if (power.thrall.p1?.tokenId === tokenId) return "p1";

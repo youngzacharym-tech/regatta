@@ -408,8 +408,8 @@
            .noafford my turn, can't cast — greyed glass, unlit red pips
            .ready    castable — class tint + breathing glow
            .armed    aiming — gold lock ring; every sibling gets .dim
-           .spent    Re-flip out of uses, or a dormant ultimate (the goal,
-                     always visible for Mage/Warrior)                    */
+           .spent    a dormant ultimate (the goal, always visible for
+                     every ultimate-holding class)                       */
       #dock {
         position: absolute; left: 0; top: 0; z-index: 3;
         width: var(--plate-me); height: var(--plate-me);
@@ -492,19 +492,6 @@
       .dock-cost i.lit {
         background: radial-gradient(circle at 35% 30%, #fff8, var(--gem-color));
         box-shadow: 0 0 6px 2px var(--gem-glow);
-      }
-      /* Re-flip's use-ticks along the gem's top edge — lit = uses REMAINING. */
-      .dock-uses {
-        position: absolute; top: -4px; left: 50%; transform: translateX(-50%);
-        display: flex; gap: 5px;
-      }
-      .dock-uses i {
-        width: 8px; height: 8px; transform: rotate(45deg);
-        background: #17100a; border: 1.5px solid #7a5c2e; border-radius: 2px;
-      }
-      .dock-uses i.lit {
-        background: radial-gradient(circle at 35% 30%, #fff8, var(--gem-color));
-        box-shadow: 0 0 5px 1px var(--gem-glow);
       }
       /* Ward-drop badge: casting Re-flip off a full bank costs the Ward. */
       .dock-warn {
@@ -1705,7 +1692,7 @@
           <button class="class" data-class="mage">
             <img src="/avatars/mage.webp" alt="Mage" draggable="false" />
             <b>Mage</b>
-            <span class="class-desc">Warded at full mana. Re-flip (2⚡, once a turn): flip again. Blink (1⚡): teleport your rearmost stone to any empty shared-water tile. Ult: Blink Strike.</span>
+            <span class="class-desc">Warded at full mana. Re-flip (2⚡, no cap — as many as you can pay for): flip again. Blink (1⚡): teleport your rearmost stone to any empty shared-water tile. Ult: Blink Strike.</span>
           </button>
           <button class="class" data-class="warrior">
             <img src="/avatars/warrior.webp" alt="Warrior" draggable="false" />
