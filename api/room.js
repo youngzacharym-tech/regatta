@@ -388,7 +388,6 @@ var RECKLESS_SELF_KNOCKBACK = 2;
 var WHIRLWIND_COST = 2;
 var WHIRLWIND_RADIUS = 1;
 var WHIRLWIND_CAP = 1;
-var BLOODBATH_END_POSITION = 11;
 var ENCORE_ZERO_FLIP_CHARGES = 2;
 var BARD_CHARGE_CAP = 4;
 var INSPIRE_COST = 2;
@@ -1891,49 +1890,54 @@ function applyWhirlwind(state, power, mover) {
   };
 }
 function getBloodbathTargets(state, power, mover) {
-  const lead = findMostAdvancedToken(state, power, mover);
-  if (!lead) return [];
-  const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => effectiveOwner(power, t) === foe && t.position > lead.position).filter((t) => t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[t.position].isContested).map((t) => t.id);
+  if (!findLeastAdvancedToken(state, power, mover)) return [];
+  return getRainOfArrowsTargets(state, power, mover);
 }
-function applyBloodbath(state, power, mover) {
-  const lead = findMostAdvancedToken(state, power, mover);
-  const killedTokenIds = getBloodbathTargets(state, power, mover).filter((id) => {
-    const t = state.tokens.find((x) => x.id === id);
-    return t.position <= BLOODBATH_END_POSITION;
-  });
-  let tokens = state.tokens.map((t) => killedTokenIds.includes(t.id) ? { ...t, position: -1 } : t);
-  let landing = BLOODBATH_END_POSITION;
-  while (landing > lead.position) {
-    const contested = BOARD_LAYOUT[landing].isContested;
-    const occupied = tokens.some(
-      (t) => t.id !== lead.id && t.position === landing && (t.owner === lead.owner || contested)
+function applyBloodbath(state, power, targetTokenId, mover) {
+  const mine = findLeastAdvancedToken(state, power, mover);
+  const target = state.tokens.find((t) => t.id === targetTokenId);
+  const from = mine.position;
+  const to = target.position;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const sweepCaptures = [];
+  for (let i = lo + 1; i < hi; i++) {
+    if (!BOARD_LAYOUT[i].isContested) continue;
+    const foe = state.tokens.find(
+      (t) => t.position === i && effectiveOwner(power, t) !== mover && t.id !== mine.id && t.id !== targetTokenId
     );
-    if (!occupied) break;
-    landing--;
+    if (foe) sweepCaptures.push(foe.id);
   }
-  tokens = tokens.map((t) => t.id === lead.id ? { ...t, position: landing } : t);
-  let next = { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } };
-  if (killedTokenIds.length > 0) {
-    next = clearWallsOnReserveTrip(next, killedTokenIds);
-    next = clearThrallIfCaptured(next, killedTokenIds);
-    next = clearCurseOnCapture(next, killedTokenIds);
-    next = clearHamstringOnCapture(next, killedTokenIds);
-    next = clearInspireOnCapture(next, killedTokenIds);
-    next = addCharge(next, mover);
-  }
-  next = breakShieldStreak(next, mover);
-  return {
-    state: {
-      tokens,
-      currentPlayer: otherPlayerId(mover),
-      lastFlip: null,
-      winner: null,
-      extraTurn: false
+  const allCaptures = [targetTokenId, ...sweepCaptures];
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: to };
+    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    return t;
+  });
+  let nextPower = clearWallsOnReserveTrip(
+    {
+      ...power,
+      ultimateReady: { ...power.ultimateReady, [mover]: false }
     },
-    power: resetTurnFlags(next),
-    killedTokenIds,
-    endedOn: landing
+    allCaptures
+  );
+  nextPower = clearThrallIfCaptured(nextPower, allCaptures);
+  nextPower = clearCurseOnCapture(nextPower, allCaptures);
+  nextPower = clearHamstringOnCapture(nextPower, allCaptures);
+  nextPower = clearInspireOnCapture(nextPower, allCaptures);
+  nextPower = addCharge(nextPower, mover);
+  const nextState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(nextPower),
+    killedTokenIds: allCaptures,
+    endedOn: to
   };
 }
 function getInspireTargets(state, power, mover) {
@@ -2334,11 +2338,6 @@ function scoreRecklessSwing(state, power, targetId, rand) {
 function scoreWhirlwind(victims, rand) {
   return MK_WHIRLWIND_FLOOR + MK_WHIRLWIND_PER_VICTIM * victims.length + rand() * 20;
 }
-function scoreBloodbath(state, victims, rand) {
-  let worth = 0;
-  for (const id of victims) worth += 60 + 12 * (state.tokens.find((t) => t.id === id)?.position ?? 0);
-  return 200 + worth + rand() * 20;
-}
 var MK_INSPIRE_FLOOR = -60;
 var MK_INSPIRE_PER_TILE = 26;
 var MK_HASTE_FLOOR = -40;
@@ -2617,12 +2616,11 @@ function pickStandardPowerAction(state, power, moves, flip, rand) {
       }
     }
     if (power.ultimateReady[mover]) {
-      const path = getBloodbathTargets(state, power, mover);
-      if (path.length > 0) {
-        const score = scoreBloodbath(state, path, rand);
+      for (const targetId of getBloodbathTargets(state, power, mover)) {
+        const score = scoreUltimateStrike(state, targetId, rand);
         if (score > bestScore) {
           bestScore = score;
-          best = { kind: "bloodbath" };
+          best = { kind: "bloodbath", targetTokenId: targetId };
         }
       }
     }
@@ -2742,8 +2740,8 @@ function enumerateCandidates(state, power, moves) {
       out.push({ kind: "recklessSwing", targetTokenId: id });
     }
     if (getWhirlwindTargets(state, power, mover).length > 0) out.push({ kind: "whirlwind" });
-    if (power.ultimateReady[mover] && getBloodbathTargets(state, power, mover).length > 0) {
-      out.push({ kind: "bloodbath" });
+    if (power.ultimateReady[mover]) {
+      for (const id of getBloodbathTargets(state, power, mover)) out.push({ kind: "bloodbath", targetTokenId: id });
     }
   }
   if (cls === "bard") {
@@ -3050,7 +3048,7 @@ function mkSimulate(state, power, c, mover) {
     case "whirlwind":
       return applyWhirlwind(state, power, mover);
     case "bloodbath":
-      return applyBloodbath(state, power, mover);
+      return applyBloodbath(state, power, c.targetTokenId, mover);
     case "songOfHaste":
       return applySongOfHaste(state, power, mover);
     case "crescendo":
@@ -3533,7 +3531,7 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (a.kind === "wildHunt") return { doc: applyMkWildHunt(doc, seat, now) };
       if (a.kind === "recklessSwing") return { doc: applyMkRecklessSwing(doc, seat, a.targetTokenId, now) };
       if (a.kind === "whirlwind") return { doc: applyMkWhirlwind(doc, seat, now) };
-      if (a.kind === "bloodbath") return { doc: applyMkBloodbath(doc, seat, now) };
+      if (a.kind === "bloodbath") return { doc: applyMkBloodbath(doc, seat, a.targetTokenId, now) };
       if (a.kind === "inspire") return { doc: applyMkInspire(doc, seat, a.targetTokenId, now) };
       if (a.kind === "songOfHaste") return { doc: applyMkSongOfHaste(doc, seat, now) };
       if (a.kind === "crescendo") return { doc: applyMkCrescendo(doc, seat, now) };
@@ -3694,7 +3692,7 @@ function validateUsePower(doc, seat, a) {
     case "bloodbath":
       if (cls !== "barbarian") return "Only a Barbarian can Bloodbath";
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
-      if (getBloodbathTargets(doc.state, p(), seat).length === 0) return "Nothing in the charge's path";
+      if (!getBloodbathTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Bloodbath target";
       return null;
     case "inspire":
       if (cls !== "bard") return "Only a Bard can Inspire";
@@ -4222,9 +4220,9 @@ function applyMkWhirlwind(doc, seat, now) {
   };
   return commitFrame(next, now, stateEventOf(next));
 }
-function applyMkBloodbath(doc, seat, now) {
+function applyMkBloodbath(doc, seat, targetTokenId, now) {
   const chargesBefore = doc.mk.charges[seat];
-  const r = applyBloodbath(doc.state, fromWirePower(doc.mk), seat);
+  const r = applyBloodbath(doc.state, fromWirePower(doc.mk), targetTokenId, seat);
   const delta = r.power.charges[seat] - chargesBefore;
   let next = {
     ...doc,
@@ -4567,7 +4565,7 @@ function applyBotAction(doc, seat, action, now, rand) {
     case "whirlwind":
       return applyMkWhirlwind(doc, seat, now);
     case "bloodbath":
-      return applyMkBloodbath(doc, seat, now);
+      return applyMkBloodbath(doc, seat, action.targetTokenId, now);
     case "inspire":
       return applyMkInspire(doc, seat, action.targetTokenId, now);
     case "songOfHaste":

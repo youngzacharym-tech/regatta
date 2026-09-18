@@ -1213,13 +1213,16 @@ export const WHIRLWIND_COST = 2;
 export const WHIRLWIND_RADIUS = 1;
 export const WHIRLWIND_CAP = 1;
 
-/** Barbarian's Bloodbath ultimate: the lead stone charges to the END of
+/** RETIRED 2026-09-18 (Rework III) — "Extended Charge," the historical name
+ *  for Bloodbath's ORIGINAL mechanic: the lead stone charged to the END of
  *  shared water, taking every enemy in its path through every protection
- *  there is — the uncapped version of Charge, which is exactly what an
- *  ultimate is for (Blink Strike's doc makes the same argument for its own
- *  full pierce). This is the last contested tile it runs to; a blocked
- *  destination walks back the way Exhume's occupancy walk does. */
-export const BLOODBATH_END_POSITION = 11;
+ *  there is (the uncapped version of Charge). Replaced outright, not kept
+ *  alongside — Bloodbath now runs Warpath's exact teleport-and-sweep
+ *  mechanic instead (see applyBloodbath), ported wholesale from the
+ *  Warrior after Warpath's own 2026-09-17 retirement. This constant is
+ *  dead; nothing reads it any more. Kept only as the changelog marker for
+ *  where Extended Charge's one defining number used to live. */
+export const EXTENDED_CHARGE_RETIRED = true;
 
 /** Bard's Encore (passive, free, added 2026-07-27): what a ZERO FLIP pays a
  *  bard, instead of the usual 1. The class's income engine, and the thing
@@ -1633,9 +1636,12 @@ export type PowerAction =
   | { kind: "recklessSwing"; targetTokenId: number }
   /** Barbarian's Whirlwind: no target — every enemy in reach is caught. */
   | { kind: "whirlwind" }
-  /** Barbarian's Bloodbath ultimate: no target — the lead stone runs the
-   *  whole row. */
-  | { kind: "bloodbath" }
+  /** Barbarian's Bloodbath ultimate (2026-09-18, Rework III: Warpath's
+   *  mechanic ported wholesale after the Warrior's own retirement) —
+   *  targets an enemy in shared water; the mover's own least-advanced
+   *  stone is auto-selected as the one that teleports, Blink Strike's
+   *  one-tap convention. See getBloodbathTargets/applyBloodbath. */
+  | { kind: "bloodbath"; targetTokenId: number }
   /** Hunter's Snare: the only action in the game that targets a TILE
    *  rather than a stone (see getSnareTiles). */
   | { kind: "snare"; tile: number }
@@ -4692,10 +4698,12 @@ export function applyWildHunt(
 // swinger RECKLESS_SELF_KNOCKBACK tiles back for its trouble; WHIRLWIND
 // (WHIRLWIND_COST, the full bank) catches every enemy within
 // WHIRLWIND_RADIUS of ANY of the barbarian's stones, capturing up to
-// WHIRLWIND_CAP and shoving the rest. Ultimate: BLOODBATH sends the lead
-// stone the length of the row, taking everything in its path through every
-// protection there is. No persistent PowerState of its own — Rage is
-// derived from the board, which is what makes it impossible to hoard.
+// WHIRLWIND_CAP and shoving the rest. Ultimate: BLOODBATH (2026-09-18,
+// Rework III) teleports the least-advanced stone onto a chosen enemy,
+// capturing it and sweeping everything caught between — Warpath's exact
+// mechanic, ported wholesale onto this slot after the Warrior's own
+// retirement of it. No persistent PowerState of its own — Rage is derived
+// from the board, which is what makes it impossible to hoard.
 // ============================================================================
 
 /** Which of the barbarian's stones would swing at this victim: the one
@@ -4906,76 +4914,101 @@ export function applyWhirlwind(
   };
 }
 
-/** Barbarian's Bloodbath: the pool is every enemy on the contested row
- *  AHEAD of the barbarian's lead stone — everything the charge would run
- *  through. Empty (or no lead stone at all) means nothing to charge, so
- *  not castable. ultimateReady gating stays at the dispatch layer. */
+/** Barbarian's Bloodbath ultimate (2026-09-18, Rework III): Warpath's exact
+ *  target eligibility, ported wholesale after the Warrior's own retirement
+ *  of it — same target eligibility as Blink Strike/Rain of Arrows. Empty
+ *  if the mover has no on-board token to relocate at all. */
 export function getBloodbathTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  const lead = findMostAdvancedToken(state, power, mover);
-  if (!lead) return [];
-  const foe = otherPlayerId(mover);
-  return state.tokens
-    .filter((t) => effectiveOwner(power, t) === foe && t.position > lead.position)
-    .filter((t) => t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[t.position].isContested)
-    .map((t) => t.id);
+  if (!findLeastAdvancedToken(state, power, mover)) return [];
+  return getRainOfArrowsTargets(state, power, mover);
 }
 
-/** Barbarian's Bloodbath: the lead stone charges to BLOODBATH_END_POSITION,
- *  taking every enemy on the contested row between where it stood and where
- *  it stops — through shield tiles, Ward, Bulwark, Vanish and Blessings
- *  alike, the ultimate convention, and uncapped, which is what separates it
- *  from Charge. If the destination is occupied by a stone the charge does
- *  not take (one of the barbarian's own), it walks back the way Exhume's
- *  occupancy walk does. Grants exactly one charge however many it kills
- *  (the roster's one-capturing-action-one-charge convention). Ends the
- *  turn, breaks the shield streak. */
+/** Barbarian's Bloodbath: instantly relocates the mover's LEAST-advanced
+ *  on-board token onto the target's tile, capturing it, AND sweeps every
+ *  enemy on a contested tile strictly between where that token started and
+ *  where it lands (either direction — a teleport, not a real move) —
+ *  uncapped, unlike Whirlwind's own WHIRLWIND_CAP. Same bypass rules as
+ *  every ultimate (shield + Ward + wall — everything) for every token it
+ *  hits, primary or swept. Spends ultimateReady, not a charge; still
+ *  grants exactly 1 charge back on a successful capture. Always ends the
+ *  turn — no extra-turn interaction, and (unlike the OLD Bloodbath, see
+ *  EXTENDED_CHARGE_RETIRED) leaves the shield streak alone, Warpath's own
+ *  convention and every other ultimate's. killedTokenIds is
+ *  [target, ...swept] and endedOn is the landing tile — the same wire
+ *  shape Extended Charge used, so room-engine/the client/the sims needed
+ *  no announcement-shape changes for this port, only a target parameter.
+ *
+ *  REWORK III SIM CHECK (2026-09-18, 1000 games/matchup): Barbarian's
+ *  9-matchup average landed at 42.4% (archer 39.3 / mage 37.9 / warrior
+ *  43.6 / necromancer 40.9 / cleric 55.9 / rogue 42.9 / warlock 39.0 /
+ *  hunter 37.5 / bard 44.4) — down from 44.8% with the old Extended Charge
+ *  mechanic, and further from the 47-53 target band, though every matchup
+ *  stays safely inside the 35/65 bar (worst: hunter 37.5%). This section
+ *  of the handoff was scoped as an identity port (bringing Warpath's
+ *  mechanic to a class that lost none of its own kit), not a balance fix
+ *  — Rage was the already-decided lever for Barbarian's numbers, per the
+ *  handoff's own "no further tuning needed" call. Shipped as measured,
+ *  not chased further; flagged here for the record rather than silently
+ *  absorbed, same discipline as every other sim check in this file. */
 export function applyBloodbath(
   state: GameState,
   power: PowerState,
+  targetTokenId: number,
   mover: PlayerId,
 ): { state: GameState; power: PowerState; killedTokenIds: number[]; endedOn: number } {
-  const lead = findMostAdvancedToken(state, power, mover)!;
-  const killedTokenIds = getBloodbathTargets(state, power, mover).filter((id) => {
-    const t = state.tokens.find((x) => x.id === id)!;
-    return t.position <= BLOODBATH_END_POSITION;
+  const mine = findLeastAdvancedToken(state, power, mover)!;
+  const target = state.tokens.find((t) => t.id === targetTokenId)!;
+  const from = mine.position;
+  const to = target.position;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+
+  const sweepCaptures: number[] = [];
+  for (let i = lo + 1; i < hi; i++) {
+    if (!BOARD_LAYOUT[i].isContested) continue;
+    // Effective ownership: the barbarian's own possessed token in the path
+    // is an enemy combatant — swept like any other (Warpath's own rule).
+    const foe = state.tokens.find(
+      (t) =>
+        t.position === i &&
+        effectiveOwner(power, t) !== mover &&
+        t.id !== mine.id &&
+        t.id !== targetTokenId,
+    );
+    if (foe) sweepCaptures.push(foe.id);
+  }
+
+  const allCaptures = [targetTokenId, ...sweepCaptures];
+  const tokens = state.tokens.map((t) => {
+    if (t.id === mine.id) return { ...t, position: to };
+    if (allCaptures.includes(t.id)) return { ...t, position: -1 };
+    return t;
   });
 
-  let tokens = state.tokens.map((t) => (killedTokenIds.includes(t.id) ? { ...t, position: -1 } : t));
-  // Where the charge actually stops: the end of the row, walking back past
-  // anything still standing there (only the barbarian's own stones can be,
-  // the enemies in reach having just died).
-  let landing = BLOODBATH_END_POSITION;
-  while (landing > lead.position) {
-    const contested = BOARD_LAYOUT[landing].isContested;
-    const occupied = tokens.some(
-      (t) => t.id !== lead.id && t.position === landing && (t.owner === lead.owner || contested),
-    );
-    if (!occupied) break;
-    landing--;
-  }
-  tokens = tokens.map((t) => (t.id === lead.id ? { ...t, position: landing } : t));
-
-  let next: PowerState = { ...power, ultimateReady: { ...power.ultimateReady, [mover]: false } };
-  if (killedTokenIds.length > 0) {
-    next = clearWallsOnReserveTrip(next, killedTokenIds);
-    next = clearThrallIfCaptured(next, killedTokenIds);
-    next = clearCurseOnCapture(next, killedTokenIds);
-    next = clearHamstringOnCapture(next, killedTokenIds);
-    next = clearInspireOnCapture(next, killedTokenIds);
-    next = addCharge(next, mover);
-  }
-  next = breakShieldStreak(next, mover);
-  return {
-    state: {
-      tokens,
-      currentPlayer: otherPlayerId(mover),
-      lastFlip: null,
-      winner: null,
-      extraTurn: false,
+  let nextPower: PowerState = clearWallsOnReserveTrip(
+    {
+      ...power,
+      ultimateReady: { ...power.ultimateReady, [mover]: false },
     },
-    power: resetTurnFlags(next),
-    killedTokenIds,
-    endedOn: landing,
+    allCaptures,
+  );
+  nextPower = clearThrallIfCaptured(nextPower, allCaptures);
+  nextPower = clearCurseOnCapture(nextPower, allCaptures);
+  nextPower = clearHamstringOnCapture(nextPower, allCaptures);
+  nextPower = clearInspireOnCapture(nextPower, allCaptures);
+  nextPower = addCharge(nextPower, mover);
+  const nextState: GameState = {
+    tokens,
+    currentPlayer: otherPlayerId(mover),
+    lastFlip: null,
+    winner: null,
+    extraTurn: false,
+  };
+  return {
+    state: nextState,
+    power: resetTurnFlags(nextPower),
+    killedTokenIds: allCaptures,
+    endedOn: to,
   };
 }
 

@@ -55,7 +55,6 @@ import {
   TRAP_KNOCKBACK,
   WHIRLWIND_CAP,
   WHIRLWIND_COST,
-  BLOODBATH_END_POSITION,
   FEL_STORM_RETURN_POSITION,
   ROGUE_STEAL_ON_CAPTURE,
   SOUL_BOUNTY_CHARGES,
@@ -2116,6 +2115,10 @@ type ArmedKind =
    *  contested tiles' ground rings double as hit targets, see armedTiles). */
   | "blink"
   | "recklessSwing"
+  /** Bloodbath (2026-09-18, Rework III: Warpath's mechanic ported from the
+   *  Warrior) — targets an enemy in shared water, same shape as Blink
+   *  Strike/Grand Heist. */
+  | "bloodbath"
   | "inspire";
 let armed: { kind: ArmedKind; targetIds: Set<number>; tiles: Set<number> | null } | null = null;
 /** Warrior Charge: token id -> index into currentPowerMoves for every
@@ -2427,7 +2430,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Bloodbath",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "barbarian",
-    desc: "Your furthest-along stone charges the length of shared water and takes EVERY enemy in its path — no cap, no shield, no Ward, no wall, nothing. It finishes standing at the far end of the row.",
+    desc: "Teleport your least-advanced stone onto any enemy in shared water — capturing it and every enemy stone along the way, through shields, Wards, and walls.",
   },
   encore: {
     name: "Encore",
@@ -2735,6 +2738,7 @@ const RIBBON_COPY: Record<ArmedKind, string> = {
   snare: "tap a glowing empty tile to set the trap",
   blink: "tap a glowing tile to blink there",
   recklessSwing: "tap the enemy to cut down — you'll be thrown back",
+  bloodbath: "tap an enemy to end on",
   inspire: "tap one of your stones to light it",
 };
 
@@ -2927,8 +2931,9 @@ function abilityState(ability: string, charges: number): { state: DockState; rea
       return { state: "noafford", reason: "Nothing within reach of your stones" };
     }
     case "bloodbath":
+      // Targeted since 2026-09-18 (Rework III: Warpath's mechanic, ported).
       if (!p.ultimateReady[mySide]) return { state: "spent", reason: "Chain 3 shield landings to awaken" };
-      if ((p.bloodbathTargets ?? []).length === 0) return { state: "noafford", reason: "Nothing in the charge's path" };
+      if ((p.bloodbathTargets ?? []).length === 0) return { state: "noafford", reason: "No enemies in shared water" };
       return { state: "ready" };
     case "inspire": {
       if ((p.inspireTargets ?? []).length > 0) return { state: "ready" };
@@ -3111,9 +3116,11 @@ function armAbility(kind: ArmedKind) {
                             ? snareStoneTargets(p)
                             : kind === "recklessSwing"
                               ? (p.recklessSwingTargets ?? [])
-                              : kind === "inspire"
-                                ? (p.inspireTargets ?? [])
-                                : p.bulwarkTargets, // bulwark
+                              : kind === "bloodbath"
+                                ? (p.bloodbathTargets ?? [])
+                                : kind === "inspire"
+                                  ? (p.inspireTargets ?? [])
+                                  : p.bulwarkTargets, // bulwark
   );
   const tiles = kind === "blink" ? new Set<number>(p.blinkTiles ?? []) : null;
   if (ids.size === 0 && !(tiles && tiles.size > 0)) return;
@@ -3203,6 +3210,9 @@ function fireArmed(tokenId: number) {
       // Only the VICTIM is named — the swinger is whichever stone stands
       // directly behind it, decided by the board, never client-supplied.
       sendToServer({ type: "usePower", action: { kind: "recklessSwing", targetTokenId: tokenId } });
+      break;
+    case "bloodbath":
+      sendToServer({ type: "usePower", action: { kind: "bloodbath", targetTokenId: tokenId } });
       break;
     case "snare": {
       // The tap named a stone; the wire carries the TILE in front of it
@@ -3378,12 +3388,6 @@ dockEl.addEventListener("click", (e) => {
   if (ability === "whirlwind") {
     // Instant: everything in reach is caught, so there is nothing to aim.
     sendToServer({ type: "usePower", action: { kind: "whirlwind" } });
-    flashDockButton(ability, "fired");
-    return;
-  }
-  if (ability === "bloodbath") {
-    // Instant, Fel Storm's precedent: the lead stone runs the whole row.
-    sendToServer({ type: "usePower", action: { kind: "bloodbath" } });
     flashDockButton(ability, "fired");
     return;
   }
@@ -4681,7 +4685,7 @@ function announceFromState(msg: {
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Bloodbath!", "bloodbath");
     showAnnouncement(
-      `${subject} charged the whole row — ${n} ${n === 1 ? "stone" : "stones"} run down`,
+      `${subject} tore across shared water — ${n} ${n === 1 ? "stone" : "stones"} run down`,
       "capture",
     );
     return;
@@ -6448,11 +6452,10 @@ const GUIDE_SPREADS: [string, string][] = [
        the rest are knocked back a tile. You don't move at all — the
        storm comes to them.</li>
        <li><b>Bloodbath</b> (active, spends your ultimate): land on a
-       shield tile three times running, then your furthest-along stone
-       charges the length of shared water and takes EVERY enemy in its
-       path — no cap, no shield, no Ward, no wall, nothing. It finishes
-       standing on tile ${BLOODBATH_END_POSITION + 1}, the far end of the
-       row.</li>
+       shield tile three times running, then teleport your least-advanced
+       stone onto any enemy in shared water, capturing it and every enemy
+       caught between through every protection there is — no cap, no
+       shield, no Ward, no wall, nothing.</li>
      </ul>`,
   ],
   [

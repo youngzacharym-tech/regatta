@@ -604,13 +604,19 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M8 24 L14 20 L17 24 L14 28 Z" ${MAIN} ${BODY}/>`,
   ),
 
-  // Barbarian ultimate: the axe driven the length of the row, a trail of
-  // fallen behind it.
+  // Barbarian ultimate (2026-09-18, Rework III: Warpath's teleport-and-
+  // sweep mechanic, ported from the Warrior) — the axe landing at the end
+  // of a jump, trailing sweep arcs behind it, family AXE motif in place of
+  // Warpath's own blade.
   bloodbath: wrap(
-    AXE(32, 22) +
-      `<path d="M6 24 L22 24" ${MAIN}/>` +
-      `<path d="M6 24 L11 20 M6 24 L11 28" ${MAIN}/>` +
-      `<path d="M9 34 L15 34 M18 34 L24 34 M27 34 L33 34" ${GOLD_DETAIL}/>`,
+    AXE(30, 16) +
+      // Trailing sweep arcs behind the teleport.
+      `<path d="M20 45 A32 32 0 0 0 45 20" ${GOLD_DETAIL}/>` +
+      `<path d="M29 46 A30 30 0 0 0 46 29" ${GOLD_DETAIL}/>` +
+      diamond(8, 45, 2) +
+      // The swept: two slash ticks crossed on the path.
+      `<path d="M18 30 L22 34" ${DETAIL}/>` +
+      `<path d="M25 23 L29 27" ${DETAIL}/>`,
   ),
 
   // Hunter passive: the wolf's mark — a fanged jaw over the guarded tile.

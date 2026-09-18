@@ -426,10 +426,13 @@ export interface PublicPower {
   /** Every frozen stone (token id -> victim turn-starts remaining). */
   hamstrung?: Record<number, number>;
   /** Barbarian (2026-07-27): Reckless Swing's enemy pool, Whirlwind's
-   *  would-catch pool, and Bloodbath's would-run-down pool (gated on
-   *  ultimateReady like every ultimate list). Plus each player's live Rage
-   *  bonus — public board truth, since it is derived from visible reserve
-   *  counts anyway and both seats' plates show it. ADDITIVE. */
+   *  would-catch pool, and (2026-09-18, Rework III) Bloodbath's own target
+   *  pool — a real tap-to-choose list now that it's Warpath's ported
+   *  teleport-and-sweep mechanic, not the old no-target charge-to-the-end
+   *  (gated on ultimateReady like every ultimate list). Plus each player's
+   *  live Rage bonus — public board truth, since it is derived from
+   *  visible reserve counts anyway and both seats' plates show it.
+   *  ADDITIVE. */
   recklessSwingTargets?: number[];
   whirlwindTargets?: number[];
   bloodbathTargets?: number[];
@@ -602,8 +605,10 @@ export type RoomEvent =
       } | null;
       /** Barbarian's Whirlwind — captured vs merely shoved. */
       lastWhirlwind?: { capturedTokenIds: number[]; knockedTokenIds: number[]; sentHomeIds: number[] } | null;
-      /** Barbarian's Bloodbath ultimate — everything the charge ran down,
-       *  and the tile it finished on. */
+      /** Barbarian's Bloodbath ultimate (2026-09-18: Warpath's teleport-and-
+       *  sweep mechanic, ported) — the primary target plus everything swept
+       *  along the way, and the tile the teleporting stone landed on. Same
+       *  field names as the retired Extended Charge mechanic used. */
       lastBloodbath?: { killedTokenIds: number[]; endedOn: number } | null;
       /** Bard's Inspire lit a stone this commit (turn-keeping, lastCurse's
        *  lifecycle). */
@@ -1308,7 +1313,7 @@ export function applyAction(
       if (a.kind === "wildHunt") return { doc: applyMkWildHunt(doc, seat, now) };
       if (a.kind === "recklessSwing") return { doc: applyMkRecklessSwing(doc, seat, a.targetTokenId, now) };
       if (a.kind === "whirlwind") return { doc: applyMkWhirlwind(doc, seat, now) };
-      if (a.kind === "bloodbath") return { doc: applyMkBloodbath(doc, seat, now) };
+      if (a.kind === "bloodbath") return { doc: applyMkBloodbath(doc, seat, a.targetTokenId, now) };
       if (a.kind === "inspire") return { doc: applyMkInspire(doc, seat, a.targetTokenId, now) };
       if (a.kind === "songOfHaste") return { doc: applyMkSongOfHaste(doc, seat, now) };
       if (a.kind === "crescendo") return { doc: applyMkCrescendo(doc, seat, now) };
@@ -1507,7 +1512,7 @@ function validateUsePower(
     case "bloodbath":
       if (cls !== "barbarian") return "Only a Barbarian can Bloodbath";
       if (!doc.mk.ultimateReady[seat]) return "Ultimate not ready";
-      if (getBloodbathTargets(doc.state, p(), seat).length === 0) return "Nothing in the charge's path";
+      if (!getBloodbathTargets(doc.state, p(), seat).includes(a.targetTokenId)) return "Invalid Bloodbath target";
       return null;
     case "inspire":
       if (cls !== "bard") return "Only a Bard can Inspire";
@@ -2173,11 +2178,15 @@ function applyMkWhirlwind(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
 }
 
 /** Bloodbath ends the turn (its ultimate siblings' shape) — its own commit
- *  fn because the charge kills an UNCAPPED number of stones, so the
- *  scoreboard takes the whole list. */
-function applyMkBloodbath(doc: RoomDoc, seat: PlayerId, now: number): RoomDoc {
+ *  fn because the teleport-sweep kills an UNCAPPED number of stones, so the
+ *  scoreboard takes the whole list. Targeted since 2026-09-18 (Rework III
+ *  — Warpath's mechanic ported wholesale), same shape as applyMkSimple's
+ *  targeted ultimates, but kept as its own fn since it was already one
+ *  before the port (the announce payload needs the whole killed-id list,
+ *  not a single token slot). */
+function applyMkBloodbath(doc: RoomDoc, seat: PlayerId, targetTokenId: number, now: number): RoomDoc {
   const chargesBefore = doc.mk!.charges[seat];
-  const r = applyBloodbath(doc.state, fromWirePower(doc.mk!), seat);
+  const r = applyBloodbath(doc.state, fromWirePower(doc.mk!), targetTokenId, seat);
   const delta = r.power.charges[seat] - chargesBefore;
   let next: RoomDoc = {
     ...doc,
@@ -2676,7 +2685,7 @@ function applyBotAction(doc: RoomDoc, seat: PlayerId, action: PowerAction, now: 
     case "whirlwind":
       return applyMkWhirlwind(doc, seat, now);
     case "bloodbath":
-      return applyMkBloodbath(doc, seat, now);
+      return applyMkBloodbath(doc, seat, action.targetTokenId, now);
     case "inspire":
       return applyMkInspire(doc, seat, action.targetTokenId, now);
     case "songOfHaste":

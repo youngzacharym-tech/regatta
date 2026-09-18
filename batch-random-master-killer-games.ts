@@ -132,7 +132,7 @@ interface GameResult {
     whirlwind: number; // Barbarian Whirlwind casts (full-bank radial spin)
     whirlwindCaught: number; // stones the spin captured or shoved, summed
     bloodbath: number; // Bloodbath ultimates fired
-    bloodbathKills: number; // stones the charge ran down, summed
+    bloodbathKills: number; // primary target + swept stones, summed (2026-09-18: Warpath's ported mechanic)
     inspire: number; // Bard Inspire casts (turn-keeping stacking buff)
     songOfHaste: number; // Song of Haste casts
     hasteMarched: number; // stones the song advanced, summed over casts
@@ -581,7 +581,7 @@ function takeTurn(
       };
     }
     case "bloodbath": {
-      const r = applyBloodbath(state, power, mover);
+      const r = applyBloodbath(state, power, action.targetTokenId, mover);
       return {
         state: r.state,
         power: r.power,

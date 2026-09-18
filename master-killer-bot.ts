@@ -334,10 +334,14 @@ function scoreChargedShot(state: GameState, power: PowerState, targetId: number,
   return score;
 }
 
-/** Score Mage's Blink Strike: a guaranteed hit that bypasses shield-tile
- *  protection and Ward outright — scored like a strong capture (same shape
- *  as scoreMove's capture bonus), plus a flat bonus so the bot doesn't sit
- *  on a banked ultimateReady flag once a legal target exists. */
+/** Score Mage's Blink Strike (also Barbarian's Bloodbath since 2026-09-18,
+ *  Rework III's Warpath port — same target-choice shape): a guaranteed hit
+ *  that bypasses shield-tile protection and Ward outright — scored like a
+ *  strong capture (same shape as scoreMove's capture bonus), plus a flat
+ *  bonus so the bot doesn't sit on a banked ultimateReady flag once a
+ *  legal target exists. Doesn't price the sweep separately — Warpath's own
+ *  precedent: target choice among a rarely-more-than-one-deep candidate
+ *  pool isn't worth a speculative apply() call here either. */
 function scoreUltimateStrike(state: GameState, targetId: number, rand: () => number): number {
   const target = state.tokens.find((t) => t.id === targetId)!;
   let score = 500 + target.position * 10;
@@ -902,16 +906,6 @@ function scoreWhirlwind(victims: number[], rand: () => number): number {
   return MK_WHIRLWIND_FLOOR + MK_WHIRLWIND_PER_VICTIM * victims.length + rand() * 20;
 }
 
-/** Score Barbarian's Bloodbath: spends only the banked ultimateReady flag
- *  (scoreUltimateStrike's "never sit on it"), and its value is the whole
- *  uncapped path — every stone the charge runs down, weighted by how far
- *  each had come. */
-function scoreBloodbath(state: GameState, victims: number[], rand: () => number): number {
-  let worth = 0;
-  for (const id of victims) worth += 60 + 12 * (state.tokens.find((t) => t.id === id)?.position ?? 0);
-  return 200 + worth + rand() * 20;
-}
-
 // ---------------------------------------------------------------------------
 // BARD STANDARD-TIER WEIGHTS (2026-07-27). Inspire is the file's canonical
 // danger shape — cheap, turn-KEEPING, always available — so it gets the
@@ -1327,12 +1321,14 @@ function pickStandardPowerAction(
       }
     }
     if (power.ultimateReady[mover]) {
-      const path = getBloodbathTargets(state, power, mover);
-      if (path.length > 0) {
-        const score = scoreBloodbath(state, path, rand);
+      // Bloodbath (2026-09-18, Rework III): Warpath's ported mechanic, so
+      // the pick loop is Warpath's own — score each candidate target,
+      // don't sit on the flag once one exists.
+      for (const targetId of getBloodbathTargets(state, power, mover)) {
+        const score = scoreUltimateStrike(state, targetId, rand);
         if (score > bestScore) {
           bestScore = score;
-          best = { kind: "bloodbath" };
+          best = { kind: "bloodbath", targetTokenId: targetId };
         }
       }
     }
@@ -1475,8 +1471,8 @@ function enumerateCandidates(state: GameState, power: PowerState, moves: PowerMo
       out.push({ kind: "recklessSwing", targetTokenId: id });
     }
     if (getWhirlwindTargets(state, power, mover).length > 0) out.push({ kind: "whirlwind" });
-    if (power.ultimateReady[mover] && getBloodbathTargets(state, power, mover).length > 0) {
-      out.push({ kind: "bloodbath" });
+    if (power.ultimateReady[mover]) {
+      for (const id of getBloodbathTargets(state, power, mover)) out.push({ kind: "bloodbath", targetTokenId: id });
     }
   }
   if (cls === "bard") {
@@ -2097,7 +2093,7 @@ function mkSimulate(
     case "whirlwind":
       return applyWhirlwind(state, power, mover);
     case "bloodbath":
-      return applyBloodbath(state, power, mover);
+      return applyBloodbath(state, power, c.targetTokenId, mover);
     case "songOfHaste":
       return applySongOfHaste(state, power, mover);
     case "crescendo":

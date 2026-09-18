@@ -590,10 +590,15 @@ export type ClientMessage =
          *  is whichever of the caster's stones stands directly behind it,
          *  determined by the board and never client-supplied. */
         | { kind: "recklessSwing"; targetTokenId: number }
-        /** Whirlwind / Bloodbath: no payload — everything in reach is the
-         *  target; the client gates on the matching pool being non-empty. */
+        /** Whirlwind: no payload — everything in reach is the target; the
+         *  client gates on the matching pool being non-empty. */
         | { kind: "whirlwind" }
-        | { kind: "bloodbath" }
+        /** Barbarian's Bloodbath ultimate (2026-09-18, Rework III: Warpath's
+         *  mechanic, ported wholesale after the Warrior's own retirement of
+         *  it) — targets an enemy in shared water; the mover's own
+         *  least-advanced stone is auto-selected as the one that
+         *  teleports, Blink Strike's one-tap convention. */
+        | { kind: "bloodbath"; targetTokenId: number }
         /** Bard's Inspire: targets one of the caster's OWN stones. */
         | { kind: "inspire"; targetTokenId: number }
         /** Song of Haste / Crescendo: no payload — every lit stone (or the

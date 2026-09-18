@@ -25,7 +25,7 @@ import {
   EXHUME_RETURN_POSITION,
   FEL_STORM_RETURN_POSITION,
   BARD_CHARGE_CAP,
-  BLOODBATH_END_POSITION,
+  EXTENDED_CHARGE_RETIRED,
   ENCORE_ZERO_FLIP_CHARGES,
   HASTE_COST,
   HASTE_TILES,
@@ -3079,25 +3079,88 @@ function check(name: string, cond: boolean, detail?: string) {
     check("Whirlwind: ends the turn", r.state.currentPlayer === "p2");
   }
 
-  // --- Bloodbath ----------------------------------------------------------
+  // --- Bloodbath (2026-09-18, Rework III): Warpath's exact mechanic,
+  //     ported wholesale from the Warrior after Warpath's own 2026-09-17
+  //     retirement — same scenarios as the old Warpath test block, Barbarian
+  //     class. The OLD Bloodbath (charge to BLOODBATH_END_POSITION) is gone;
+  //     EXTENDED_CHARGE_RETIRED marks where its one constant used to live. -
   {
-    // p1 barbarian's lead stone on 5; enemies at 6, 8, 10 all ahead of it.
-    const s = state("p1", { 0: 5, 4: 6, 5: 8, 6: 10 });
-    const pw: PowerState = {
-      ...power({ p1: "barbarian", p2: "archer" }),
-      ultimateReady: { p1: true, p2: false },
+    check("Extended Charge (the old Bloodbath mechanic) is retired", EXTENDED_CHARGE_RETIRED === true);
+
+    const readyBarb = (): PowerState => {
+      const base = power({ p1: "barbarian" });
+      return { ...base, ultimateReady: { ...base.ultimateReady, p1: true } };
     };
-    const path = getBloodbathTargets(s, pw, "p1");
-    check("Bloodbath: pools everything ahead of the lead stone", [4, 5, 6].every((id) => path.includes(id)));
-    const r = applyBloodbath(s, pw, "p1");
-    check("Bloodbath: runs down every one of them — uncapped", r.killedTokenIds.length === 3);
-    check("Bloodbath: they all go home", [4, 5, 6].every((id) => r.state.tokens.find((t) => t.id === id)!.position === -1));
-    check("Bloodbath: the charge ends at the row's end", r.state.tokens.find((t) => t.id === 0)!.position === BLOODBATH_END_POSITION);
-    check("Bloodbath: spends the ultimate", r.power.ultimateReady.p1 === false);
-    // Pierces everything, ultimate convention.
-    const pwArmoured: PowerState = { ...pw, walls: { 5: "bulwark", 4: "blessing" } };
-    const rA = applyBloodbath(s, pwArmoured, "p1");
-    check("Bloodbath: pierces a Bulwark and a Blessing alike", rA.killedTokenIds.length === 3);
+
+    // Basic + sweep: the mover's on-board token teleports onto the target,
+    // capturing it AND sweeping an unprotected enemy caught strictly between
+    // start and destination — grants exactly 1 charge regardless.
+    const sSweep = state("p1", { 0: 4, 4: 6, 5: 9 }); // mover token0 at 4; enemy4 at 6 (between); target enemy5 at 9
+    const rSweep = applyBloodbath(sSweep, readyBarb(), 5, "p1");
+    check("Bloodbath: relocates the mover's token onto the target's tile", rSweep.state.tokens.find((t) => t.id === 0)!.position === 9);
+    check("Bloodbath: captures the primary target", rSweep.state.tokens.find((t) => t.id === 5)!.position === -1);
+    check("Bloodbath: sweeps an unprotected enemy caught in between", rSweep.state.tokens.find((t) => t.id === 4)!.position === -1);
+    check(
+      "Bloodbath: killedTokenIds is [target, ...swept]",
+      rSweep.killedTokenIds.length === 2 && rSweep.killedTokenIds.includes(5) && rSweep.killedTokenIds.includes(4),
+      JSON.stringify(rSweep.killedTokenIds),
+    );
+    check("Bloodbath: endedOn is the landing tile", rSweep.endedOn === 9);
+    check("Bloodbath: grants exactly 1 charge regardless of sweep size", rSweep.power.charges.p1 === 1, `got ${rSweep.power.charges.p1}`);
+    check("Bloodbath: clears ultimateReady on use", rSweep.power.ultimateReady.p1 === false);
+    check(
+      "Bloodbath: always ends the turn, leaves the shield streak alone (unlike the old Extended Charge)",
+      rSweep.state.currentPlayer === "p2" && rSweep.state.extraTurn === false && rSweep.power.shieldStreak.p1 === readyBarb().shieldStreak.p1,
+    );
+
+    // Uncapped sweep: several enemies caught in between — Bloodbath takes
+    // all of them, same as Warpath did.
+    const sUncapped = state("p1", { 0: 4, 4: 5, 5: 6, 6: 8, 7: 10 }); // enemies at 5,6,8 between mover(4) and target(10)
+    const rUncapped = applyBloodbath(sUncapped, readyBarb(), 7, "p1");
+    check("Bloodbath: sweep is uncapped", rUncapped.killedTokenIds.length === 4, JSON.stringify(rUncapped.killedTokenIds));
+
+    // Pierces every protection — shield, Ward, wall — for a SWEPT token.
+    const sWard = state("p1", { 0: 10, 4: 7, 5: 4 }); // mover token0 at 10; enemy4 ON shield tile 7 (between, p2's most-advanced -> warded); target enemy5 at 4
+    const pwWard: PowerState = { ...readyBarb(), classes: { p1: "barbarian", p2: "mage" }, charges: { p1: 0, p2: CHARGE_CAP } };
+    check("Bloodbath: sanity — the swept token really is warded", isWarded(sWard, pwWard, sWard.tokens.find((t) => t.id === 4)!));
+    const rWard = applyBloodbath(sWard, pwWard, 5, "p1");
+    check("Bloodbath: sweeps a warded token sitting on a shield tile", rWard.state.tokens.find((t) => t.id === 4)!.position === -1);
+
+    // Walls too — primary and swept, same as Warpath's own wall-pierce test.
+    const sWall = state("p1", { 0: 4, 4: 6, 5: 9 });
+    const pwWall: PowerState = { ...readyBarb(), walls: { 4: "bulwark", 5: "blessing" } };
+    const rWall = applyBloodbath(sWall, pwWall, 5, "p1");
+    check("Bloodbath: pierces a Bulwark and a Blessing alike", rWall.killedTokenIds.length === 2);
+    check(
+      "Bloodbath: clears both walls on capture",
+      rWall.power.walls[4] === undefined && rWall.power.walls[5] === undefined,
+      JSON.stringify(rWall.power.walls),
+    );
+
+    // Direction-agnostic: teleporting BACKWARD still sweeps what's between.
+    const sBack = state("p1", { 0: 9, 4: 6, 5: 4 });
+    const rBack = applyBloodbath(sBack, readyBarb(), 5, "p1");
+    check("Bloodbath: works backward (target behind the mover), sweeping what's between", rBack.state.tokens.find((t) => t.id === 4)!.position === -1);
+
+    // Picks the LEAST advanced on-board token when the mover has more than one.
+    const sPick = state("p1", { 0: 4, 1: 9, 4: 6 });
+    const rPick = applyBloodbath(sPick, readyBarb(), 4, "p1");
+    check(
+      "Bloodbath: relocates the LEAST advanced on-board token, not just any",
+      rPick.state.tokens.find((t) => t.id === 0)!.position === 6 && rPick.state.tokens.find((t) => t.id === 1)!.position === 9,
+    );
+
+    // Target eligibility mirrors Blink Strike's (same underlying rule).
+    const sTargets = state("p1", { 0: 4, 4: 9 });
+    const pwMage: PowerState = { ...power({ p1: "mage" }), ultimateReady: { p1: true, p2: false } };
+    check(
+      "Bloodbath: target eligibility matches Blink Strike's / Rain of Arrows' rule (reused)",
+      JSON.stringify(getBloodbathTargets(sTargets, readyBarb(), "p1")) === JSON.stringify(getBlinkStrikeTargets(sTargets, pwMage, "p1")),
+    );
+
+    // No on-board token to relocate -> no legal targets at all.
+    const sNone = state("p1", { 4: 9 });
+    check("Bloodbath: no targets when the mover has no on-board token", getBloodbathTargets(sNone, readyBarb(), "p1").length === 0);
   }
 }
 

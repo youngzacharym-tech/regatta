@@ -289,7 +289,7 @@ function takeTurnMK(
       return { state: r.state, power: r.power };
     }
     case "bloodbath": {
-      const r = applyBloodbath(state, power, mover);
+      const r = applyBloodbath(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };
     }
     case "songOfHaste": {
