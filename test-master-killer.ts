@@ -64,6 +64,12 @@ import {
   applyBless,
   applyBenediction,
   applyBlinkStrike,
+  applyBlink,
+  getBlinkTiles,
+  blinkStone,
+  blinkCostFor,
+  BLINK_COST,
+  BLINK_RANGE,
   applyBulwark,
   applyCharge,
   applyChargedShot,
@@ -392,6 +398,55 @@ function check(name: string, cond: boolean, detail?: string) {
   // turn-ending resolve calls) — still true, still exercised, even though
   // nothing reads it as a gate any more.
   check("Re-flip: a fresh turn resets the use counter", resetTurnFlags(afterSecond).reflipsUsedThisTurn === 0);
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Mage's Blink: distance-scaled cost (2026-09-18, Rework III — was a
+//     flat BLINK_COST for the whole cast; now BLINK_COST per tile of
+//     distance, via blinkCostFor, capped at BLINK_RANGE tiles). No prior
+//     dedicated test coverage existed for Blink at all before this pass.
+// ---------------------------------------------------------------------------
+{
+  // blinkCostFor is a pure distance formula — verify it directly first,
+  // independent of board legality (tile 7 below is the middle shield and
+  // never actually offered, but the cost formula doesn't know that).
+  check("blinkCostFor: scales linearly with distance", blinkCostFor(4, 5) === BLINK_COST && blinkCostFor(4, 6) === 2 * BLINK_COST && blinkCostFor(4, 7) === 3 * BLINK_COST && blinkCostFor(4, 8) === 4 * BLINK_COST);
+
+  // Mage stone at 4 (contested); candidates ahead within BLINK_RANGE are
+  // 5, 6, 7, 8 — 7 is the middle shield, excluded, leaving 5 (dist 1),
+  // 6 (dist 2), 8 (dist 4) as the real legal pool at a full bank.
+  const s = state("p1", { 0: 4 });
+  const pwFull = power({ p1: "mage" }, { p1: CHARGE_CAP });
+  const tilesFull = getBlinkTiles(s, pwFull, "p1");
+  check("Blink: shield tile 7 is never offered regardless of bank", !tilesFull.includes(7));
+  check("Blink: a full bank affords the whole range, including the farthest (4 mana)", tilesFull.includes(5) && tilesFull.includes(6) && tilesFull.includes(8));
+
+  // Affordability is now PER TILE — a partial bank keeps the cheap tiles
+  // legal while dropping the ones it can't cover.
+  const pwTwo = power({ p1: "mage" }, { p1: 2 });
+  const tilesTwo = getBlinkTiles(s, pwTwo, "p1");
+  check("Blink: at 2 mana, the 1- and 2-tile hops are still offered", tilesTwo.includes(5) && tilesTwo.includes(6));
+  check("Blink: at 2 mana, the 4-tile reach is NOT offered (would cost 4)", !tilesTwo.includes(8));
+
+  const pwOne = power({ p1: "mage" }, { p1: BLINK_COST });
+  const tilesOne = getBlinkTiles(s, pwOne, "p1");
+  check("Blink: at exactly BLINK_COST, only the 1-tile hop is offered", tilesOne.includes(5) && !tilesOne.includes(6) && !tilesOne.includes(8));
+
+  const pwBroke = power({ p1: "mage" }, { p1: 0 });
+  check("Blink: broke, nothing is offered — even a 1-tile hop costs BLINK_COST", getBlinkTiles(s, pwBroke, "p1").length === 0);
+
+  // The cast itself spends exactly blinkCostFor(from, to), not a flat rate.
+  const rNear = applyBlink(s, pwFull, 5, "p1");
+  check("Blink: a 1-tile hop spends exactly BLINK_COST", rNear.power.charges.p1 === CHARGE_CAP - BLINK_COST, `got ${rNear.power.charges.p1}`);
+  const rFar = applyBlink(s, pwFull, 8, "p1");
+  check("Blink: a 4-tile hop spends the whole bank (4 * BLINK_COST)", rFar.power.charges.p1 === CHARGE_CAP - 4 * BLINK_COST, `got ${rFar.power.charges.p1}`);
+  check("Blink: moves the stone to the chosen tile", rFar.state.tokens.find((t) => t.id === 0)!.position === 8);
+  check("Blink: always ends the turn", rFar.state.currentPlayer === "p2");
+
+  // blinkStone: the mover's own least-advanced on-board stone, same
+  // auto-select convention as every other ultimate/active that picks one.
+  check("blinkStone: picks the least-advanced on-board stone", blinkStone(state("p1", { 0: 4, 1: 9 }), pwFull, "p1")?.id === 0);
+  check("blinkStone: null with no on-board stone at all", blinkStone(state("p1", { 4: 9 }), pwFull, "p1") === null);
 }
 
 // ---------------------------------------------------------------------------

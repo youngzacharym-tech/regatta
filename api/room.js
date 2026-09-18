@@ -342,6 +342,9 @@ var CHARGED_SHOT_COST = 2;
 var REFLIP_COST = 2;
 var BLINK_COST = 1;
 var BLINK_RANGE = 4;
+function blinkCostFor(from, to) {
+  return (to - from) * BLINK_COST;
+}
 var PUSH_DISTANCE = 1;
 var CHARGE_SWEEP_CAP = 1;
 var WARD_SCOPE = "most-advanced";
@@ -1602,7 +1605,6 @@ function blinkStone(state, power, mover) {
   return stone;
 }
 function getBlinkTiles(state, power, mover) {
-  if (power.charges[mover] < BLINK_COST) return [];
   const stone = blinkStone(state, power, mover);
   if (!stone) return [];
   const foe = otherPlayerId(mover);
@@ -1614,6 +1616,7 @@ function getBlinkTiles(state, power, mover) {
     if (state.tokens.some((t) => t.position === tile)) continue;
     if (power.traps?.[foe] === tile) continue;
     if (wolfTile === tile) continue;
+    if (power.charges[mover] < blinkCostFor(stone.position, tile)) continue;
     tiles.push(tile);
   }
   return tiles;
@@ -1623,7 +1626,7 @@ function applyBlink(state, power, tile, mover) {
   const tokens = state.tokens.map((t) => t.id === stone.id ? { ...t, position: tile } : t);
   let next = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - BLINK_COST }
+    charges: { ...power.charges, [mover]: power.charges[mover] - blinkCostFor(stone.position, tile) }
   };
   next = breakShieldStreak(next, mover);
   return {

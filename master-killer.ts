@@ -226,13 +226,47 @@ export const REFLIP_COST = 2;
  *  blink (frozen means it does not move at all). Which stone: the
  *  rearmost on the board (findLeastAdvancedToken, auto-selected same as
  *  Blink Strike's own source stone) so the cast is a development tool
- *  rather than a way to rush the Warded leader home. */
+ *  rather than a way to rush the Warded leader home.
+ *
+ *  REWORK III (2026-09-18): mana PER TILE of distance now, not a flat
+ *  price — see blinkCostFor. Mage was the roster's strongest class post-
+ *  Rework-II (55.6% avg) and a flat 1-mana price for up to BLINK_RANGE
+ *  tiles was unusually cheap relative to everything else in the kit
+ *  (Re-flip costs REFLIP_COST per use with no cap since C5; Blink Strike
+ *  is gated behind the hard-to-earn ultimate). Scaling by distance keeps
+ *  short defensive hops cheap (1 tile = BLINK_COST) while making the
+ *  previously-free long-range repositioning compete directly with Re-flip
+ *  and Ward's full-bank requirement for the same 4-charge pool. No new
+ *  Ward interaction to guard here — spending ANY amount from a full bank
+ *  already dropped Ward before this change (isWarded gates on
+ *  charges === CHARGE_CAP); a farther blink just leaves the bank emptier
+ *  afterward, the same mechanism at a bigger magnitude.
+ *
+ *  SIM CHECK (2026-09-18, 1000 games/matchup, run together with Rework
+ *  III's Bloodbath port and Bless's free cast — the full combined field):
+ *  Mage's 9-matchup average landed at 49.1% (archer 52.5 / warrior 45.5 /
+ *  necromancer 47.8 / cleric 47.2 / rogue 41.3 / warlock 48.4 / hunter
+ *  51.1 / barbarian 53.2 / bard 54.9) — down from 55.6% pre-change,
+ *  squarely inside the 47-53 target band, every matchup inside 35/65
+ *  (worst: rogue 41.3%). Shipped as-is. */
 export const BLINK_COST = 1;
 /** How far ahead a Blink may reach, in tiles. The first matrix run had it
  *  unbounded and the Mage went to 88.7% (5 blinks/game; mage-vs-warlock
  *  96.9/3.1) — bought movement without a ceiling is the Rage lesson again.
- *  4 = the most a flip can give, chosen instead of rolled. */
+ *  4 = the most a flip can give, chosen instead of rolled. Also the
+ *  natural cost ceiling since Rework III: at BLINK_COST=1/tile, the
+ *  farthest reach costs a full CHARGE_CAP bank. */
 export const BLINK_RANGE = 4;
+/** What it costs to Blink from `from` to `to` — BLINK_COST per tile of
+ *  distance (2026-09-18, Rework III). THE shared oracle for both
+ *  getBlinkTiles' per-tile affordability filter and applyBlink's actual
+ *  spend, so the two can never drift (getRainOfArrowsTargets/canReflipAgain's
+ *  own discipline). `to` is always strictly ahead of `from` by construction
+ *  (getBlinkTiles never offers a tile behind or equal to the stone), so
+ *  this is never called with a non-positive distance in practice. */
+export function blinkCostFor(from: number, to: number): number {
+  return (to - from) * BLINK_COST;
+}
 
 /** Archer's Push: how many tiles back along the TARGET's own path.
  *  (Was 2 — simulation showed Archer mirrors grinding to ~270 turns via a
@@ -4471,10 +4505,12 @@ export function blinkStone(state: GameState, power: PowerState, mover: PlayerId)
 }
 
 /** Mage's Blink: legal destination tiles — empty, non-shield, contested,
- *  strictly ahead of the blinking stone, and not a square the enemy's trap
- *  or wolf covers (see BLINK_COST). Affordability baked in. */
+ *  strictly ahead of the blinking stone, not a square the enemy's trap or
+ *  wolf covers, AND affordable at blinkCostFor's per-tile price (2026-09-18,
+ *  Rework III — was a single flat BLINK_COST gate on the whole cast; now
+ *  each candidate tile is its own affordability check, so a short hop can
+ *  stay legal even when the full BLINK_RANGE reach can't). */
 export function getBlinkTiles(state: GameState, power: PowerState, mover: PlayerId): number[] {
-  if (power.charges[mover] < BLINK_COST) return [];
   const stone = blinkStone(state, power, mover);
   if (!stone) return [];
   const foe = otherPlayerId(mover);
@@ -4486,12 +4522,14 @@ export function getBlinkTiles(state: GameState, power: PowerState, mover: Player
     if (state.tokens.some((t) => t.position === tile)) continue;
     if (power.traps?.[foe] === tile) continue;
     if (wolfTile === tile) continue;
+    if (power.charges[mover] < blinkCostFor(stone.position, tile)) continue;
     tiles.push(tile);
   }
   return tiles;
 }
 
-/** Mage's Blink: spends BLINK_COST and moves the blink stone to `tile`.
+/** Mage's Blink: spends blinkCostFor(stone.position, tile) — BLINK_COST per
+ *  tile of distance since Rework III — and moves the blink stone to `tile`.
  *  Nothing is captured, nothing reacts, the turn ends and the streak
  *  breaks (a blink never lands on a shield by construction). */
 export function applyBlink(
@@ -4504,7 +4542,7 @@ export function applyBlink(
   const tokens = state.tokens.map((t) => (t.id === stone.id ? { ...t, position: tile } : t));
   let next: PowerState = {
     ...power,
-    charges: { ...power.charges, [mover]: power.charges[mover] - BLINK_COST },
+    charges: { ...power.charges, [mover]: power.charges[mover] - blinkCostFor(stone.position, tile) },
   };
   next = breakShieldStreak(next, mover);
   return {

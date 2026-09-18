@@ -77,6 +77,7 @@ import {
   VANISH_COST,
   BACKSTAB_COST,
   BLINK_COST,
+  BLINK_RANGE,
   type PlayerClass,
   type PowerMove,
   type PowerState,
@@ -2209,9 +2210,9 @@ const moveIndexByToken = new Map<number, number>();
 const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; klass: PlayerClass }> = {
   blink: {
     name: "Blink",
-    cost: `${BLINK_COST} mana`,
+    cost: `${BLINK_COST} mana per tile`,
     klass: "mage",
-    desc: "Teleport your rearmost stone on the board to any empty tile in shared water ahead of it — never a shield tile, never onto a trap or a wolf's watch, never home. Nothing is captured; this is position, not a strike. Blink Strike is the same jump with a blade at the end. Ends your turn, and spending drops the Ward until you refill.",
+    desc: `Teleport your rearmost stone on the board to any empty tile in shared water ahead of it — never a shield tile, never onto a trap or a wolf's watch, never home. Nothing is captured; this is position, not a strike. ${BLINK_COST} mana per tile of distance, up to ${BLINK_RANGE} tiles: short hops stay cheap, the full reach costs your whole bank. Blink Strike is the same jump with a blade at the end. Ends your turn, and spending below the full bank drops the Ward until you refill.`,
   },
   reflip: {
     name: "Re-flip",
@@ -6232,10 +6233,11 @@ const GUIDE_SPREADS: [string, string][] = [
        not a Warlock's Sacrifice. A Curse still binds a Warded stone like
        any other. Ward follows your furthest stone — send it home and it
        passes to the new leader.</li>
-       <li><b>Blink</b> (active, ${BLINK_COST} mana): teleport your rearmost
-       stone on the board to any empty tile in shared water ahead of it —
-       never a shield, trap or wolf's watch. Nothing is captured. Ends
-       your turn.</li>
+       <li><b>Blink</b> (active, ${BLINK_COST} mana per tile, up to
+       ${BLINK_RANGE}): teleport your rearmost stone on the board to any
+       empty tile in shared water ahead of it — never a shield, trap or
+       wolf's watch. Short hops are cheap; the full reach costs your whole
+       bank. Nothing is captured. Ends your turn.</li>
      </ul>`,
     `<div class="runner">The Mage &middot; continued</div>
      <ul>
@@ -6647,6 +6649,16 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // player-facing tavern voice, telling people what to LOOK FOR, not a diff.
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
+  {
+    id: "2026-09-18-three-changes",
+    date: "September 18, 2026",
+    title: "Three Changes",
+    items: [
+      "<b>The Barbarian's Bloodbath is a different beast now.</b> Warpath's old teleport-and-sweep — relocate your rearmost stone onto any enemy in shared water, capturing it and everything caught between, through every protection there is — now lives on the Barbarian's ultimate slot. The old charge-the-length-of-the-row Bloodbath is retired.",
+      "<b>Bless costs nothing to cast.</b> The Cleric's wall-raising prayer is free — holding the wall still bleeds mana every turn, same as ever, but building your fortress in the first place no longer starves the rest of your kit.",
+      "<b>The Mage's Blink is priced by distance.</b> 1 mana per tile, up to 4 — a short hop stays cheap, but reaching the full range now costs your whole bank instead of a flat 1.",
+    ],
+  },
   {
     id: "2026-09-17-the-walls-rise",
     date: "September 17, 2026",
