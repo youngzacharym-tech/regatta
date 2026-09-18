@@ -368,6 +368,7 @@ var PICKPOCKET_STEAL = 2;
 var VANISH_COST = 1;
 var VANISH_TURNS = BULWARK_TURNS;
 var BACKSTAB_COST = 4;
+var BACKSTAB_RANGE = 3;
 var BLOOD_PACT_CHARGES = 1;
 var DARK_BARGAIN_RETREAT = 1;
 var DARK_BARGAIN_LANDING_ONLY = false;
@@ -375,6 +376,7 @@ var CURSE_COST = 1;
 var CURSE_TURNS = 3;
 var CURSE_SLOW = 1;
 var SACRIFICE_COST = 2;
+var SACRIFICE_RANGE = 4;
 var FEL_STORM_RETURN_POSITION = 4;
 var WOLF_BITE_DISTANCE = 1;
 var WOLF_CAPTURES = true;
@@ -1402,9 +1404,11 @@ function getVanishTargets(state, power, mover) {
 }
 function getBackstabTargets(state, power, mover) {
   if (power.charges[mover] < BACKSTAB_COST) return [];
+  const mine = findMostAdvancedToken(state, power, mover);
+  if (!mine) return [];
   return getRainOfArrowsTargets(state, power, mover).filter((id) => {
     const t = state.tokens.find((tok) => tok.id === id);
-    return !isProtected(state, power, t);
+    return !isProtected(state, power, t) && Math.abs(t.position - mine.position) <= BACKSTAB_RANGE;
   });
 }
 function applyBackstab(state, power, targetTokenId, mover) {
@@ -1518,9 +1522,10 @@ function tickCurseForNewTurn(state, power) {
 }
 function getSacrificeTargets(state, power, mover) {
   if (power.charges[mover] < SACRIFICE_COST) return [];
-  if (!findMostAdvancedToken(state, power, mover)) return [];
+  const mine = findMostAdvancedToken(state, power, mover);
+  if (!mine) return [];
   const foe = otherPlayerId(mover);
-  return state.tokens.filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !isProtected(state, power, t)).map((t) => t.id);
+  return state.tokens.filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER).filter((t) => BOARD_LAYOUT[t.position].isContested).filter((t) => !isProtected(state, power, t)).filter((t) => Math.abs(t.position - mine.position) <= SACRIFICE_RANGE).map((t) => t.id);
 }
 function applySacrifice(state, power, targetTokenId, mover) {
   const mine = findMostAdvancedToken(state, power, mover);

@@ -2426,6 +2426,18 @@ function check(name: string, cond: boolean, detail?: string) {
   const sPrivate = state("p1", { 0: 4, 4: 1 });
   check("Backstab: a target outside the contested zone is never legal", getBackstabTargets(sPrivate, pw, "p1").length === 0);
 
+  // Rework IV (2026-09-18): BACKSTAB_RANGE — measured from the Rogue's own
+  // furthest-along on-board stone, not the target's own position.
+  const sRange = state("p1", { 0: 4, 4: 6, 5: 11 }); // mover at 4; enemies at 6 (dist 2) and 11 (dist 7)
+  const pwRange = power({ p1: "rogue", p2: "warrior" }, { p1: CHARGE_CAP });
+  const rangeTargets = getBackstabTargets(sRange, pwRange, "p1");
+  check("Backstab: within BACKSTAB_RANGE is a legal target", rangeTargets.includes(4));
+  check("Backstab: beyond BACKSTAB_RANGE is not, even unprotected", !rangeTargets.includes(5));
+  check(
+    "Backstab: no anchor stone on-board = no legal targets at all",
+    getBackstabTargets(state("p1", { 4: 1, 5: 6 }), pwRange, "p1").length === 0,
+  );
+
   // --- Apply: a real kill (the only outcome left — no wound tier) ---
   {
     const sKill = state("p1", { 0: 4, 4: 6 });
@@ -2787,6 +2799,16 @@ function check(name: string, cond: boolean, detail?: string) {
   const sacTargets = getSacrificeTargets(sSac, pwSac, "p1");
   check("Sacrifice: an enemy in shared water is a legal target", sacTargets.includes(4));
   check("Sacrifice: an enemy in its own private lane is NOT", !sacTargets.includes(5));
+
+  // Rework IV (2026-09-18): SACRIFICE_RANGE — measured from the SAME
+  // most-advanced stone (token 1, position 9) already being spent as the
+  // cost. Token 4 (position 8, distance 1) stays legal; a stone far enough
+  // away (position 4, distance 5) is now out of reach even though it's
+  // otherwise a perfectly legal, unprotected, contested-water target.
+  const sSacRange = state("p1", { 0: 5, 1: 9, 4: 8, 6: 4 });
+  const rangeTargets = getSacrificeTargets(sSacRange, pwSac, "p1");
+  check("Sacrifice: within SACRIFICE_RANGE is a legal target", rangeTargets.includes(4));
+  check("Sacrifice: beyond SACRIFICE_RANGE is not, even unprotected", !rangeTargets.includes(6));
   check(
     "Sacrifice: no targets below SACRIFICE_COST",
     getSacrificeTargets(sSac, power({ p1: "warlock", p2: "archer" }, { p1: SACRIFICE_COST - 1 }), "p1").length === 0,
@@ -2881,6 +2903,19 @@ function check(name: string, cond: boolean, detail?: string) {
       rPierce.state.tokens.find((t) => t.id === 4)!.position === FEL_STORM_RETURN_POSITION,
     );
     check("Fel Storm: a dragged stone keeps its wall (it never died — this is a displacement, not a kill)", rPierce.power.walls[4] === "bulwark");
+
+    // Explicit shield-TILE check (not a wall): an enemy stone sitting on the
+    // board's actual shield tile (BOARD_LAYOUT index 7, the middle shield)
+    // with no other protection is still a legal Fel Storm victim and is
+    // actually reached — same pool Rain of Arrows already proves this on.
+    const sShield = state("p1", { 0: 5, 4: 7 });
+    const pwShield: PowerState = {
+      ...power({ p1: "warlock", p2: "archer" }),
+      ultimateReady: { p1: true, p2: false },
+    };
+    check("Fel Storm: a stone on the middle shield tile is a legal target", getFelStormTargets(sShield, pwShield, "p1").includes(4));
+    const rShield = applyFelStorm(sShield, pwShield, "p1");
+    check("Fel Storm: it actually drags the shield-tile stone", rShield.state.tokens.find((t) => t.id === 4)!.position === FEL_STORM_RETURN_POSITION);
   }
 }
 

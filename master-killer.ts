@@ -926,6 +926,26 @@ export const BACKSTAB_COST = 4;
 /* 2 -> 3 after the first matrix at 2: rogue 58.8% vs the field (66% vs
  * warrior, backstab/g 8.2) — the same warrior/necromancer overshoot the
  * July trace recorded. At 3 a Backstab is most of the purse again. */
+/** Rework IV (2026-09-18): same range-cap lever as Sacrifice (see
+ *  SACRIFICE_RANGE), for the same reason — Backstab also reaches "any enemy
+ *  in shared water," and Rogue sits slightly over-band (53.3%) too. Costs
+ *  stay exactly as-is on both abilities; this is a distance lever, not a
+ *  mana lever — neither is a movement ability, so there's no tile-count to
+ *  scale a PRICE against the way Blink's distance-scaled cost works.
+ *  Measured from the Rogue's OWN furthest-along on-board stone
+ *  (findMostAdvancedToken) — unlike Sacrifice's anchor, this stone is not
+ *  spent, just reused as the same kind of reference point for consistency.
+ *  Gets the TIGHTER leash of the two: Sacrifice already pays a body cost
+ *  (the spent stone) that Backstab never does — Warlock runs out of stones
+ *  to feed it, Rogue only ever runs out of mana, which refills. No anchor
+ *  stone on-board = no legal targets at all (same "empty pool" convention
+ *  as every other ability keyed off findMostAdvancedToken).
+ *
+ *  SIM CHECK: shipped at 3, the wider of its two candidates — full sweep
+ *  result and rationale recorded on SACRIFICE_RANGE (both dials were swept
+ *  together, 4×combos). Rogue undershot band even at the widest setting;
+ *  flagged there, not chased further here. See getBackstabTargets. */
+export const BACKSTAB_RANGE = 3;
 
 /** Warlock's DARK BARGAIN (passive, free, 2026-09-16 — replaces Blood Pact
  *  as the class passive at the user's direction): when an ENEMY would kill
@@ -1072,6 +1092,34 @@ export const CURSE_SLOW = 1;
  *  runner. Ends the turn, breaks the shield streak (Push's precedent — an
  *  attack, not a placement). */
 export const SACRIFICE_COST = 2;
+/** Rework IV (2026-09-18): Sacrifice reaches "any enemy in shared water," no
+ *  distance limit — the actual lever for Warlock's slight over-band average
+ *  (54.3%), not SACRIFICE_COST (unchanged; the ritual's price is the mana
+ *  PLUS the spent stone, already a real body cost with no refund, unlike
+ *  Backstab's mana-only price — see BACKSTAB_RANGE for the asymmetry this
+ *  reflects). Measured from the SAME stone already being spent as the cost
+ *  (findMostAdvancedToken) — no new mechanic, just reusing that stone as the
+ *  measuring point.
+ *
+ *  SIM CHECK (2026-09-18, 500 games/matchup, all 4 candidates ×
+ *  {SACRIFICE_RANGE, BACKSTAB_RANGE} ∈ {3,4}×{2,3}): Warlock landed inside
+ *  47-53 on every combo (50.3-51.7%); Rogue undershot the band on all four
+ *  (42.8-46.2%) — an overcorrection this comment's own sweep discipline
+ *  warned about going in. (4, 3) shipped: closest-to-band on both classes
+ *  (warlock 51.2%, rogue 46.2%) AND the only reading that keeps the
+ *  intended asymmetry (SACRIFICE_RANGE > BACKSTAB_RANGE — the ability with
+ *  no body cost gets the tighter leash); (3, 3) ties on safety but erases
+ *  that asymmetry, (4, 2) broke the 35/65 bar outright (archer vs rogue
+ *  68.0/32.0). At (4, 3): Warlock's 9-matchup average 51.2% (worst:
+ *  necromancer 59.6/40.4 favoring necro, archer 41.0/59.0 favoring warlock
+ *  — down from the pre-Rework-IV 33.0/67.0, a side effect worth noting for
+ *  the still-open Archer/Warlock thread but not a claim this fixes it).
+ *  Rogue's 9-matchup average 46.2%, under band but every matchup stays
+ *  inside 35/65 (worst: archer vs rogue 63.0/37.0, close to the edge).
+ *  Shipped as measured, not chased further — Rogue's shortfall is flagged
+ *  here for the record, same discipline as Barbarian's post-Rework-III
+ *  read. See getSacrificeTargets / getBackstabTargets. */
+export const SACRIFICE_RANGE = 4;
 
 /** Warlock's Fel Storm ultimate: the contested-row position every enemy
  *  stone in shared water is dragged back to — the whole row collapses onto
@@ -4059,12 +4107,16 @@ export function getVanishTargets(state: GameState, power: PowerState, mover: Pla
  *  aren't protected — walls are absolute now (2026-09-17), so the old
  *  "Ward pierced by simple omission" carve-out is gone: a single
  *  isProtected check blocks it same as every other non-ultimate strike.
- *  Affordability baked in. */
+ *  Rework IV (2026-09-18): also capped to BACKSTAB_RANGE tiles of the
+ *  Rogue's own furthest-along on-board stone (see that constant) — empty if
+ *  the Rogue has no on-board stone to measure from. Affordability baked in. */
 export function getBackstabTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < BACKSTAB_COST) return [];
+  const mine = findMostAdvancedToken(state, power, mover);
+  if (!mine) return [];
   return getRainOfArrowsTargets(state, power, mover).filter((id) => {
     const t = state.tokens.find((tok) => tok.id === id)!;
-    return !isProtected(state, power, t);
+    return !isProtected(state, power, t) && Math.abs(t.position - mine.position) <= BACKSTAB_RANGE;
   });
 }
 
@@ -4284,15 +4336,20 @@ export function tickCurseForNewTurn(
  *  the sim decides whether it needs a new lever). Empty when the warlock
  *  has no on-board stone to give (the ritual needs blood —
  *  findMostAdvancedToken's null, Blink Strike's shape) or can't afford the
- *  cast (baked in, Charged Shot's uniform-cost convention). */
+ *  cast (baked in, Charged Shot's uniform-cost convention). Rework IV
+ *  (2026-09-18): also capped to SACRIFICE_RANGE tiles of that same
+ *  most-advanced stone — the one already being spent as the cost, reused as
+ *  the measuring point (see that constant). */
 export function getSacrificeTargets(state: GameState, power: PowerState, mover: PlayerId): number[] {
   if (power.charges[mover] < SACRIFICE_COST) return [];
-  if (!findMostAdvancedToken(state, power, mover)) return [];
+  const mine = findMostAdvancedToken(state, power, mover);
+  if (!mine) return [];
   const foe = otherPlayerId(mover);
   return state.tokens
     .filter((t) => effectiveOwner(power, t) === foe && t.position >= 0 && t.position < PATH_LENGTH_PER_PLAYER)
     .filter((t) => BOARD_LAYOUT[t.position].isContested)
     .filter((t) => !isProtected(state, power, t))
+    .filter((t) => Math.abs(t.position - mine.position) <= SACRIFICE_RANGE)
     .map((t) => t.id);
 }
 
