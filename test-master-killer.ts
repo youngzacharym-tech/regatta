@@ -1861,12 +1861,17 @@ function check(name: string, cond: boolean, detail?: string) {
 // and casts — replaces the old Bless/Heal pair under the wall rework.
 // ---------------------------------------------------------------------------
 {
-  // Bless pool: own on-board stones with no live wall, full bank only.
+  // Bless pool: own on-board stones with no live wall — free to cast since
+  // Rework III (2026-09-18, BLESS_COST=0), so a broke Cleric can still
+  // Bless; only the pool (own unwalled on-board stones) gates it now.
   const s = state("p1", { 0: 5, 1: 2, 4: 8 });
-  const pwBroke = power({ p1: "cleric" }, { p1: BLESS_COST - 1 });
-  check("Bless: empty pool below the full bank", getBlessTargets(s, pwBroke, "p1").length === 0);
+  const pwBroke = power({ p1: "cleric" }, { p1: 0 });
+  check("Bless: castable even at zero charges (BLESS_COST=0)", getBlessTargets(s, pwBroke, "p1").length > 0);
 
-  const pw = power({ p1: "cleric" }, { p1: BLESS_COST });
+  // Realistic full-bank Cleric for the rest of this block — pool/cast
+  // behavior shouldn't depend on the exact charge count now that Bless is
+  // free (BLESS_COST=0), so a non-zero bank keeps these scenarios typical.
+  const pw = power({ p1: "cleric" }, { p1: CHARGE_CAP });
   const pool = getBlessTargets(s, pw, "p1");
   check("Bless: own on-board stones eligible (contested and private lane alike)", pool.includes(0) && pool.includes(1));
   check("Bless: reserve and enemy stones excluded", !pool.includes(2) && !pool.includes(4));
@@ -1877,16 +1882,16 @@ function check(name: string, cond: boolean, detail?: string) {
 
   // A stone possessed AGAINST the cleric is not theirs to bless.
   const pwPoss: PowerState = {
-    ...power({ p1: "cleric", p2: "necromancer" }, { p1: BLESS_COST }),
+    ...power({ p1: "cleric", p2: "necromancer" }, { p1: CHARGE_CAP }),
     thrall: { p1: null, p2: { tokenId: 0, turnsLeft: 2 } },
   };
   check("Bless: a stone possessed against the cleric is excluded", !getBlessTargets(s, pwPoss, "p1").includes(0));
 
-  // The cast: spends the mana, raises a "blessing" wall, KEEPS the turn
+  // The cast: free (BLESS_COST=0), raises a "blessing" wall, KEEPS the turn
   // (Revive's contract — no streak interaction, no board movement).
   const pwStreak: PowerState = { ...pw, shieldStreak: { p1: 2, p2: 0 } };
   const r = applyBless(s, pwStreak, 0, "p1");
-  check("Bless: spends BLESS_COST", r.power.charges.p1 === 0);
+  check("Bless: costs nothing to cast (BLESS_COST=0)", r.power.charges.p1 === CHARGE_CAP, `got ${r.power.charges.p1}`);
   check("Bless: raises a 'blessing' wall on the target", r.power.walls[0] === "blessing");
   check("Bless: keeps the turn (Revive's contract)", r.state.currentPlayer === "p1");
   check("Bless: leaves the shield streak alone", r.power.shieldStreak.p1 === 2);

@@ -2299,9 +2299,9 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
   },
   bless: {
     name: "Bless",
-    cost: `${BLESS_COST} mana · keeps your turn`,
+    cost: BLESS_COST === 0 ? "Free · keeps your turn" : `${BLESS_COST} mana · keeps your turn`,
     klass: "cleric",
-    desc: "A quick prayer over one of your stones: it becomes a wall, same as a Warrior's Bulwark — nothing short of an ultimate can touch it, and it costs you mana every one of your own turns to keep standing. Your turn continues: bless, then still make your move.",
+    desc: "A quick prayer over one of your stones: it becomes a wall, same as a Warrior's Bulwark — nothing short of an ultimate can touch it, and it costs you mana every one of your own turns to keep standing. The prayer itself costs nothing; the standing does. Your turn continues: bless, then still make your move.",
   },
   vigil: {
     name: "Vigil",
@@ -6310,10 +6310,11 @@ const GUIDE_SPREADS: [string, string][] = [
   [
     `<h2>The Cleric</h2>
      <ul>
-       <li><b>Bless</b> (active, ${BLESS_COST} mana, keeps your turn): a
+       <li><b>Bless</b> (active, ${BLESS_COST === 0 ? "free" : `${BLESS_COST} mana`}, keeps your turn): a
        quick prayer WALLS one of your stones — the same absolute
        protection as a Warrior's Bulwark: nothing short of an ultimate can
-       touch it. Bless, then still move.</li>
+       touch it. The prayer costs nothing; holding the wall up still does.
+       Bless, then still move.</li>
        <li>A wall costs mana every one of its owner's turns to keep
        standing — let the bill go unpaid and it falls on its own. The
        light shelters <span class="gold">${BLESSING_CAP} at a time</span>

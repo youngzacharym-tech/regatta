@@ -231,8 +231,10 @@ function takeTurn(
   // doc), and Rogue Pickpocket joined it too (applyPickpocket's own
   // contract — bank-level, no board change at all), so the loop handles
   // four kinds. Bound: the Re-flip cap plus every mana the bank could fund
-  // across the turn-keepers (each Bless/Pickpocket costs >= 1, Revive
-  // empties the bank), plus safety.
+  // across the turn-keepers (Pickpocket costs >= 1, Revive empties the
+  // bank; Bless is BLESS_COST=0 since 2026-09-18 — its own BLESSING_CAP
+  // bounds it instead, well inside this loop's REFLIPS_PER_TURN-driven
+  // margin), plus safety.
   let revives = 0;
   let blessCasts = 0;
   let pickpocketCasts = 0;

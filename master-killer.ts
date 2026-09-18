@@ -699,8 +699,32 @@ export const EXHUME_RETURN_POSITION = 11;
  *    mana per permanent second life is simply underpriced.
  *  - cost 2 (the full bank), Bless keeps / Heal ends: the shipped combo —
  *    every blessing empties the bank the class fills only slowly, so
- *    uptime is income-bound and the attacker's break sticks. */
-export const BLESS_COST = 2;
+ *    uptime is income-bound and the attacker's break sticks.
+ *
+ *  REWORK III (2026-09-18): the trace above is from the WOUND/HEAL era —
+ *  "free to maintain" meant literal immortality back then, which is why
+ *  cost 2 was load-bearing. That threat model is gone (2026-09-17's wall
+ *  rework): a Blessing is the SAME uncapturable-until-ultimate wall as a
+ *  Bulwark now, priced by ongoing WALL_BLEED upkeep every turn regardless
+ *  of what Bless itself costs to cast — "free to maintain" can no longer
+ *  happen through this constant, only through WALL_BLEED_MIN going to 0
+ *  (forbidden, see its own guardrail). Diagnosis: Cleric's whole kit is
+ *  pure defense by design (no offense anywhere, and Zach wants it that
+ *  way), but BLESS_COST=2 meant a full bank bought exactly ONE wall before
+ *  income-starved, so the "wall your convoy" identity the kit's own upper
+ *  abilities (Vigil, Benediction) assume never got to express itself at
+ *  any real width. SWEEP (1000 games/matchup, WALL_BLEED=1 held constant —
+ *  this is Bless's own dial, not the shared one): cost 2 (baseline) =
+ *  38.6% avg; cost 1 = 42.9% avg (archer-vs-cleric still 34.8%, just
+ *  outside the bar); cost 0 = 47.5% avg (archer 36.1 / mage 48.6 / warrior
+ *  47.8 / necromancer 49.8 / rogue 46.5 / warlock 48.3 / hunter 52.3 /
+ *  barbarian 48.3 / bard 49.6) — squarely in the 47-53 band, every matchup
+ *  inside 35/65, bless/g a healthy 4.2-9.5 (BLESSING_CAP=3 still the real
+ *  pool limit, so this isn't unbounded spam), no stalemate movement, no
+ *  turn-count blowup. A free CAST does not risk the free-to-HOLD
+ *  catastrophe WALL_BLEED_MIN guards against — upkeep is untouched and
+ *  still the only thing keeping a wall up. Shipped 0. */
+export const BLESS_COST = 0;
 
 /** How many of the cleric's stones may carry a live blessing AT ONCE —
  *  Bless's AND Heal's pools both empty while the count is met (only
@@ -3740,23 +3764,28 @@ export function getBlessTargets(state: GameState, power: PowerState, mover: Play
     .map((t) => t.id);
 }
 
-/** Cleric's Bless: spends BLESS_COST to raise a wall on one own stone
- *  (kind "blessing" — uncapturable except by an ultimate, and it bleeds
- *  WALL_BLEED like any wall). Does NOT end the turn — Revive's exact
- *  contract: the caller keeps the SAME flip and recomputes legal moves
- *  (the board itself is untouched — only a flag changed — but the
- *  recompute keeps the contract uniform), so the cleric blesses AND still
- *  marches. That turn-keeping is load-bearing balance, not a nicety: as a
- *  turn-ending cast the class lost 72.9/27.1 to archer and 75.7/24.3 to
- *  mage at 1200/matchup even with BLESS_COST=1 — a whole turn per cast
- *  against classes that spend none was the structural hole (the mana
- *  price is real; the tempo price was fatal). Like Revive: no
+/** Cleric's Bless: spends BLESS_COST (0 since Rework III, see its own doc
+ *  for why a free CAST no longer risks the old immortality catastrophe) to
+ *  raise a wall on one own stone (kind "blessing" — uncapturable except by
+ *  an ultimate, and it bleeds WALL_BLEED like any wall, cast price or not).
+ *  Does NOT end the turn — Revive's exact contract: the caller keeps the
+ *  SAME flip and recomputes legal moves (the board itself is untouched —
+ *  only a flag changed — but the recompute keeps the contract uniform), so
+ *  the cleric blesses AND still marches. That turn-keeping is load-bearing
+ *  balance, not a nicety: as a turn-ending cast the class lost 72.9/27.1 to
+ *  archer and 75.7/24.3 to mage at 1200/matchup even at a 1-mana price —
+ *  a whole turn per cast against classes that spend none was the
+ *  structural hole (WOUND-ERA finding; the tempo argument still holds
+ *  today even though the mana price that accompanied it doesn't). Like
+ *  Revive: no
  *  resetTurnFlags, no streak interaction (a blessing is a prayer, not a
  *  landing — the streak lives or dies by the move that follows), no
  *  charge grant, and no affordability self-guard (the caller already
- *  consulted getBlessTargets). At most CHARGE_CAP casts can fund
- *  themselves in one turn, so the act-then-redecide loop is bounded by
- *  the bank exactly like Re-flip's is. */
+ *  consulted getBlessTargets). At most BLESSING_CAP casts can happen in
+ *  one turn now (2026-09-18: BLESS_COST=0 means the bank no longer bounds
+ *  it — getBlessTargets' own pool cap is the only limit left), still
+ *  comfortably inside the act-then-redecide loop's safety bound in the
+ *  sims (REFLIPS_PER_TURN + CHARGE_CAP*2 + 1, see its own comment). */
 export function applyBless(
   state: GameState,
   power: PowerState,
