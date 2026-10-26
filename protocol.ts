@@ -499,6 +499,8 @@ export type ClientMessage =
        *  flip-off. Ignored outside class-pick phase or once already picked. */
       type: "pickClass";
       class: PlayerClass;
+      /** CPU rooms only: the class to set the CPU to; absent = random. */
+      foe?: PlayerClass;
     }
   | {
       /** Master Killer mode only: spend a charge on an active ability

@@ -292,6 +292,32 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
   }
 }
 
+// ---------------------------------------------------------------------------
+// The face-off sets the CPU's class with the human's pick (`foe`), and with no
+// foe the CPU's class is rolled right then — a pick faster than the bot's
+// think time must not leave the CPU on the placeholder class.
+// ---------------------------------------------------------------------------
+{
+  const base = createRoomDoc("FOETEST", true, "masterKiller", "tok", 0, false);
+  const chosen = applyAction(base, "p1", { op: "pickClass", class: "bard", foe: "necromancer" }, 0);
+  assert(!chosen.error, "a pick with a foe is accepted in a CPU room");
+  assert(chosen.doc.mk?.classes.p2 === "necromancer", "the foe is the CPU's class");
+  assert(chosen.doc.phase === "opening", "both classes settled: on to the flip-off");
+
+  const bogus = applyAction(base, "p1", { op: "pickClass", class: "bard", foe: "pirate" as never }, 0);
+  assert(!!bogus.error && !bogus.doc.classesPicked.p1, "an unknown foe is rejected outright");
+
+  // rand() = 0.99 lands on the last class; the placeholder is the first.
+  const rolled = applyAction(base, "p1", { op: "pickClass", class: "bard" }, 0, () => 0.99);
+  assert(rolled.doc.mk?.classes.p2 === MK_CLASSES[MK_CLASSES.length - 1], "no foe: the CPU's class is rolled at the pick");
+
+  // The tick already rolled the CPU's class: a pick without a foe keeps it.
+  const ticked = tick(base, 10_000, () => 0.5);
+  const kept = ticked.mk!.classes.p2;
+  const late = applyAction(ticked, "p1", { op: "pickClass", class: "bard" }, 10_000, () => 0.99);
+  assert(late.doc.mk?.classes.p2 === kept, "a CPU class already rolled stands");
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion failure(s).`);
   process.exit(1);

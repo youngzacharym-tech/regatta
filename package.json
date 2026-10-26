@@ -14,7 +14,7 @@
     "build:stage": "cd stage && npm install && npm run build",
     "build:api": "esbuild api/room.ts --bundle --platform=node --format=esm --target=node20 --external:ioredis --outfile=api/room.js",
     "build": "npm run build:stage",
-    "deploy": "npm run build:api && npx vercel deploy --prod",
+    "deploy": "npm run build:api && npx vercel deploy --prod --project masterkiller",
     "test-engine": "tsx test-engine-drive.ts"
   },
   "dependencies": {

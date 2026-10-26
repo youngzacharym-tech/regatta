@@ -22,6 +22,10 @@ import { BOARD_LAYOUT } from "../../rulebook.ts";
 import { tileWorldPos, reservePos, escapedPos } from "./layout.ts";
 import { audio } from "./audio.ts";
 import { PROC_ICONS, type ProcIconId } from "./proc-icons.ts";
+import { createFaceoff } from "./faceoff.ts";
+import { createFaceoffFigures } from "./faceoff3d.ts";
+import { patchFigureMaterial } from "./figure-material.ts";
+import { createGamepadControls, rumble, type TableStep, type TableTarget } from "./gamepad.ts";
 // Master Killer mode — additive only. Everything below is inert in classic
 // rooms (myVariant stays "classic", currentPower stays null, and every
 // branch that reads them is gated accordingly).
@@ -105,11 +109,12 @@ function resolveApiURL(): string {
   return `${location.origin}/api/room`;
 }
 const API_URL = resolveApiURL();
-const GLB_URL = "/regatta.glb";
-const PIECES_URL = "/pieces.glb";
-/** Master Killer class-token sculpts — lazy-loaded only when an MK room is
+const GLB_URL = "/board.glb";
+/** Flip coins + the hooded stand-in figures (tools/build_pieces_mk.py). */
+const PIECES_URL = "/pieces-core.glb";
+/** Master Killer class figurines — lazy-loaded only when an MK room is
  *  seen (ensureMkPieces), never on the menu or in classic rooms. */
-const PIECES_MK_URL = "/pieces-mk.glb";
+const PIECES_MK_URL = "/figures.glb";
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -757,7 +762,7 @@ const tokenGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.16, 24);
 const p1Mat = new THREE.MeshStandardMaterial({ color: 0xc02020, roughness: 0.6 });
 const p2Mat = new THREE.MeshStandardMaterial({ color: 0x2040c0, roughness: 0.6 });
 
-const STONE_TINT = 0xdcd3c1; // soft bone; keeps the stones from reading pure white
+const STONE_TINT = 0xffffff; // the figurines carry their own paint (vertex colour) — no tint over it
 /** Mirror matches only: the multiplier the OPPONENT's stones wear so two
  *  identical class sculpts read apart at a glance (see applyTokenGeometries).
  *  Cool slate — under it the warm reliefs go dusky while the sculpt stays
@@ -1258,6 +1263,7 @@ gltfLoader.load(
       const mat = marker.mesh.material as THREE.MeshStandardMaterial;
       mat.vertexColors = true;
       mat.color.setHex(STONE_TINT);
+      patchFigureMaterial(mat); // per-vertex finishes: metal, gloss, glow
       mat.needsUpdate = true;
     }
     applyTokenGeometries();
@@ -1325,6 +1331,7 @@ function ensureMkPieces() {
         const mat = marker.mesh.material as THREE.MeshStandardMaterial;
         mat.vertexColors = true;
         mat.color.setHex(STONE_TINT);
+        patchFigureMaterial(mat);
         mat.needsUpdate = true;
       }
       applyTokenGeometries();
@@ -1336,6 +1343,7 @@ function ensureMkPieces() {
 
 function triggerCoinFlip(markedCount: number, set: CoinAnim[]) {
   bumpKinetic();
+  if (set === myCoins) rumble("flip");
   const now = performance.now();
   // Pick markedCount coin indices uniformly at random to show the marked face.
   const indices = [0, 1, 2, 3];
@@ -1419,6 +1427,7 @@ function refreshMarkers(state: GameState, exhumed = false) {
 
     if (wasOnBoard && token.position === -1) {
       // Captured — violent random-axis tumble back to reserve.
+      if (!viewingHistory()) rumble(token.owner === (myRole ?? "p1") ? "hurt" : "hit");
       marker.flying = true;
       marker.flightStart = now;
       marker.flightDuration = CAPTURE_FLIGHT_MS;
@@ -1431,6 +1440,7 @@ function refreshMarkers(state: GameState, exhumed = false) {
       marker.flightSpinSpeed = 5 + Math.random() * 4;
     } else if (wasOnBoard && token.position >= PATH_LENGTH) {
       // Escaped — triumphant high arc with a slow forward flip.
+      if (!viewingHistory() && token.owner === (myRole ?? "p1")) rumble("hit");
       marker.flying = true;
       marker.flightStart = now;
       marker.flightDuration = ESCAPE_FLIGHT_MS;
@@ -3450,6 +3460,13 @@ function findEligibleMeshUnderPointer(clientX: number, clientY: number): number 
   return null;
 }
 
+/** Drink to a stone brought home (the mug tap / the pad's Y). */
+function doSwig() {
+  const mySide: PlayerId = myRole ?? "p1";
+  const earned = Math.min(escapedByOwner[mySide] + debugSips, 4);
+  drinkSip(myMug!, earned >= 4 && myMug!.sips === 3 ? "slam" : "sip");
+}
+
 /** Generous hit zone around my mug — a swig should never miss. */
 function isMyMugUnderPointer(clientX: number, clientY: number): boolean {
   if (!myMug) return false;
@@ -3631,11 +3648,7 @@ canvas.addEventListener("pointerdown", (e) => {
   }
   // Opening flip-off: same tap target and glow as the roll gate.
   if (openingTapArmed) {
-    if (isMyCoinUnderPointer(e.clientX, e.clientY)) {
-      openingTapArmed = false;
-      sendToServer({ type: "openingFlip" });
-      hud.innerHTML = `<div>Flip for first move</div><div>Flipping…</div>`;
-    }
+    if (isMyCoinUnderPointer(e.clientX, e.clientY)) doOpeningFlip();
     return;
   }
   // Master Killer: an ability is armed — this tap either picks a target or
@@ -3655,26 +3668,12 @@ canvas.addEventListener("pointerdown", (e) => {
   }
   // A waiting swig: tap the mug, drink to the stone you brought home.
   if (myAvailableSips() > 0 && isMyMugUnderPointer(e.clientX, e.clientY)) {
-    const mySide: PlayerId = myRole ?? "p1";
-    const earned = Math.min(escapedByOwner[mySide] + debugSips, 4);
-    drinkSip(myMug!, earned >= 4 && myMug!.sips === 3 ? "slam" : "sip");
+    doSwig();
     return;
   }
   // Roll gate: your flip happens when you tap your coin pile.
   if (rollPending) {
-    if (isMyCoinUnderPointer(e.clientX, e.clientY)) {
-      const pending = rollPending;
-      rollPending = null;
-      triggerCoinFlip(pending.flip, myCoins);
-      renderHud(pending.state, pending.flip);
-      renderMoves(pending.legalMoves, true);
-      updateDock(true);
-      if (pending.legalMoves && pending.legalMoves.length > 0)
-        coach(
-          "move",
-          "Now tap a glowing stone to sail it that many paces. Your route: down your shore, up the shared middle, then back home to the dock.",
-        );
-    }
+    if (isMyCoinUnderPointer(e.clientX, e.clientY)) doRoll();
     return;
   }
   const tokenId = findEligibleMeshUnderPointer(e.clientX, e.clientY);
@@ -3710,6 +3709,34 @@ canvas.addEventListener("pointerdown", (e) => {
     }
     return;
   }
+  commitMove(tokenId);
+});
+
+/** The opening flip-off: who moves first. Tap or pad. */
+function doOpeningFlip() {
+  openingTapArmed = false;
+  sendToServer({ type: "openingFlip" });
+  hud.innerHTML = `<div>Flip for first move</div><div>Flipping…</div>`;
+}
+
+/** The roll gate: your flip happens when you tap your coin pile (or press A). */
+function doRoll() {
+  if (!rollPending) return;
+  const pending = rollPending;
+  rollPending = null;
+  triggerCoinFlip(pending.flip, myCoins);
+  renderHud(pending.state, pending.flip);
+  renderMoves(pending.legalMoves, true);
+  updateDock(true);
+  if (pending.legalMoves && pending.legalMoves.length > 0)
+    coach(
+      "move",
+      "Now tap a glowing stone to sail it that many paces. Your route: down your shore, up the shared middle, then back home to the dock.",
+    );
+}
+
+/** Sail a movable stone: its move index goes to the server. */
+function commitMove(tokenId: number) {
   const moveIdx = moveIndexByToken.get(tokenId);
   if (moveIdx === undefined) return;
   sendToServer({ type: "chooseMove", moveIndex: moveIdx });
@@ -3729,7 +3756,7 @@ canvas.addEventListener("pointerdown", (e) => {
   moveIndexByToken.clear();
   capturableIds.clear();
   hideHoverGlow();
-});
+}
 
 // Cursor + hover feedback: pointer style over an eligible token, and a warm
 // halo under a capturable enemy token.
@@ -3829,6 +3856,7 @@ function showWinScreen(winner: PlayerId, stats: GameOverStats) {
     <div class="label">Opponent captures</div><div class="value">${theirCaps}</div>
   `;
   winScreen.classList.add("show");
+  rumble(winner === (myRole ?? "p1") ? "win" : "lose");
 }
 
 function hideWinScreen() {
@@ -5035,13 +5063,17 @@ function applyOverlay(v: RoomResponse) {
     currentPower = null;
     currentPowerMoves = null;
     pickedClasses = { ...v.classPick.classes };
-    classpickEl.classList.add("show");
     renderClassPick(v.classPick);
     updatePlates(null);
     hud.textContent = "Pick your class";
     return;
   }
-  classpickEl.classList.remove("show");
+  // Both classes settled: the face-off (if it is up) reveals them and lifts
+  // itself off the flip-off. A resume mid-match finds it closed — no-op.
+  if (faceoff.open && v.power) {
+    const mySide: PlayerId = myRole ?? "p1";
+    faceoff.settle(v.power.classes[mySide], v.power.classes[mySide === "p1" ? "p2" : "p1"]);
+  }
 
   if (v.phase === "opening") {
     rollPending = null;
@@ -5652,7 +5684,7 @@ function seatSelf(
   shownWinner = null;
   lastChatLen = 0;
   updatePlates(null);
-  classpickEl.classList.remove("show");
+  faceoff.hide();
   setChatAvailable(!vsCpu);
   hideMenu();
   hud.textContent = vsCpu
@@ -5747,8 +5779,9 @@ let cpuDifficulty: BotDifficulty | null = null;
  *  friend games ask game + room, the tutorial asks nothing and just sails.
  *  Mode persists like the volume so returning players land on their game. */
 let menuIntent: "cpu" | "friend" = "cpu";
-let menuPick: "classic" | "masterKiller" =
-  localStorage.getItem("regatta-mode") === "masterKiller" ? "masterKiller" : "classic";
+// Master Killer stands alone now: the classic ruleset (and its tutorial) stay
+// in the code until the Regatta cut, but the menu no longer offers them.
+let menuPick: "classic" | "masterKiller" = "masterKiller";
 function selectedVariant(): "classic" | "masterKiller" {
   return menuPick;
 }
@@ -5838,30 +5871,59 @@ menuDiffSeg.addEventListener("click", (e) => {
 });
 applyMenuDiff();
 
+// --- The face-off (faceoff.ts): the class pick, you vs them, VS between ---
 const classpickEl = document.getElementById("classpick") as HTMLDivElement;
-const classpickStatus = document.getElementById("classpick-status") as HTMLDivElement;
-const classButtons = Array.from(
-  document.querySelectorAll<HTMLButtonElement>("#classpick button.class"),
+/** Roster order, and each class's one line under its name on the face-off. */
+const FACEOFF_LINES: Record<PlayerClass, string> = {
+  archer: "Snipes from range, shoves enemies back, and rains arrows from the shields.",
+  mage: "Warded at full mana. Re-flips a bad roll and blinks across the water.",
+  warrior: "Walls stones against all but an ultimate, and charges through the line.",
+  necromancer: "Every kill digs a grave, and the dead rise again as thralls.",
+  cleric: "Blesses stones beyond the reach of anything short of an ultimate.",
+  rogue: "Kills drain the foe's mana. Backstab never misses; Vanish hides a stone.",
+  warlock: "Trades a rear stone to cheat death, and chains the enemy's stride.",
+  hunter: "A wolf guards a tile, snares throw enemies back, the shot pierces the lane.",
+  barbarian: "Rages forward from behind and cuts down anything unguarded. Never walls.",
+  bard: "Zero flips pay double, and songs march every lit stone at once.",
+};
+const faceoff = createFaceoff(
+  classpickEl,
+  (Object.keys(FACEOFF_LINES) as PlayerClass[]).map((cls) => ({
+    id: cls,
+    name: classLabel(cls),
+    color: `#${DOCK_RING_TINTS[cls].toString(16).padStart(6, "0")}`,
+    line: FACEOFF_LINES[cls],
+    kit: DOCK_SLOTS[cls].map((s) => ({
+      icon: PROC_ICONS[s.ability as ProcIconId],
+      name: DOCK_NAMES[s.ability],
+      tip: ABILITY_INFO[s.ability]?.desc ?? "",
+      passive: s.passive,
+      ult: s.ult,
+    })),
+  })),
+  {
+    lockIn: (cls, foe) =>
+      sendToServer({ type: "pickClass", class: cls as PlayerClass, ...(foe ? { foe: foe as PlayerClass } : {}) }),
+    // The table's own leave dialog (it rides above the face-off).
+    leave: () => exitConfirm.classList.add("show"),
+    // Each side's own board piece on its seal (you red, them blue).
+    figure: (side, cls, color, spin) => faceoffFigures.set(side, cls, color, spin),
+    opened: () => faceoffFigures.start(),
+    closed: () => faceoffFigures.stop(),
+  },
+);
+const faceoffFigures = createFaceoffFigures(
+  classpickEl,
+  (cls, team) => classTokenGeos?.[cls as PlayerClass]?.[team] ?? null,
 );
 function renderClassPick(msg: { classes: Record<PlayerId, PlayerClass | null>; ready: boolean }) {
   const mySide: PlayerId = myRole ?? "p1";
-  const mine = msg.classes[mySide];
-  for (const btn of classButtons) {
-    const cls = btn.dataset.class as PlayerClass;
-    btn.classList.toggle("picked", cls === mine);
-    // data-unreleased tiles (portrait shipped, kit not yet — see the markup's
-    // own note) stay disabled through every render, including the initial one
-    // where nothing is picked and every other tile is live. The authoritative
-    // check is room-engine's pickClass validation against MK_CLASSES; this
-    // just keeps the button from looking clickable.
-    btn.disabled = mine !== null || btn.dataset.unreleased !== undefined;
-  }
-  classpickStatus.textContent =
-    mine === null ? "Pick your class" : msg.ready ? "Both crews ready…" : "Waiting for opponent to pick…";
-}
-for (const btn of classButtons) {
-  btn.addEventListener("click", () => {
-    sendToServer({ type: "pickClass", class: btn.dataset.class as PlayerClass });
+  const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
+  faceoff.sync({
+    mode: inCpuGame ? "cpu" : "online",
+    foeLabel: inCpuGame ? `The CPU · ${DIFF_NAMES[cpuDifficulty ?? "standard"].replace(/^the /, "")}` : "Your opponent",
+    mine: msg.classes[mySide],
+    theirsLocked: msg.classes[theirSide] !== null,
   });
 }
 
@@ -5932,7 +5994,7 @@ function resetToMenu(message: string) {
   hideWinScreen();
   hideRoomInfo();
   clearProcQueue();
-  classpickEl.classList.remove("show");
+  faceoff.hide();
   movesEl.innerHTML = "";
   currentMoves = null;
   eligibleTokenIds.clear();
@@ -6650,6 +6712,18 @@ if ("serviceWorker" in navigator && location.hostname !== "localhost") {
 // ---------------------------------------------------------------------------
 const UPDATE_LOG: { id: string; date: string; title: string; items: string[] }[] = [
   {
+    id: "2026-10-25-master-killer-stands-alone",
+    date: "October 25, 2026",
+    title: "Master Killer Stands Alone",
+    items: [
+      "<b>Master Killer is its own game now.</b> Every table is a Master Killer table — pick your class and go.",
+      "<b>A new arena.</b> An original gothic board: X marks your home water, ∞ the shared water, and a gold pentagram every shield.",
+      "<b>Painted miniatures.</b> All ten classes are sculpted figures now, each dressed after its portrait — the Hunter brings his wolf.",
+      "<b>The face-off.</b> Choose your champion across the VS, lock in, and watch the other side's medal turn face up.",
+      "<b>Controller support.</b> Plug in an Xbox or PlayStation controller and press any button — it plays the whole game, with rumble.",
+    ],
+  },
+  {
     id: "2026-09-18-three-changes",
     date: "September 18, 2026",
     title: "Three Changes",
@@ -6901,7 +6975,7 @@ function tick() {
   const overlayUp =
     menuEl.classList.contains("show") ||
     winScreen.classList.contains("show") ||
-    classpickEl.classList.contains("show") ||
+    faceoff.open ||
     guideOverlay.classList.contains("show") ||
     updateOverlay.classList.contains("show");
   const budgetMs = sceneKinetic() ? 0 : overlayUp ? 62 : 30;
@@ -6940,6 +7014,7 @@ function tick() {
   const breath = 0.5 + 0.5 * Math.sin(now * 0.0035); // ~1.8 s calm period
   const eased = breath * breath * (3 - 2 * breath); // smoothstep: linger, glide
   eligibleRingMat.opacity = 0.5 + 0.38 * eased;
+  if (padRing.visible) padRing.scale.setScalar(1.0 + 0.07 * eased);
   const ringScale = 0.97 + 0.06 * eased; // ring Ø 0.466–0.494, < tile pitch
   // Targeting mode composes with the SAME decals instead of stacking a
   // second affordance: while an ability is armed the gold "movable" rings
@@ -7045,11 +7120,11 @@ function tick() {
       rig.domeMat.color.setHex(STATUS_TINTS[mark.kind as "bulwark" | "vanish" | "blessed"]);
       rig.dome.position.set(
         marker.mesh.position.x,
-        marker.mesh.position.y - 0.08, // token base — hemisphere wraps the coin
+        marker.mesh.position.y - 0.08, // figure base — the dome wraps the whole figurine
         marker.mesh.position.z,
       );
       const swell = 1 + 0.035 * Math.sin(now * 0.0032 + i);
-      rig.dome.scale.set(swell, swell * 0.85, swell);
+      rig.dome.scale.set(swell, swell * 1.8, swell); // tall enough to clear a hat or a staff
       rig.domeMat.opacity = 0.11 + 0.05 * Math.sin(now * 0.004 + i * 1.7);
     }
   }
@@ -7115,6 +7190,119 @@ function tick() {
   shadowsDirty = false;
   renderer.render(scene, camera);
 }
+// ---------------------------------------------------------------------------
+// Controller — gamepad.ts reads the pad; these hooks are its view of the
+// table. The pad's cursor is a bright ring a size up from the movable rings,
+// so it reads as "this one" among the "any of these".
+// ---------------------------------------------------------------------------
+const padRing = new THREE.Mesh(
+  eligibleRingGeo,
+  new THREE.MeshBasicMaterial({
+    map: makeEligibleRingTexture(),
+    color: 0xfff0c0,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  }),
+);
+padRing.rotation.x = -Math.PI / 2;
+padRing.renderOrder = 2;
+padRing.visible = false;
+scene.add(padRing);
+
+/** A target's world spot and its screen position in CSS px. */
+function padTarget(key: string, at: { x: number; y: number; z: number }): TableTarget & { world: THREE.Vector3 } {
+  const world = new THREE.Vector3(at.x, at.y, at.z);
+  const v = world.clone().project(camera);
+  return { key, x: (v.x * 0.5 + 0.5) * window.innerWidth, y: (-v.y * 0.5 + 0.5) * window.innerHeight, world };
+}
+const stoneTarget = (i: number) => padTarget(`t${i}`, markers[i].target);
+const padWorld = new Map<string, THREE.Vector3>();
+function padTargets(list: (TableTarget & { world: THREE.Vector3 })[]): TableTarget[] {
+  padWorld.clear();
+  for (const t of list) padWorld.set(t.key, t.world);
+  return list;
+}
+
+createGamepadControls(
+  {
+    overlay: () =>
+      menuEl.classList.contains("show") ||
+      winScreen.classList.contains("show") ||
+      faceoff.open ||
+      guideOverlay.classList.contains("show") ||
+      updateOverlay.classList.contains("show") ||
+      exitConfirm.classList.contains("show") ||
+      lobbyEl.classList.contains("show") ||
+      !!document.getElementById("ios-install")?.classList.contains("show"),
+    step: (): TableStep | null => {
+      if (viewingHistory()) return null;
+      if (openingTapArmed) return { kind: "flip", label: "Flip for first move" };
+      if (rollPending) return { kind: "roll", label: "Roll" };
+      if (armed) {
+        const side = viewSide(myRole ?? "p1");
+        const list = armed.tiles
+          ? [...armed.tiles].map((tile) => padTarget(`tile${tile}`, tileWorldPos(side, tile)))
+          : [...armed.targetIds].filter((i) => markers[i].mesh.visible).map(stoneTarget);
+        return { kind: "aim", label: ABILITY_INFO[armed.kind]?.name ?? "Cast", targets: padTargets(list) };
+      }
+      if (eligibleTokenIds.size > 0)
+        return { kind: "move", label: "Move", targets: padTargets([...eligibleTokenIds].map(stoneTarget)) };
+      // Nothing to do: walk the marked stones, each one explains itself.
+      const marked = markers.map((_, i) => i).filter((i) => markers[i].mesh.visible && statusCardFor(i) !== null);
+      return marked.length ? { kind: "look", label: "Details", targets: padTargets(marked.map(stoneTarget)) } : null;
+    },
+    ring: (t) => {
+      const w = t ? padWorld.get(t.key) : undefined;
+      padRing.visible = !!w;
+      if (w) padRing.position.set(w.x, w.y + ELIGIBLE_RING_Y_OFFSET + 0.002, w.z);
+    },
+    act: (t) => {
+      if (openingTapArmed) return doOpeningFlip();
+      if (rollPending) return doRoll();
+      const tile = t?.key.startsWith("tile") ? Number(t.key.slice(4)) : null;
+      const stone = t?.key.startsWith("t") && tile === null ? Number(t.key.slice(1)) : null;
+      if (armed) {
+        if (tile !== null && armed.tiles) fireArmedTile(armed.kind, tile);
+        else if (stone !== null) fireArmed(stone);
+        disarm();
+        return;
+      }
+      if (stone === null) return;
+      if (eligibleTokenIds.has(stone)) return commitMove(stone);
+      const card = statusCardFor(stone);
+      if (card && t) showInfoCardAt(t.x, t.y - 40, card);
+    },
+    alt: (t) => {
+      if (myAvailableSips() > 0) return doSwig();
+      const stone = t?.key.startsWith("t") && !t.key.startsWith("tile") ? Number(t.key.slice(1)) : null;
+      const card = stone !== null ? statusCardFor(stone) : null;
+      if (card && t) showInfoCardAt(t.x, t.y - 40, card);
+    },
+    altLabel: () => (myAvailableSips() > 0 ? "Swig" : null),
+    cancel: () => {
+      hideAbilityTip();
+      if (!armed) return false;
+      disarm();
+      return true;
+    },
+    pause: () => exitConfirm.classList.toggle("show"),
+    dockFocus: (el) => (el ? showAbilityTip(el.dataset.ability!, el) : hideAbilityTip()),
+  },
+  {
+    back: ["#exit-no", "#ios-install-close", "#lobby-close", "#update-close", "#guide-close", "#log-close",
+      "#win-close", "#menu-back"],
+    prev: ["#guide-prev", "#log-prev"],
+    next: ["#guide-next", "#log-next"],
+    defaults: ["#exit-no", "#win-play-again", "#menu-go-cpu", "#menu-cpu", "#update-close", "#guide-next",
+      ".fo-crest[aria-pressed='true']", "#lobby-list .room-row", "#menu-code"],
+    overlays: ["#menu", "#classpick", "#win-screen", "#guide-overlay", "#update-overlay", "#exit-confirm", "#lobby",
+      "#ios-install"],
+    extra: { "#classpick": ["#rail"] }, // the rules, sound and leave stay in reach during the pick
+    submit: { "#menu-code": "#menu-join" },
+  },
+);
+
 tick();
 
 // ---------------------------------------------------------------------------

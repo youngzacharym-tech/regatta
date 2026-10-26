@@ -833,8 +833,10 @@
       /* Captain's Notices — the update log. Same dimmed-tavern treatment as
          the guide; sits ABOVE the menu (z 210) since its whole job is to
          greet returning players before they pick a mode. */
+      /* The notices open over the menu (z 250) — on first load and from its
+         "What's new" line — so they sit just above it. */
       #update-overlay {
-        position: fixed; inset: 0; z-index: 210;
+        position: fixed; inset: 0; z-index: 256;
         background: rgba(8, 6, 4, 0.72);
         display: none; justify-content: center; align-items: center;
       }
@@ -1320,7 +1322,6 @@
       }
       #menu #menu-install:hover { background: rgba(246, 227, 164, 0.1); }
       #menu #menu-install.show { display: block; }
-      #menu .credit { font-size: 11px; color: #8a7a63; margin-top: 14px; }
 
       /* --- iOS Add-to-Home-Screen instructions --- */
       #ios-install {
@@ -1351,19 +1352,15 @@
         font-size: 24px; line-height: 1; cursor: pointer;
       }
       #ios-install .close:hover { color: #ccc; }
-      #menu .credit a { color: #d8b877; text-decoration: none; }
-      #menu .credit a:hover { text-decoration: underline; }
 
       /* --- Master Killer mode: class-pick overlay ---
          Additive, isolated block — mirrors #menu's card look but under its
          own selectors so nothing here can affect classic mode's styling. */
       #classpick {
         position: fixed; inset: 0; z-index: 251;
-        background: rgba(10, 10, 15, 0.82);
-        display: none; justify-content: center; align-items: center;
-        backdrop-filter: blur(3px);
+        display: none;
       }
-      #classpick.show { display: flex; }
+      /* (#classpick.show and everything inside: src/faceoff.css) */
       /* While picking a class the utility rail + chat stay usable ABOVE the
          overlay backdrop (chat with your opponent about picks; the guide,
          which the rail opens, must in turn sit above the raised rail). */
@@ -1376,111 +1373,6 @@
          2026-07-21 report — open the door on the class table and nothing
          responds). Same raise, one notch above the rail that opened it. */
       body:has(#classpick.show) #exit-confirm { z-index: 253; }
-      #classpick .card {
-        padding: 38px 48px;
-        min-width: 300px;
-        /* Sized for five tiles a row — ten classes in two clean rows. At
-           four-per-row it needs three rows and the list clips mid-sentence.
-           The budget is 5*190 + 4*18 = 1022 of tiles, plus 48px side padding
-           each side, plus the list's own 4px padding and the ~15px scrollbar
-           gutter it reserves; 1160 leaves a little slack over that so a
-           rounding difference between browsers can't drop a tile to row two. */
-        max-width: min(96vw, 1160px);
-        text-align: center;
-      }
-      #classpick h1 { font-size: 36px; margin-bottom: 6px; }
-      #classpick .tagline { font-size: 14px; color: #b8a888; margin-bottom: 26px; min-height: 18px; }
-      /* The roster went 6 -> 10 on 2026-07-26, which is what the scroll is
-         for: the grid stays a centred wrap, but tiles shrank (210 -> 168) so
-         five fit a row on a normal desktop, and the whole list scrolls inside
-         the card rather than growing it past the viewport. */
-      #classpick .classes {
-        display: flex; flex-wrap: wrap; gap: 18px; justify-content: center;
-        max-height: min(70vh, 720px); overflow-y: auto; scrollbar-gutter: stable;
-        padding: 2px 4px;
-      }
-      #classpick button.class {
-        width: 190px;
-        background: transparent; color: var(--parchment); border: none;
-        padding: 8px 6px 14px; border-radius: 14px;
-        font-size: 18px; font-weight: 600; cursor: pointer;
-        text-align: center;
-      }
-      #classpick button.class img {
-        display: block; width: 128px; height: 128px; margin: 0 auto 10px;
-        border-radius: 50%; border: 3px solid #7a5c2e;
-        box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.55);
-        transition: transform 0.15s ease-out, box-shadow 0.15s ease-out, border-color 0.15s;
-        -webkit-user-drag: none;
-      }
-      #classpick button.class:hover img {
-        transform: scale(1.06);
-        border-color: #c9a35c;
-        box-shadow: 0 0 14px 3px rgba(255, 201, 138, 0.35), 0 6px 16px rgba(0, 0, 0, 0.55);
-      }
-      #classpick button.class:disabled { opacity: 0.45; cursor: default; }
-      #classpick button.class:disabled:hover img { transform: none; }
-      /* Portrait-only classes (kit not built yet). Distinct from the plain
-         :disabled dimming above, which also fires on every OTHER tile once
-         you've locked your pick — this one has to stay legible as "not yet"
-         rather than "not now", so it keeps its own ribbon and a heavier
-         desaturation. */
-      #classpick button.class[data-unreleased] { opacity: 0.6; }
-      #classpick button.class[data-unreleased] img { filter: grayscale(0.55); }
-      #classpick button.class[data-unreleased] b::after {
-        content: "Coming soon";
-        display: block; margin-top: 3px;
-        font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-        color: #d8bf86; opacity: 0.85;
-      }
-      #classpick button.class.picked { opacity: 1; }
-      #classpick button.class.picked img {
-        border-color: #ffd370;
-        box-shadow: 0 0 20px 5px rgba(255, 211, 112, 0.55), 0 6px 16px rgba(0, 0, 0, 0.55);
-      }
-      #classpick button.class .class-desc {
-        display: block; font-size: 13px; font-weight: 400; opacity: 0.75; margin-top: 6px; line-height: 1.45;
-      }
-      /* Portrait phones: a row of fixed-width buttons can't fit, so stack
-         them — avatar left, name + description right. Avatars came down from
-         104 to 84 with the 6 -> 10 roster: ten stacked rows is a long scroll,
-         and the list carries its own max-height above so the card itself
-         never grows past the viewport. */
-      @media (max-width: 740px) and (min-height: 481px) {
-        #classpick .card { padding: 22px 20px; min-width: 0; max-width: min(92vw, 440px); }
-        #classpick h1 { font-size: 30px; }
-        #classpick .tagline { margin-bottom: 18px; }
-        /* justify-content MUST be reset here. The base rule centres on the
-           main axis, which is horizontal for the desktop wrap but VERTICAL
-           once this breakpoint flips to a column — and a centred flex column
-           that overflows is clipped at BOTH ends, so the first three classes
-           became unreachable rather than merely scrolled off (the scroll
-           container sits at scrollTop 0 and still cannot show them). */
-        #classpick .classes {
-          flex-direction: column; flex-wrap: nowrap; gap: 12px;
-          align-items: stretch; justify-content: flex-start;
-        }
-        #classpick button.class {
-          width: 100%;
-          display: grid; grid-template-columns: 84px 1fr; grid-template-rows: auto auto;
-          column-gap: 14px; align-items: center;
-          padding: 6px 10px; text-align: left; font-size: 18px;
-        }
-        #classpick button.class img { grid-row: 1 / 3; width: 84px; height: 84px; margin: 0; }
-        #classpick button.class b { align-self: end; }
-        #classpick button.class .class-desc { align-self: start; margin-top: 2px; font-size: 12px; }
-      }
-      /* Landscape phones: almost no vertical room, so the list leans on its
-         scroll and the tiles get as small as they can while staying tappable. */
-      @media (max-height: 480px) {
-        #classpick .card { padding: 16px 22px; }
-        #classpick h1 { font-size: 22px; }
-        #classpick .tagline { margin-bottom: 12px; }
-        #classpick .classes { max-height: 58vh; gap: 14px; }
-        #classpick button.class { width: 128px; font-size: 15px; }
-        #classpick button.class img { width: 84px; height: 84px; margin-bottom: 6px; }
-        #classpick button.class .class-desc { font-size: 10px; line-height: 1.35; }
-      }
 
       /* --- Room invite banner (shown while waiting for a friend) --- */
       #room-info {
@@ -1508,7 +1400,7 @@
     <div id="rotate-hint">
       <div class="glyph">📱</div>
       <b>Rotate your device</b>
-      <span>Regatta plays in landscape. Turn your phone sideways to set sail.</span>
+      <span>Master Killer plays in landscape. Turn your phone sideways to play.</span>
     </div>
     <div id="hud">Connecting…</div>
     <div id="status">…</div>
@@ -1529,7 +1421,7 @@
       <button id="chat-toggle" title="Chat">💬</button>
       <button id="log-toggle" title="Activity log">📜</button>
       <button id="guide-toggle" title="How to play">📖</button>
-      <button id="install-toggle" title="Install Regatta">⬇</button>
+      <button id="install-toggle" title="Install Master Killer">⬇</button>
       <button id="mute-toggle" title="Sound">🔊</button>
       <button id="exit-toggle" title="Leave the table">🚪</button>
       <input id="volume" type="range" min="0" max="100" value="20" title="Volume" />
@@ -1613,8 +1505,8 @@
     <div id="menu">
       <div class="card gilt-card">
         <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
-        <h1 class="gilt-title" id="menu-title">REGATTA</h1>
-        <div class="tagline" id="menu-tagline">a race across the board</div>
+        <h1 class="gilt-title" id="menu-title">MASTER KILLER</h1>
+        <div class="tagline" id="menu-tagline">a darker table · class powers</div>
         <div class="menu-rule"></div>
         <!-- Step 1 — intent: WHO are you playing? Everything else is
              progressive disclosure; the tutorial needs no setup at all. -->
@@ -1627,7 +1519,8 @@
             <span class="mi-icon">🍺</span>
             <span class="mi-text"><b>Play a Friend</b><i>share a room code, or join theirs</i></span>
           </button>
-          <button class="menu-intent gilt-btn" id="menu-go-tutorial" type="button">
+          <!-- The tutorial teaches classic rules — hidden until it's rewritten for Master Killer. -->
+          <button class="menu-intent gilt-btn" id="menu-go-tutorial" type="button" style="display: none">
             <span class="mi-icon">📜</span>
             <span class="mi-text"><b>Learn the Game</b><i>a guided first sail — starts right away</i></span>
           </button>
@@ -1636,8 +1529,9 @@
              CPU games ask game + foe; friend games ask game + room. -->
         <div class="menu-step" id="menu-step-setup">
           <button id="menu-back" type="button">‹ all ways to play</button>
-          <div class="menu-eyebrow">Choose your game</div>
-          <div id="menu-mode-seg">
+          <!-- One game now: the ruleset pick stays in the markup (main.ts wires it) but never shows. -->
+          <div class="menu-eyebrow" style="display: none">Choose your game</div>
+          <div id="menu-mode-seg" style="display: none">
             <button data-pick="classic" class="on" type="button">Classic</button>
             <button data-pick="masterKiller" type="button">Master Killer</button>
           </div>
@@ -1656,11 +1550,6 @@
         <div class="menu-error" id="menu-error"></div>
         <button id="menu-install">⬇  Install Master Killer</button>
         <button id="menu-whatsnew" type="button">🕯 What's new</button>
-        <div class="credit">
-          Board &amp; pieces sculpted by
-          <a href="https://cults3d.com/en/3d-model/game/regatta-game-board" target="_blank" rel="noopener">pek_andrei</a>
-          — used with the artist's blessing
-        </div>
       </div>
     </div>
     <div id="lobby">
@@ -1672,80 +1561,14 @@
         <div id="lobby-list"><div class="lobby-empty">Looking for open tables…</div></div>
         <div class="lobby-divider"></div>
         <div class="join-row">
-          <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" />
+          <input id="menu-code" maxlength="4" placeholder="CODE" autocomplete="off" data-gp-alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789" />
           <button id="menu-join">Join</button>
         </div>
         <button id="lobby-private">Create private room</button>
       </div>
     </div>
-    <div id="classpick">
-      <div class="card gilt-card">
-        <span class="frame-gem top"></span><span class="frame-gem bottom"></span>
-        <h1 class="gilt-title">MASTER KILLER</h1>
-        <div class="tagline" id="classpick-status">Pick your class</div>
-        <div class="classes">
-          <button class="class" data-class="archer">
-            <img src="/avatars/archer.webp" alt="Archer" draggable="false" />
-            <b>Archer</b>
-            <span class="class-desc">Snipe the tile ahead, free. Push (1⚡) / Charged Shot (2⚡): knock enemies back. Ult: Rain of Arrows — aim it at any enemy in shared water.</span>
-          </button>
-          <button class="class" data-class="mage">
-            <img src="/avatars/mage.webp" alt="Mage" draggable="false" />
-            <b>Mage</b>
-            <span class="class-desc">Warded at full mana. Re-flip (2⚡, no cap — as many as you can pay for): flip again. Blink (1⚡ per tile, up to 4): teleport your rearmost stone to any empty shared-water tile. Ult: Blink Strike.</span>
-          </button>
-          <button class="class" data-class="warrior">
-            <img src="/avatars/warrior.webp" alt="Warrior" draggable="false" />
-            <b>Warrior</b>
-            <span class="class-desc">Hold the Line: your first wall bill is free. Charge (1⚡): sweep a stone on your way. Bulwark (1⚡): wall one of yours — nothing short of an ultimate touches it, but it bleeds mana every turn after that. Ult: Shield Wall.</span>
-          </button>
-          <button class="class" data-class="necromancer">
-            <img src="/avatars/necromancer.webp" alt="Necromancer" draggable="false" />
-            <b>Necromancer</b>
-            <span class="class-desc">Kills pay 3 mana, mark the corpse and dig a grave. Revive the corpse as your thrall (3⚡) — the grave stays open. Corpse Explosion (2⚡): kill the enemy stone standing on it. Ult: Exhume.</span>
-          </button>
-          <button class="class" data-class="cleric">
-            <img src="/avatars/cleric.webp" alt="Cleric" draggable="false" />
-            <b>Cleric</b>
-            <span class="class-desc">Bless (free, keeps your turn): walls a stone — nothing short of an ultimate touches it, but it bleeds mana every turn. Vigil (2⚡): waive your next wall bill for the whole army. Ult: Benediction.</span>
-          </button>
-          <button class="class" data-class="rogue">
-            <img src="/avatars/rogue.webp" alt="Rogue" draggable="false" />
-            <b>Rogue</b>
-            <span class="class-desc">Larceny (passive): your kills drain the foe's mana too. Backstab (4⚡, the full bank): a guaranteed kill on any enemy in shared water. Vanish (1⚡): hide a stone from everything but an ultimate. Ult: Grand Heist.</span>
-          </button>
-          <!-- The 2026-07-26 four: portraits and colours are live, kits are
-               being built one class at a time. `disabled` is the markup
-               default so the tile is dead before any script runs, and
-               data-unreleased is what makes renderClassPick KEEP it disabled
-               on the render where nothing is picked yet and every other tile
-               goes live. The real gate is server-side, in room-engine's
-               pickClass validation against MK_CLASSES. Drop both attributes —
-               and swap the placeholder blurb for the real kit — as each one
-               ships. -->
-          <button class="class" data-class="warlock">
-            <img src="/avatars/warlock.webp" alt="Warlock" draggable="false" />
-            <b>Warlock</b>
-            <span class="class-desc">Dark Bargain (passive): when an enemy would kill your stone, it steps back a tile and your rearmost stone behind it dies instead — paying you a mana. Curse of Chains (1⚡, keeps your turn): shorten an enemy's every move. Sacrifice (2⚡): give your lead stone to kill through a Ward or Blessing. Ult: Fel Storm.</span>
-          </button>
-          <button class="class" data-class="hunter">
-            <img src="/avatars/hunter.webp" alt="Hunter" draggable="false" />
-            <b>Hunter</b>
-            <span class="class-desc">Your wolf takes anything that lands on the tile it guards. Snare (1⚡, keeps your turn): a trap that throws them back and pays you. Piercing Shot (3⚡): kill the first enemy down the lane. Ult: Wild Hunt.</span>
-          </button>
-          <button class="class" data-class="barbarian">
-            <img src="/avatars/barbarian.webp" alt="Barbarian" draggable="false" />
-            <b>Barbarian</b>
-            <span class="class-desc">Rage: fall behind and your rearmost stone runs faster — and you can never hold a wall. Reckless Swing (1⚡): kill an unprotected enemy, but you're thrown back. Whirlwind (2⚡): catch everything near your stones. Ult: Bloodbath.</span>
-          </button>
-          <button class="class" data-class="bard">
-            <img src="/avatars/bard.webp" alt="Bard" draggable="false" />
-            <b>Bard</b>
-            <span class="class-desc">Encore: zero flips pay double. Inspire (2⚡, keeps your turn): lit stones move further. Song of Haste (2⚡): every lit stone marches at once. Ult: Crescendo.</span>
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- The class pick: a face-off, built and run by src/faceoff.ts. -->
+    <div id="classpick" role="dialog" aria-modal="true" aria-label="Choose your champion"></div>
     <div id="room-info">
       <div class="code" id="room-code"></div>
       <div class="hint">Share this code — or the link below — with your opponent</div>

@@ -1,0 +1,98 @@
+/* ==========================================================================
+   gamepad.css — the controller's focus outline and button prompts (see
+   gamepad.ts). Everything here waits for body.gp-active, which is on only
+   while a pad is being used; the mouse or keyboard switches it back off.
+   ========================================================================== */
+
+#gp-prompts {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 400;
+  display: none;
+  gap: 14px;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(14, 10, 8, 0.74);
+  border: 1px solid rgba(214, 170, 92, 0.38);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  font: 600 13px/1 "Barlow Semi Condensed", system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  color: #eadcc0;
+  pointer-events: none;
+  white-space: nowrap;
+}
+body.gp-active #gp-prompts {
+  display: flex;
+}
+#gp-prompts span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.gp-g {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  font: 700 11px/1 system-ui, sans-serif;
+  font-style: normal;
+  color: #fff;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.35);
+}
+.gp-a { background: #2f9e44; }
+.gp-b { background: #c92a2a; }
+.gp-x { background: #1c7ed6; }
+.gp-y { background: #e0a800; color: #1a1300; }
+.gp-ps.gp-a { background: #2b4fa8; }
+.gp-ps.gp-b { background: #b3263f; }
+.gp-ps.gp-x { background: #9c3f8c; }
+.gp-ps.gp-y { background: #1f8a6a; color: #fff; }
+.gp-sh {
+  border-radius: 6px;
+  min-width: 24px;
+  background: #3b332b;
+  color: #eadcc0;
+}
+
+/* The control the pad is on. */
+body.gp-active .gp-focus {
+  outline: 3px solid #ffd36b !important;
+  outline-offset: 3px;
+  animation: gp-pulse 1.2s ease-in-out infinite;
+}
+body.gp-active .gp-editing {
+  outline-color: #8ce99a !important;
+}
+@keyframes gp-pulse {
+  50% { outline-color: #fff1c4; }
+}
+
+/* The face-off teaches its own keyboard keys bottom-left; under a pad the
+   prompts take that spot instead (bottom centre is the Lock In blade). */
+body.gp-active .fo-keys {
+  visibility: hidden;
+}
+body.gp-active:has(#classpick.show) #gp-prompts {
+  left: 24px;
+  transform: none;
+  bottom: 18px;
+}
+
+@media (max-height: 500px) {
+  #gp-prompts { font-size: 11px; gap: 10px; bottom: 6px; padding: 4px 10px; }
+  body.gp-active:has(#classpick.show) #gp-prompts { left: 10px; bottom: 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.gp-active .gp-focus { animation: none; }
+}
+
+/* Tap wording the prompts already cover ("tap elsewhere to cancel"). */
+body.gp-active .ribbon-hint {
+  display: none;
+}

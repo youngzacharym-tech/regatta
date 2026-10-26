@@ -3463,10 +3463,18 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (doc.phase !== "classPick" || !doc.mk) return { doc, error: "Not in class pick" };
       if (doc.classesPicked[seat]) return { doc, error: "Already picked" };
       if (!MK_CLASSES.includes(action.class)) return { doc, error: "Class not available" };
+      if (action.foe !== void 0 && !MK_CLASSES.includes(action.foe)) return { doc, error: "Class not available" };
+      let classes = { ...doc.mk.classes, [seat]: action.class };
+      let picked = { ...doc.classesPicked, [seat]: true };
+      if (doc.vsCpu && seat === "p1") {
+        if (action.foe !== void 0) classes = { ...classes, p2: action.foe };
+        else if (!doc.classesPicked.p2) classes = { ...classes, p2: MK_CLASSES[Math.floor(rand() * MK_CLASSES.length)] };
+        picked = { ...picked, p2: true };
+      }
       let next = {
         ...doc,
-        mk: { ...doc.mk, classes: { ...doc.mk.classes, [seat]: action.class } },
-        classesPicked: { ...doc.classesPicked, [seat]: true }
+        mk: { ...doc.mk, classes },
+        classesPicked: picked
       };
       next = commitFrame(next, now, classPickEventOf(next));
       return { doc: maybeResolveClassPick(next, now) };
@@ -4703,8 +4711,9 @@ function getRedis() {
   if (!redis) redis = new Redis(REDIS_URL);
   return redis;
 }
-var roomKey = (code) => `room:${code}`;
-var OPEN_ROOMS_KEY = "rooms:open";
+var NS = "mk:";
+var roomKey = (code) => `${NS}room:${code}`;
+var OPEN_ROOMS_KEY = `${NS}rooms:open`;
 var LOBBY_HOST_FRESH_MS = 45e3;
 var CAS_LUA = `
 local cur = redis.call('GET', KEYS[1])

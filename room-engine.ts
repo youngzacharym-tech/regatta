@@ -763,7 +763,9 @@ export interface RoomDoc {
 // ============================================================================
 
 export type RoomActionInput =
-  | { op: "pickClass"; class: PlayerClass }
+  /** `foe` (CPU rooms only): the class the human sets the CPU to — the
+   *  face-off's right-hand roster. Absent means the CPU picks at random. */
+  | { op: "pickClass"; class: PlayerClass; foe?: PlayerClass }
   | { op: "openingFlip" }
   | { op: "chooseMove"; moveIndex: number }
   | {
@@ -1234,10 +1236,23 @@ export function applyAction(
       // action does (see CLAUDE.md's trust model). Without this, a crafted
       // pickClass could seat someone in a class whose kit doesn't exist yet.
       if (!MK_CLASSES.includes(action.class)) return { doc, error: "Class not available" };
+      if (action.foe !== undefined && !MK_CLASSES.includes(action.foe)) return { doc, error: "Class not available" };
+      let classes = { ...doc.mk.classes, [seat]: action.class };
+      let picked = { ...doc.classesPicked, [seat]: true };
+      // A CPU room settles the CPU's class on the human's pick: the face-off's
+      // choice if one came, else a random one if the tick hasn't rolled it yet.
+      // (Resolving below doesn't wait on the CPU seat, so without this a fast
+      // pick left p2 on initialPowerState's placeholder.) Solo room, so the
+      // human naming the CPU's class trusts no one but themselves.
+      if (doc.vsCpu && seat === "p1") {
+        if (action.foe !== undefined) classes = { ...classes, p2: action.foe };
+        else if (!doc.classesPicked.p2) classes = { ...classes, p2: MK_CLASSES[Math.floor(rand() * MK_CLASSES.length)] };
+        picked = { ...picked, p2: true };
+      }
       let next: RoomDoc = {
         ...doc,
-        mk: { ...doc.mk, classes: { ...doc.mk.classes, [seat]: action.class } },
-        classesPicked: { ...doc.classesPicked, [seat]: true },
+        mk: { ...doc.mk, classes },
+        classesPicked: picked,
       };
       next = commitFrame(next, now, classPickEventOf(next));
       return { doc: maybeResolveClassPick(next, now) };

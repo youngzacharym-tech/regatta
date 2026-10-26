@@ -55,11 +55,14 @@ function getRedis(): Redis {
   return redis;
 }
 
-const roomKey = (code: string) => `room:${code}`;
+/** The Redis store is shared with Regatta and Master Killer 2D, so every key
+ *  this game writes lives under its own prefix — rooms and lobbies never mix. */
+const NS = "mk:";
+const roomKey = (code: string) => `${NS}room:${code}`;
 /** Set of codes for PUBLIC PvP rooms still waiting for an opponent — the
  *  lobby list. Self-healing: listRooms prunes members whose room is gone,
  *  full, or whose host stopped polling. */
-const OPEN_ROOMS_KEY = "rooms:open";
+const OPEN_ROOMS_KEY = `${NS}rooms:open`;
 /** Hosts poll while they wait, so a fresh heartbeat means a live lobby. */
 const LOBBY_HOST_FRESH_MS = 45_000;
 

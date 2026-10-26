@@ -28,7 +28,9 @@ export type ProcIconId =
   | "snipe"
   | "rainOfArrows"
   | "reflip"
+  | "ward"
   | "wardBlock"
+  | "holdTheLine"
   | "blinkStrike"
   | "shieldWall"
   | "charge"
@@ -223,6 +225,18 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M7 41 C13 45.5 22 46 28.5 42.5" ${DETAIL}/>`,
   ),
 
+  // Mage passive dock plaque: the Ward at rest — a closed rune circle, the
+  // mage star still inside it, gold wards pinned at the four quarters.
+  // (wardBlock below is the same circle in the act of turning a blow.)
+  ward: wrap(
+    `<circle cx="24" cy="24" r="14" ${MAIN} ${BODY}/>` +
+      `<path d="M24 14.5 L26.5 21.5 L33.5 24 L26.5 26.5 L24 33.5 L21.5 26.5 L14.5 24 L21.5 21.5 Z" ${DETAIL}/>` +
+      diamond(24, 6.5, 2, GOLD) +
+      diamond(41.5, 24, 2, GOLD) +
+      diamond(24, 41.5, 2, GOLD) +
+      diamond(6.5, 24, 2, GOLD),
+  ),
+
   // Mage passive (reserved: no server event fires this yet — authored so the
   // set is complete when a Ward-save signal lands).
   wardBlock: wrap(
@@ -269,6 +283,17 @@ export const PROC_ICONS: Record<ProcIconId, string> = {
       `<path d="M3 18 L13 18" ${GOLD_DETAIL}/>` +
       `<path d="M1.5 25 L11.5 25" ${GOLD_DETAIL}/>` +
       `<path d="M4 32 L14 32" ${GOLD_DETAIL}/>`,
+  ),
+
+  // Warrior passive dock plaque (2026-09-17, replaced Ward Breaker): the
+  // family heater planted on a gold ground line, a pale running down its
+  // face — the wall standing its ground. Distinct from Bulwark's band+boss.
+  holdTheLine: wrap(
+    `<g transform="translate(0,-3)"><path d="${SHIELD_PATH}" ${MAIN} ${BODY}/></g>` +
+      `<path d="M24 14 L24 36" ${DETAIL}/>` +
+      `<path d="M6 43 L42 43" ${GOLD_DETAIL}/>` +
+      diamond(6, 43, 1.8, GOLD) +
+      diamond(42, 43, 1.8, GOLD),
   ),
 
   // Warrior 1-charge: the planted heater shield, boss and band on the chief.

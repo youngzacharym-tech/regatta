@@ -33,3 +33,6 @@ myrmblender/
 
 # local play-test server logs (detached referee)
 referee-*.log
+
+# Python bytecode from the Blender build scripts
+__pycache__/
