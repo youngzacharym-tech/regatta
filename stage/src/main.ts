@@ -836,7 +836,7 @@ function applyTokenGeometries() {
     const owner: PlayerId = i < 4 ? "p1" : "p2";
     // Master Killer rooms: once a seat's class is known (class pick or the
     // authoritative power block), its four stones wear that class's sculpt.
-    // Classic rooms, the tutorial, and the pre-pick moments keep blossom/
+    // Classic rooms and the pre-pick moments keep blossom/
     // star; a missing pieces-mk.glb also falls back there — never an
     // invisible stone. Geometry pointer swap only: the marker's material
     // (team tint, ward/Bulwark emissive), raycast identity, and flight
@@ -1283,7 +1283,7 @@ gltfLoader.load(
 );
 
 // Fetch the Master Killer class tokens the FIRST time an MK room is seen
-// (join, resume, or reload — classic rooms, the tutorial, and the menu never
+// (join, resume, or reload — classic rooms and the menu never
 // pay for it), so the sculpts are usually decoded before the class pick
 // resolves. On any failure the classic sculpts simply remain.
 let mkPiecesRequested = false;
@@ -3429,6 +3429,7 @@ movesEl.addEventListener("click", (e) => {
   if (!btn) return;
   // "Play Again" branch. No more per-move buttons live here.
   if (btn.dataset.newmatch) {
+    endTutorial();
     sendToServer({ type: "newMatch" });
     movesEl.innerHTML = "";
     return;
@@ -3731,8 +3732,9 @@ function doRoll() {
   if (pending.legalMoves && pending.legalMoves.length > 0)
     coach(
       "move",
-      "Now tap a glowing stone to sail it that many paces. Your route: down your shore, up the shared middle, then back home to the dock.",
+      "Tap a glowing stone to move it. Your path: along your X row, down the shared ∞ row, then back into your own row and off the far end.",
     );
+  coachTurn();
 }
 
 /** Sail a movable stone: its move index goes to the server. */
@@ -3865,6 +3867,7 @@ function hideWinScreen() {
 
 winPlayAgainBtn.addEventListener("click", () => {
   hideWinScreen();
+  endTutorial();
   sendToServer({ type: "newMatch" });
   movesEl.innerHTML = "";
 });
@@ -4174,28 +4177,218 @@ function clearProcQueue() {
 (window as unknown as { __proc: typeof showProc }).__proc = showProc;
 
 // --- Tutorial coach ---------------------------------------------------------
-// "Regatta Tutorial" from the menu is a REAL classic game vs the CPU with a
-// coach riding along: each first (flip-off, roll, move, shield, capture,
-// exact-roll home, the swig) gets one plain-words card, then never repeats.
+// "Learn the Game" from the menu is a REAL Master Killer game vs the Tipsy
+// CPU — you the Warrior, it the Archer (TUTORIAL_MATCH) — with a coach
+// riding along: each first (flip-off, roll, move, mana, the kit, a Charge on
+// offer, a stone in the Archer's reach, a wall's upkeep, the shield streak,
+// the ultimate...) gets one plain-words card, then never repeats.
+// Cards QUEUE: a lesson that arrives while another is up waits for the tap
+// instead of overwriting it. A lesson about the roll in hand passes `still`,
+// and is dropped (unmarked, so it can come back) if the moment is gone by
+// the time its turn in the queue comes.
 // Pure presentation — the server doesn't know tutorials exist, and a reload
 // mid-tutorial simply resumes as a normal CPU game.
 let tutorialMode = false;
+const TUTORIAL_MATCH: { you: PlayerClass; foe: PlayerClass } = { you: "warrior", foe: "archer" };
 const coachShown = new Set<string>();
+const coachQueue: { step: string; text: string; still?: () => boolean }[] = [];
+/** A card is up, or the beat between two cards is running. */
+let coachBusy = false;
 const coachEl = document.getElementById("coach") as HTMLDivElement;
 const coachTextEl = coachEl.querySelector(".coach-text") as HTMLDivElement;
+const coachHintEl = coachEl.querySelector(".coach-hint") as HTMLDivElement;
 
-function coach(step: string, text: string) {
+function coach(step: string, text: string, still?: () => boolean) {
   if (!tutorialMode || coachShown.has(step)) return;
   coachShown.add(step);
-  coachTextEl.textContent = text;
-  coachEl.classList.remove("show");
-  void coachEl.offsetWidth; // restart the slide-in
-  coachEl.classList.add("show");
+  coachQueue.push({ step, text, still });
+  if (!coachBusy) nextCoach();
+  else coachHintEl.textContent = coachHint();
 }
+/** "tap to dismiss" — or "press B" once a controller is driving. */
+function coachHint(): string {
+  const how = document.body.classList.contains("gp-active") ? "press B" : "tap";
+  return coachQueue.length > 0 ? `${how} for the next tip` : `${how} to dismiss`;
+}
+function nextCoach() {
+  while (coachQueue.length > 0) {
+    const c = coachQueue.shift()!;
+    if (c.still && !c.still()) {
+      coachShown.delete(c.step);
+      continue;
+    }
+    coachBusy = true;
+    coachTextEl.textContent = c.text;
+    coachHintEl.textContent = coachHint();
+    coachEl.classList.remove("show");
+    void coachEl.offsetWidth; // restart the slide-in
+    coachEl.classList.add("show");
+    placeCoach();
+    return;
+  }
+  coachBusy = false;
+}
+/** Screen rect of a set of scene objects (their world boxes, projected). */
+function screenRectOf(objects: THREE.Object3D[]): { left: number; right: number; top: number; bottom: number } {
+  const box = new THREE.Box3();
+  for (const o of objects) box.expandByObject(o);
+  const r = { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity };
+  for (let i = 0; i < 8; i++) {
+    const v = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+    v.project(camera);
+    const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+    r.left = Math.min(r.left, x);
+    r.right = Math.max(r.right, x);
+    r.top = Math.min(r.top, y);
+    r.bottom = Math.max(r.bottom, y);
+  }
+  return r;
+}
+/** The card's seat is bottom centre — right over the coin pile, the very
+ *  thing the first cards ask you to tap. So each card measures the pile on
+ *  screen and, if they'd collide, takes the first open spot of: under the
+ *  pile (desktop, iPad), the empty table right of my mug (a phone, where
+ *  the board fills everything above the coins), or just above the pile. */
+function placeCoach() {
+  const st = coachEl.style;
+  st.bottom = st.left = st.maxWidth = "";
+  const PAD = 6;
+  const H = window.innerHeight;
+  // The floor: the screen's edge, or the controller's prompt bar when it shows.
+  const prompts = document.getElementById("gp-prompts")?.getBoundingClientRect();
+  const floor = prompts && prompts.height > 0 ? prompts.top : H;
+  // The projected box already runs a little wide of the coins themselves.
+  const pile = screenRectOf(myCoins.map((c) => c.mesh));
+  let r = coachEl.getBoundingClientRect();
+  if (r.right < pile.left || r.left > pile.right || r.bottom < pile.top || r.top > pile.bottom) return;
+  if (pile.bottom + PAD + r.height <= floor - 2) {
+    st.bottom = `${Math.round(H - pile.bottom - PAD - r.height)}px`;
+    return;
+  }
+  const mugRight = myMug ? screenRectOf([myMug.root]).right : pile.right;
+  const railLeft = (document.getElementById("rail") as HTMLElement).getBoundingClientRect().left;
+  const left = Math.max(pile.right, mugRight) + PAD;
+  const width = railLeft - PAD - left;
+  if (width >= 200) {
+    st.left = `${Math.round(left + width / 2)}px`; // the CSS keeps translateX(-50%)
+    st.maxWidth = `${Math.round(width)}px`;
+    st.bottom = `${Math.round(H - floor + PAD)}px`;
+    r = coachEl.getBoundingClientRect();
+    if (r.top >= PAD) return;
+    st.left = st.maxWidth = "";
+  }
+  st.bottom = `${Math.round(H - pile.top + PAD)}px`;
+}
+window.addEventListener("resize", () => {
+  if (coachEl.classList.contains("show")) placeCoach();
+});
+/** Bumped by hideCoach so a between-cards beat from a left game can't fire. */
+let coachGen = 0;
+/** The player's tap (or the pad's B): this card goes, the next follows. */
+function dismissCoach() {
+  if (!coachEl.classList.contains("show")) return false;
+  coachEl.classList.remove("show");
+  const gen = coachGen;
+  setTimeout(() => gen === coachGen && nextCoach(), 260);
+  return true;
+}
+/** Leaving the tutorial: every card, queued or showing, goes. */
 function hideCoach() {
+  coachGen++;
+  coachQueue.length = 0;
+  coachBusy = false;
   coachEl.classList.remove("show");
 }
-coachEl.addEventListener("click", hideCoach);
+/** Play Again after the tutorial: the coached game was the one game, so the
+ *  rematch is a plain Tipsy match with a free pick at the face-off. */
+function endTutorial() {
+  tutorialMode = false;
+  hideCoach();
+}
+coachEl.addEventListener("click", dismissCoach);
+
+/** Tutorial: one of my unwalled stones in the shared row, off the shield,
+ *  that an enemy stone could take on its next flip — by landing on it (1-4
+ *  tiles behind) or by Sniping it from the tile behind (2-5 behind). A
+ *  heuristic for the coach, not a rules oracle: it only decides WHEN to
+ *  teach Bulwark, and the server's bulwarkTargets still gate the cast. */
+function tutorialStoneInReach(): boolean {
+  const s = lastRenderedState;
+  const p = currentPower;
+  if (!s || !p) return false;
+  const mySide: PlayerId = myRole ?? "p1";
+  const castable = new Set(p.bulwarkTargets);
+  return s.tokens.some((mine) => {
+    const at = mine.position;
+    if (mine.owner !== mySide || !castable.has(mine.id)) return false;
+    if (at < 0 || at >= PATH_LENGTH || !BOARD_LAYOUT[at].isContested || BOARD_LAYOUT[at].type === "shield") return false;
+    return s.tokens.some((foe) => {
+      if (foe.owner === mySide || foe.position < 0 || foe.position >= PATH_LENGTH) return false;
+      const gap = at - foe.position;
+      return (gap >= 1 && gap <= 4) || (gap >= 2 && gap <= 5 && BOARD_LAYOUT[at - 1].isContested);
+    });
+  });
+}
+
+/** Tutorial: a Charge this roll that would actually cut someone down, and
+ *  the mana to pay for it (the server's chargeAvailable alone only means
+ *  "lane clear of my own stones"). */
+function tutorialChargeOnOffer(): boolean {
+  const mySide: PlayerId = myRole ?? "p1";
+  return (
+    !!currentPower &&
+    currentPower.charges[mySide] >= 1 &&
+    (currentPowerMoves ?? []).some((m) => m.chargeAvailable && m.chargeSweepCaptures.length > 0)
+  );
+}
+
+/** Tutorial cards that read the table as it stands rather than an event:
+ *  the kit, a Charge on offer, a stone in the Archer's reach, the shield
+ *  streak, the ultimate. Called whenever the overlay or the roll changes. */
+function coachTurn() {
+  if (!tutorialMode || !currentPower || myVariant !== "masterKiller") return;
+  const mySide: PlayerId = myRole ?? "p1";
+  const p = currentPower;
+  // My roll is revealed and the dock is live: the moment to act.
+  const acting = () => dockActive && !rollPending && currentPower !== null;
+  if (lastRenderedState?.tokens.some((t) => t.owner === mySide && t.position >= 0 && t.position < PATH_LENGTH && BOARD_LAYOUT[t.position].isContested))
+    coach(
+      "foe",
+      "You're in the shared row, where captures happen. Mind the Archer's Snipe: when it lands here, it also kills the stone one tile ahead. Shields are safe.",
+    );
+  if (acting() && p.charges[mySide] >= 1) {
+    const read = document.body.classList.contains("gp-active")
+      ? "Press X to browse them."
+      : matchMedia("(hover: hover)").matches
+        ? "Hover over any of them to read it."
+        : "Press and hold any of them to read it.";
+    coach(
+      "kit",
+      `Your Warrior's kit, by your portrait: Hold the Line is always on, Charge and Bulwark cost 1 mana each, and Shield Wall is your ultimate. ${read}`,
+    );
+  }
+  if (acting() && tutorialChargeOnOffer())
+    coach(
+      "charge",
+      "A Charge is on! One of your stones can run past an enemy. Tap Charge, then that stone: it cuts down the enemy it passes, for 1 mana.",
+      () => acting() && tutorialChargeOnOffer(),
+    );
+  if (acting() && tutorialStoneInReach())
+    coach(
+      "bulwark",
+      "A stone of yours is in the Archer's reach. Tap Bulwark, then that stone, to wall it: nothing short of an ultimate can touch it. Costs 1 mana and your move.",
+      () => acting() && tutorialStoneInReach(),
+    );
+  if ((p.shieldStreak?.[mySide] ?? 0) === 2 && !p.ultimateReady[mySide])
+    coach("streak", "Two shields in a row! One more before your turn passes and Shield Wall is ready.");
+  if (acting() && p.ultimateReady[mySide])
+    coach(
+      "ult",
+      "Shield Wall is ready! Tap it to wall every stone you have on the board at once, first upkeep free. It takes your turn, and it keeps until you use it.",
+      () => acting() && !!currentPower?.ultimateReady[mySide],
+    );
+}
 
 function playerLabel(p: PlayerId): string {
   // Seat-relative: the viewer is always "Red", the opponent always "Blue".
@@ -4291,10 +4484,13 @@ function announceFromState(msg: {
       msg.skipReason === "flip-zero"
         ? "flipped 0 — skip"
         : "no legal move — skip";
-    coach(
-      "skip",
-      "A zero — the turn passes. So does having no legal move. It happens to every sailor; the coins owe you nothing.",
-    );
+    if (isMe && msg.skipReason === "flip-zero")
+      coach("zero", "Zero gold faces: your turn passes. A zero still pays you 1 mana.");
+    else if (isMe)
+      coach(
+        "stuck",
+        "No legal move, so your turn passes. Your stones can't share a tile, and leaving the board takes the exact count.",
+      );
     showAnnouncement(`${label} turn: ${reason}${chargeFor(msg.skippedPlayer)}`, "skip");
     return;
   }
@@ -4352,6 +4548,10 @@ function announceFromState(msg: {
   if (msg.lastWallBleed && msg.lastWallBleed.droppedTokenIds.length > 0) {
     const k = classOf(msg.lastWallBleed.player);
     if (k) showProc(k, "Wall Falls!", "wallBleed");
+    if (msg.lastWallBleed.player === myRole)
+      coach("wallFell", "Your wall fell: no mana left for its upkeep. Walls are safe, but never free.");
+  } else if (msg.lastWallBleed && msg.lastWallBleed.paid > 0 && msg.lastWallBleed.player === myRole) {
+    coach("upkeep", "You paid 1 mana to keep your wall up. It stands as long as you keep paying.");
   }
   // Rogue's Pickpocket keeps the turn (Bless's contract) — a proc, not a
   // returning announcement. Turn-keeping means lastMovePlayer is stale (a
@@ -4383,6 +4583,7 @@ function announceFromState(msg: {
     const plural = msg.lastBulwarkBlock.tokenIds.length > 1 ? "s" : "";
     const k = classOf(first?.owner);
     if (k) showProc(k, "Blocked!", "bulwarkBlock");
+    if (isMine) coach("blocked", "Your wall just saved that stone: the Archer's flip had a capture on it.");
     showAnnouncement(`${subject} Bulwark${plural} blocked a capture!`, "shield");
     return;
   }
@@ -4454,6 +4655,11 @@ function announceFromState(msg: {
     const target = isMe ? "your" : "their";
     const n = msg.lastShieldWall.tokenIds.length;
     if (classOf(msg.lastMovePlayer) === "warrior") showProc("warrior", "Shield Wall!", "shieldWall");
+    if (isMe)
+      coach(
+        "shieldWall",
+        "Your whole army is walled! After the free first upkeep, each wall costs 1 mana a turn, so they fall as your mana runs dry.",
+      );
     showAnnouncement(
       `${subject} raised a Shield Wall — ${n} of ${target} stone${n === 1 ? "" : "s"} walled at once!`,
       "ultimate",
@@ -4468,6 +4674,11 @@ function announceFromState(msg: {
     const target = isMe ? "your" : "their";
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Bulwark!", "bulwark");
+    if (isMe)
+      coach(
+        "walled",
+        "Walled! Keeping it costs 1 mana at the start of each of your turns (Hold the Line pays the first). Can't pay, and it falls.",
+      );
     showAnnouncement(
       `${subject} raised Bulwark on ${target} token — held until the mana to keep it runs out${chargeFor(msg.lastMovePlayer)}`,
       "shield",
@@ -4485,6 +4696,11 @@ function announceFromState(msg: {
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Push!", "push");
+    if (!isMe)
+      coach(
+        "pushed",
+        "The Archer spent 1 mana to Push your stone back a tile. Pushed onto its stone or off the board, you're sent home.",
+      );
     showAnnouncement(`${subject} pushed ${target} token ${where}${chargeFor(msg.lastMovePlayer)}`, "capture");
     return;
   }
@@ -4499,6 +4715,11 @@ function announceFromState(msg: {
     const where = sentHome ? "all the way home" : `to ${tileDisplay(targetToken.position)}`;
     const k = classOf(msg.lastMovePlayer);
     if (k) showProc(k, "Charged Shot!", "chargedShot");
+    if (!isMe)
+      coach(
+        "shot",
+        `The Archer's Charged Shot knocked your stone back ${CHARGED_SHOT_DISTANCE} tiles for ${CHARGED_SHOT_COST} mana. A shield or a wall stops it.`,
+      );
     showAnnouncement(
       `${subject} loosed a Charged Shot — ${target} token knocked ${where}${chargeFor(msg.lastMovePlayer)}`,
       "capture",
@@ -4797,10 +5018,11 @@ function announceFromState(msg: {
       return;
     }
     if (m.landsOnShield) {
-      coach(
-        "shield",
-        "A shield tile! Landing on one grants an extra turn, and the stone standing there cannot be captured.",
-      );
+      if (isMe)
+        coach(
+          "shield",
+          "A shield! Landing on one gives you another turn, and a stone on it can't be captured. Three in a row, without your turn passing, readies your ultimate.",
+        );
       // Sanctified Ground (Cleric passive, reworked 2026-09-17): a shield
       // landing banks a turn of wall-upkeep grace for the whole army — the
       // proc rides this same commit rather than a dedicated server field.
@@ -4819,10 +5041,23 @@ function announceFromState(msg: {
     const totalCaptures = m.captures.length + bonusCaptures + sweepCaptures;
     if (totalCaptures > 0) {
       const target = isMe ? "opponent's" : "your";
-      coach(
-        "capture",
-        "A capture! Land on an enemy stone in shared water and it's sent home to start its journey over. Stones on your own shore are always safe.",
-      );
+      if (isMe && sweepCaptures > 0)
+        coach("charged", "Charge! Your stone cut down the enemy it ran past.");
+      else if (isMe)
+        coach(
+          "capture",
+          "A capture! Landing on an enemy in the shared row sends it back to the start. Your own row is always safe.",
+        );
+      if (!isMe && bonusCaptures > 0)
+        coach(
+          "sniped",
+          "That was the Archer's Snipe: landing in the shared row, it also kills the stone one tile ahead. Shields and walls stop it.",
+        );
+      if (!isMe && m.captures.length > 0)
+        coach(
+          "captured",
+          "The Archer landed on your stone and sent it back to the start.",
+        );
       // Necromancer kills narrate the corpse (Hearthstone rule: the board
       // never changes silently) — the marker just appeared on the death
       // tile, and the announcement says so.
@@ -4838,10 +5073,11 @@ function announceFromState(msg: {
       return;
     }
     if (m.to >= PATH_LENGTH) {
-      coach(
-        "escape",
-        "A stone made it home! The dock demands an exact roll — overshoot and the stone must wait for another turn.",
-      );
+      if (isMe)
+        coach(
+          "escape",
+          "A stone made it off the board, and that pays 1 mana. Three more and the table is yours.",
+        );
       showAnnouncement(`${subject} escaped a token`, "escape");
       return;
     }
@@ -4984,6 +5220,11 @@ function replayEvent(ev: RoomEvent) {
   if (ev.state.winner === null) hideWinScreen();
   // Announce BEFORE refreshing markers so the banner lands with the animation.
   announceFromState(ev);
+  if (ev.lastChargeEvent && ev.lastChargeEvent.player === myRole && ev.lastChargeEvent.delta > 0)
+    coach(
+      "mana",
+      `Mana! The gems by your portrait. Captures, shields, zero flips, and stones off the board each pay 1, up to ${CHARGE_CAP}. Your powers spend it.`,
+    );
   refreshMarkers(ev.state, ev.lastExhume != null);
   currentPower = ev.power ?? null;
   // Dark Bargain: the fiend intervened inside the other side's action —
@@ -5089,7 +5330,7 @@ function applyOverlay(v: RoomResponse) {
     if (!iFlipped)
       coach(
         "welcome",
-        "Welcome aboard! The goal: sail all four of your stones down your shore, through shared water, and home to the far dock. First, the flip-off — tap your silver coins.",
+        "Welcome to Master Killer! You're the Warrior, on the red bases. Get all four stones around the board and off the far end first. Tap your coins for the flip-off: the higher flip goes first.",
       );
     hud.innerHTML = iFlipped
       ? `<div>Flip for first move</div><div>Waiting for opponent…</div>`
@@ -5116,7 +5357,7 @@ function applyOverlay(v: RoomResponse) {
       rollPending = { flip: v.flip, legalMoves: movesForTap, state: v.state };
       coach(
         "roll",
-        "Your turn. Tap your glowing coins to roll — every coin that lands design-up is one pace, zero to four.",
+        "Your turn. Tap your glowing coins to flip them. Each gold face up is one tile, so you move 0 to 4.",
       );
       renderHud(v.state, null);
       hud.innerHTML += `<div style="color:#ffd370">Tap your coins to roll</div>`;
@@ -5135,13 +5376,15 @@ function applyOverlay(v: RoomResponse) {
     renderMoves(v.flip !== null && mine ? movesForTap : null, mine && v.flip !== null);
     updateDock(mine && v.flip !== null);
   }
+  coachTurn();
 
   // Game over — celebrate once per winner.
   if (v.gameOver && shownWinner !== v.gameOver.winner) {
     shownWinner = v.gameOver.winner;
     coach(
       "end",
-      "That's Regatta! When you're ready for class powers, pick Master Killer from the menu — every class keeps a chapter in the book.",
+      (v.gameOver.winner === mySide ? "You won your first table! " : "The Archer takes this one. ") +
+        "Nine more champions wait at the face-off, each with its own powers. The 📖 book has them all.",
     );
     setStatus(`Game over — ${playerLabel(v.gameOver.winner)} wins`, "ok");
     const { winner, stats } = v.gameOver;
@@ -5842,12 +6085,13 @@ menuModeSeg.addEventListener("click", (e) => {
   menuIntent = "friend";
   showMenuStep("setup");
 });
-// The tutorial is one tap — classic rules, the gentle bot, zero setup.
+// The tutorial is one tap — Warrior vs the Tipsy CPU's Archer, zero setup.
 (document.getElementById("menu-go-tutorial") as HTMLButtonElement).addEventListener("click", () => {
   menuError.textContent = "";
+  hideCoach();
   tutorialMode = true;
   coachShown.clear();
-  sendToServer({ type: "join", mode: "cpu", variant: "classic", difficulty: "easy" });
+  sendToServer({ type: "join", mode: "cpu", variant: "masterKiller", difficulty: "easy" });
 });
 (document.getElementById("menu-back") as HTMLButtonElement).addEventListener("click", () => {
   showMenuStep("intent");
@@ -5924,6 +6168,13 @@ function renderClassPick(msg: { classes: Record<PlayerId, PlayerClass | null>; r
     foeLabel: inCpuGame ? `The CPU · ${DIFF_NAMES[cpuDifficulty ?? "standard"].replace(/^the /, "")}` : "Your opponent",
     mine: msg.classes[mySide],
     theirsLocked: msg.classes[theirSide] !== null,
+    fixed:
+      tutorialMode && inCpuGame
+        ? {
+            ...TUTORIAL_MATCH,
+            note: "Your first table: the Warrior, against the CPU's Archer. Nine more champions wait for next time. Lock in.",
+          }
+        : null,
   });
 }
 
@@ -7169,7 +7420,7 @@ function tick() {
   if (myMugGlow.visible)
     coach(
       "swig",
-      "Your mug glows — every stone brought home earns a swig. Tap the mug and drink to the crossing.",
+      "Your mug glows: every stone you get off the board earns a swig. Tap the mug to drink to it.",
     );
   // Shadow pass only while a caster is moving (stones in flight or still
   // lerping home, coins tumbling, a mug mid-drink) or a load marked it.
@@ -7282,7 +7533,7 @@ createGamepadControls(
     altLabel: () => (myAvailableSips() > 0 ? "Swig" : null),
     cancel: () => {
       hideAbilityTip();
-      if (!armed) return false;
+      if (!armed) return dismissCoach(); // nothing to cancel: B turns the tutorial's card
       disarm();
       return true;
     },
@@ -7295,7 +7546,7 @@ createGamepadControls(
     prev: ["#guide-prev", "#log-prev"],
     next: ["#guide-next", "#log-next"],
     defaults: ["#exit-no", "#win-play-again", "#menu-go-cpu", "#menu-cpu", "#update-close", "#guide-next",
-      ".fo-crest[aria-pressed='true']", "#lobby-list .room-row", "#menu-code"],
+      ".fo-crest[aria-pressed='true']", ".fo-go", "#lobby-list .room-row", "#menu-code"],
     overlays: ["#menu", "#classpick", "#win-screen", "#guide-overlay", "#update-overlay", "#exit-confirm", "#lobby",
       "#ios-install"],
     extra: { "#classpick": ["#rail"] }, // the rules, sound and leave stay in reach during the pick

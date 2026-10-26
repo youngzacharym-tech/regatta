@@ -205,6 +205,10 @@ body:has(#classpick.show) .plate, body:has(#classpick.show) #plate-cluster, body
 }
 .fo-crest:disabled { cursor: default; }
 #classpick.locked .fo-side[data-side="L"] .fo-crest:not([aria-pressed="true"]) { opacity: 0.35; filter: grayscale(0.6); }
+/* the tutorial's fixed match: both rosters greyed but for the two champions */
+#classpick.fixed .fo-crest:not([aria-pressed="true"]) { opacity: 0.35; filter: grayscale(0.6); }
+#classpick.fixed .fo-status { color: var(--fo-gold-hi); }
+#classpick.fixed .fo-keys span:first-child { display: none; } /* nothing to choose */
 /* online, their side: no roster, just "Choosing" with three dots breathing */
 #classpick.online .fo-side[data-side="R"] .fo-roster { display: none; }
 #classpick.online .fo-side[data-side="R"] .fo-pick { align-self: start; padding-top: 10px; }

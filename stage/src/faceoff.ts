@@ -6,8 +6,9 @@
 //
 // CPU rooms choose both sides (the CPU's class rides pickClass as `foe`);
 // online rooms choose only yours, and the opponent stays sealed until both
-// have locked in. When both classes settle, the reveal plays and the screen
-// lifts off the flip-off underneath.
+// have locked in. The tutorial sets both (`fixed`): the rosters stand
+// greyed and only Lock In is live. When both classes settle, the reveal
+// plays and the screen lifts off the flip-off underneath.
 //
 // It owns #classpick's contents and nothing else: main.ts feeds it the
 // classPick broadcasts (sync), the settled classes (settle) and resets (hide).
@@ -39,6 +40,9 @@ export interface FaceoffSync {
   mine: string | null;
   /** Online: the opponent has locked in (their class stays hidden). */
   theirsLocked: boolean;
+  /** Both sides decided for the player (the tutorial): rosters disabled,
+   *  `note` in the status line, Lock In still the player's own tap. */
+  fixed?: { you: string; foe: string; note: string } | null;
 }
 export interface Faceoff {
   sync(s: FaceoffSync): void;
@@ -124,6 +128,7 @@ export function createFaceoff(
   let mode: FaceoffSync["mode"] = "cpu";
   let locked = false;
   let theirsLocked = false;
+  let fixed: FaceoffSync["fixed"] = null;
   let revealing = false;
   let timers: number[] = [];
   let emberStop: (() => void) | null = null;
@@ -249,8 +254,10 @@ export function createFaceoff(
     root.classList.toggle("locked", locked);
     R.classList.toggle("ready", mode === "online" && theirsLocked);
     R.querySelector(".fo-wait")!.textContent = mode === "online" && !theirsLocked && !revealing ? "Choosing" : "";
+    root.classList.toggle("fixed", !!fixed);
+    root.querySelector(".fo-sub")!.textContent = fixed ? "Your first table" : "Choose your champion";
     root.querySelectorAll<HTMLButtonElement>(".fo-crest").forEach((b) => {
-      b.disabled = locked || revealing || (b.dataset.side === "R" && mode === "online");
+      b.disabled = locked || revealing || !!fixed || (b.dataset.side === "R" && mode === "online");
     });
     goBtn.disabled = locked || revealing;
     goBtn.textContent = locked ? "Locked In" : "Lock In";
@@ -264,11 +271,13 @@ export function createFaceoff(
             ? "Both locked in…"
             : "Waiting for your opponent to lock in…"
           : "To the table…"
-        : mode === "online"
-          ? theirsLocked
-            ? "Your opponent has chosen. Your move."
-            : "Pick your champion. Neither of you sees the other's until both lock in."
-          : "Pick your champion, and the CPU's.";
+        : fixed
+          ? fixed.note
+          : mode === "online"
+            ? theirsLocked
+              ? "Your opponent has chosen. Your move."
+              : "Pick your champion. Neither of you sees the other's until both lock in."
+            : "Pick your champion, and the CPU's.";
     // their side stays sealed until the reveal turns it face up
     if (mode === "online" && !revealing) show("R", "sealed", false);
   }
@@ -374,11 +383,13 @@ export function createFaceoff(
     emberStop?.();
     emberStop = embers(root.querySelector<HTMLCanvasElement>(".fo-embers")!);
     cb.opened?.();
-    // A beat for the entrance, then the chosen shield takes focus.
+    // A beat for the entrance, then the chosen shield takes focus (a fixed
+    // match has nothing to choose: Lock In does).
     timers.push(
       window.setTimeout(() => {
         if (!isOpen || locked) return;
-        root.querySelector<HTMLButtonElement>(`.fo-roster[data-side="L"] [aria-pressed="true"]`)?.focus({ preventScroll: true });
+        const first = fixed ? goBtn : root.querySelector<HTMLButtonElement>(`.fo-roster[data-side="L"] [aria-pressed="true"]`);
+        first?.focus({ preventScroll: true });
       }, 450),
     );
   }
@@ -393,7 +404,15 @@ export function createFaceoff(
     locked = false;
     theirsLocked = false;
     lastKey = "";
-    root.classList.remove("show", "reveal", "out", "lockflash", "online", "locked");
+    if (fixed) {
+      // Back to the player's own remembered picks for the next real match.
+      fixed = null;
+      selL = store.get("mk-faceoff-you", "warrior");
+      selR = store.get("mk-faceoff-foe", RANDOM);
+      if (!valid(selL)) selL = "warrior";
+      if (!valid(selR)) selR = RANDOM;
+    }
+    root.classList.remove("show", "reveal", "out", "lockflash", "online", "locked", "fixed");
   }
 
   return {
@@ -401,11 +420,21 @@ export function createFaceoff(
       return isOpen;
     },
     sync(s) {
-      const key = `${s.mode}|${s.foeLabel}|${s.mine}|${s.theirsLocked}`;
+      const key = `${s.mode}|${s.foeLabel}|${s.mine}|${s.theirsLocked}|${s.fixed?.you}|${s.fixed?.foe}`;
       if (isOpen && key === lastKey) return;
       lastKey = key;
       mode = s.mode;
       theirsLocked = s.theirsLocked;
+      fixed = s.fixed ?? null;
+      if (fixed) {
+        // Not stored: the player's own remembered picks survive the tutorial.
+        selL = fixed.you;
+        selR = fixed.foe;
+        if (isOpen) {
+          setPressed();
+          show("R", selR);
+        }
+      }
       if (s.mine) {
         locked = true;
         selL = s.mine;
