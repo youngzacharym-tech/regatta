@@ -1,19 +1,23 @@
-# Regatta
+# Master Killer
 
-A two-player race across the board — a fan-made, browser-based take on the
-*Soulframe* minigame. Play a friend by room code or link, or play the CPU.
+A two-player race-and-war board game for the browser. Each side picks a
+champion from ten classes, then races four stones around a gothic board
+while the classes' powers capture, wall, shove and curse. Play a friend by
+room code or link, or play the CPU at three strengths. There is a coached
+first match for new players.
 
 **Live:** https://masterkiller.vercel.app *(installable as an app — "Add to
 Home Screen" on a phone)*
 
-- 3D board and pieces sculpted in Nomad Sculpt, prepped in Blender, rendered
-  with Three.js (Draco-compressed glTF).
-- Tap-to-move: your eligible tokens pulse gold; every flip has exactly one
-  destination per token.
+- Original 3D board and painted miniatures, built procedurally in headless
+  Blender (`tools/`) and rendered with Three.js (Draco-compressed glTF).
+- Tap-to-move: your eligible stones glow; every flip has exactly one
+  destination per stone. Four coins are the dice.
 - Rooms: unlimited concurrent games; share a 4-letter code or a
   `?room=CODE` link. CPU opponent for solo play.
 - Both players see themselves as **Red** on the near row — the seat only
   exists in the protocol.
+- Plays with a mouse, touch, or an Xbox/PlayStation controller.
 
 ## How it's built
 
@@ -25,16 +29,17 @@ Home Screen" on a phone)*
         \                   |                   /
          \                  v                  /
           +------->+-------------------+<-----+
-                   |      RULEBOOK     |
+                   |     RULEBOOK      |
                    |  (pure TS module) |
                    +-------------------+
 ```
 
-- **`rulebook.ts`** — pure game logic, no I/O. Both client and server import
-  it so they can never disagree on legality. The locked-in rules are
-  documented at the top of the file.
-- **`master-killer.ts`** — the class-powers variant's rulebook (Archer /
-  Mage / Warrior, charges, ultimates), same purity rules.
+- **`master-killer.ts`** — the rules: the ten classes, mana, walls,
+  ultimates. Pure, no I/O. Both client and server import it so they can
+  never disagree on legality. Every tunable is a named constant with its
+  simulation-derived rationale beside it.
+- **`rulebook.ts`** — the base race underneath: the 15-tile board, the
+  state types, coin flips. `master-killer.ts` builds on it.
 - **`room-engine.ts`** — the ONE turn engine every transport shares: a room
   is a pure `RoomDoc` value, timed transitions are absolute deadlines fired
   by `tick()`, and every commit appends a replayable event. No I/O.
@@ -44,9 +49,9 @@ Home Screen" on a phone)*
   (Upstash) behind a version CAS; clients long-poll, so nothing holds a
   connection open and nothing gets recycled. Deployed as a pre-bundled
   function (`npm run build:api`).
-- **`bot.ts` / `master-killer-bot.ts`** — the CPU opponent (shared brain).
+- **`master-killer-bot.ts`** — the CPU opponent (easy / standard / hard).
 - **`stage/`** — the Three.js client (Vite). `stage/src/layout.ts` maps the
-  abstract 15-tile path onto measured positions on the sculpted board.
+  abstract 15-tile path onto measured positions on the board.
 
 ## Run it locally
 
@@ -66,35 +71,32 @@ same Wi-Fi via `http://<laptop-ip>:8080`).
 
 Useful scripts:
 
-- `npm run batch` — 1,000 random games through the rulebook (rules
-  regression: terminations, win split, no stalemates).
+- `npm test` — the rules scenario suite (`test-master-killer.ts`).
+- `npx tsx test-master-killer-drift.ts` — checks the class rules never
+  change the base race's move generation.
+- `npm run batch` — simulated games across every class matchup (balance
+  stats; the tuning tool for the constants in `master-killer.ts`).
+- `npx tsx batch-bot-difficulty.ts` — asserts the CPU tiers stay ordered.
 - `npm run test-engine` — full games driven through the room engine the way
   the polling transport drives it (invariants + balance stats).
-- `npx tsx test-master-killer.ts` — the Master Killer scenario suite.
 
 ## Deploy
 
 Production runs on Vercel (polling function + Upstash Redis + static PWA):
 
 ```bash
-npm run deploy     # bundles api/room.ts, then `vercel deploy --prod`
+npm run deploy     # bundles api/room.ts, then deploys to the masterkiller project
 ```
 
 Requires the Vercel CLI to be authenticated and an Upstash Redis integration
 providing `REDIS_URL`. Always use `npm run deploy` — a bare `vercel deploy`
-ships a stale server bundle.
+ships a stale server bundle (and this folder is still linked to the old
+`regatta` project).
 
-## Board assets
+## History
 
-The board, tokens, and coin were sculpted by
-**[pek_andrei](https://cults3d.com/en/3d-model/game/regatta-game-board)**
-(available on Cults3D) and appear here **with the artist's blessing** —
-thank you! Please don't lift the models out of this repo; if you want them,
-buy his kit.
-
-`stage/public/regatta.glb` (board) and `pieces.glb` (tokens/coin) are
-Draco-compressed exports from a Blender scene built out of those sculpts.
-The Blender-side build scripts (vertex painting, game-space transform,
-measured tile-coordinate output for `layout.ts`) live alongside the
-`.blend` source, outside this repo. `compress-glb.ps1` handles compression
-when a new export lands.
+Master Killer began as the class-powers variant of **Regatta**, a fan-made
+take on a *Soulframe* tavern minigame, whose board and pieces were sculpted by
+**[pek_andrei](https://cults3d.com/en/3d-model/game/regatta-game-board)** and
+used with the artist's blessing. Master Killer now stands alone with its own
+art; the original Regatta lives on in the `master` branch.

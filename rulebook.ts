@@ -1,5 +1,7 @@
 // ============================================================================
-// RULEBOOK — pure game logic for Regatta.
+// RULEBOOK — the base race Master Killer is built on: the 15-tile board,
+// the state types, coin flips, and the plain race rules (still the classic
+// Regatta rules, which master-killer.ts layers its classes over).
 //
 // No graphics, no networking, no I/O, no randomness inside the pure functions.
 // Both the Stage (client) and the Referee (server) import from this file so

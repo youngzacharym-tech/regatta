@@ -2,15 +2,15 @@
 // batch-bot-difficulty.ts — the CPU difficulty SEPARATION GATE.
 //
 // Plays the three tier pairings (easy-vs-standard, standard-vs-hard,
-// easy-vs-hard) headlessly in BOTH rulesets — classic through rulebook.ts,
-// Master Killer through the same takeTurn shape as
+// easy-vs-hard) headlessly through the same takeTurn shape as
 // batch-random-master-killer-games.ts, run as class MIRRORS so class balance
 // can't masquerade as (or hide) skill. Both seatings per pairing, so
-// first-move luck cancels.
+// first-move luck cancels. (The classic ruleset's half of this gate went
+// with the Regatta cut, 2026-10-25.)
 //
 // Then it ASSERTS the ordering (exit 1 on failure) — this is the tuning loop
-// for bot.ts/master-killer-bot.ts's hard-tier eval weights, exactly the
-// workflow master-killer.ts's CHARGE_CAP-style constants use:
+// for master-killer-bot.ts's hard-tier eval weights, exactly the workflow
+// master-killer.ts's CHARGE_CAP-style constants use:
 //
 //   hard  vs easy      >= HARD_VS_EASY_MIN      (target ~75%)
 //   hard  vs standard  >= HARD_VS_STANDARD_MIN
@@ -18,20 +18,21 @@
 //
 // Run:
 //   npx tsx batch-bot-difficulty.ts
-//   npx tsx batch-bot-difficulty.ts 4000 1200   <- classic games/pairing, MK games/mirror
+//   npx tsx batch-bot-difficulty.ts 1200   <- games per class mirror
 // ============================================================================
 
 import {
-  applyMove,
   applyNoMove,
   flipCoins,
-  getLegalMoves,
   initialState,
   type GameState,
   type PlayerId,
 } from "./rulebook.ts";
 import {
+  applyBackstab,
+  applyBlink,
   applyBlinkStrike,
+  applyRainOfArrows,
   applyBless,
   applyBenediction,
   applyBulwark,
@@ -77,12 +78,10 @@ import {
   type PlayerClass,
   type PowerState,
 } from "./master-killer.ts";
-import { pickBotMove } from "./bot.ts";
 import { pickBotPowerAction } from "./master-killer-bot.ts";
 import type { BotDifficulty } from "./bot-difficulty.ts";
 
-const CLASSIC_GAMES_PER_PAIRING = Number(process.argv[2] ?? 2000);
-const MK_GAMES_PER_MIRROR = Number(process.argv[3] ?? 600);
+const MK_GAMES_PER_MIRROR = Number(process.argv[2] ?? 600);
 const MAX_TURNS_PER_GAME = 1000;
 
 // ---------------------------------------------------------------------------
@@ -112,28 +111,6 @@ const PAIRINGS: [BotDifficulty, BotDifficulty, number][] = [
   ["hard", "standard", HARD_VS_STANDARD_MIN],
   ["hard", "easy", HARD_VS_EASY_MIN],
 ];
-
-// ---------------------------------------------------------------------------
-// Classic: flip -> getLegalMoves -> pickBotMove(tier) -> applyMove. Shield
-// extra turns fall out of applyMove (currentPlayer stays the mover).
-// ---------------------------------------------------------------------------
-
-function playClassic(p1Tier: BotDifficulty, p2Tier: BotDifficulty): PlayerId | null {
-  let state = initialState();
-  let turns = 0;
-  while (state.winner === null && turns < MAX_TURNS_PER_GAME) {
-    turns++;
-    const flip = flipCoins();
-    const moves = getLegalMoves(state, flip);
-    if (moves.length === 0) {
-      state = applyNoMove(state);
-      continue;
-    }
-    const tier = state.currentPlayer === "p1" ? p1Tier : p2Tier;
-    state = applyMove(state, moves[pickBotMove(state, moves, Math.random, tier)]);
-  }
-  return state.winner;
-}
 
 // ---------------------------------------------------------------------------
 // Master Killer: the exact takeTurn shape batch-random-master-killer-games.ts
@@ -268,6 +245,18 @@ function takeTurnMK(
       const r = applyGrandHeist(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };
     }
+    case "rainOfArrows": {
+      const r = applyRainOfArrows(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "blink": {
+      const r = applyBlink(state, power, action.tile, mover);
+      return { state: r.state, power: r.power };
+    }
+    case "backstab": {
+      const r = applyBackstab(state, power, action.targetTokenId, mover);
+      return { state: r.state, power: r.power };
+    }
     case "sacrifice": {
       const r = applySacrifice(state, power, action.targetTokenId, mover);
       return { state: r.state, power: r.power };
@@ -356,19 +345,11 @@ function gate(label: string, pctValue: number, min: number) {
 }
 
 const start = Date.now();
-console.log(
-  `CPU difficulty separation gate — classic ${CLASSIC_GAMES_PER_PAIRING} games/pairing, ` +
-    `MK ${MK_GAMES_PER_MIRROR} games/mirror, both seatings.`,
-);
+console.log(`CPU difficulty separation gate — ${MK_GAMES_PER_MIRROR} games/mirror, both seatings.`);
 console.log("=".repeat(90));
 
 for (const [strong, weak, min] of PAIRINGS) {
   console.log(`\n${strong} vs ${weak}`);
-
-  const c = runPair(CLASSIC_GAMES_PER_PAIRING, playClassic, strong, weak);
-  console.log(
-    `  classic              ${strong}=${winPct(c).toFixed(1)}%  (${c.strongWins}-${c.weakWins}, stalemates=${c.stalemates})`,
-  );
 
   const mkTotal: PairResult = { strongWins: 0, weakWins: 0, stalemates: 0 };
   for (const cls of MK_MIRRORS) {
@@ -384,8 +365,7 @@ for (const [strong, weak, min] of PAIRINGS) {
     `  mk aggregate         ${strong}=${winPct(mkTotal).toFixed(1)}%  (${mkTotal.strongWins}-${mkTotal.weakWins}, stalemates=${mkTotal.stalemates})`,
   );
 
-  gate(`classic ${strong} vs ${weak}`, winPct(c), min);
-  gate(`mk      ${strong} vs ${weak}`, winPct(mkTotal), min);
+  gate(`mk ${strong} vs ${weak}`, winPct(mkTotal), min);
 }
 
 console.log("\n" + "=".repeat(90));

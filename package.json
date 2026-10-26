@@ -1,5 +1,5 @@
 {
-  "name": "regatta-game",
+  "name": "master-killer",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -7,8 +7,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "random": "tsx play-random-game.ts",
-    "batch": "tsx batch-random-games.ts",
+    "batch": "tsx batch-random-master-killer-games.ts",
+    "test": "tsx test-master-killer.ts",
     "referee": "tsx referee.ts",
     "start": "tsx referee.ts",
     "build:stage": "cd stage && npm install && npm run build",

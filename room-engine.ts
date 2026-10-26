@@ -1,5 +1,6 @@
 // ============================================================================
-// room-engine.ts — the ONE turn engine for Regatta, shared by every transport.
+// room-engine.ts — the ONE turn engine for Master Killer, shared by every
+// transport.
 //
 // Everything here is PURE: no I/O, no timers, no Redis, no sockets. A room is
 // a RoomDoc value; the engine exposes exactly three ways to produce the next
@@ -25,24 +26,23 @@
 // flip's charge is granted on the flip commit but announced on the skip
 // commit). Each commit appends one Event with a monotonic seq; clients render
 // events in order and interact via the seat-gated overlay in viewFor().
-// Events carry NO seat-private data (legalMoves/powerMoves live only in the
-// overlay), so replay can never leak the opponent's options.
+// Events carry NO seat-private data (powerMoves live only in the overlay), so
+// replay can never leak the opponent's options.
 //
-// Game logic is untouched: rulebook.ts / master-killer.ts decide everything;
-// this file only orchestrates WHEN their pure functions run.
+// Game logic is untouched: master-killer.ts (on rulebook.ts's board and
+// types) decides everything; this file only orchestrates WHEN its pure
+// functions run. Every room is a Master Killer room — the classic Regatta
+// ruleset was cut on 2026-10-25 (it lives on in `master`).
 // ============================================================================
 
 import {
   initialState,
   flipCoins,
-  getLegalMoves,
-  applyMove,
   applyNoMove,
   type GameState,
   type Move,
   type PlayerId,
 } from "./rulebook";
-import { pickBotMove } from "./bot";
 import type { ChatMsg } from "./protocol";
 import {
   applyBless,
@@ -317,7 +317,10 @@ export function fromWirePower(w: WirePowerState): PowerState {
 // ============================================================================
 
 export type RoomPhase = "classPick" | "opening" | "play";
-export type Variant = "classic" | "masterKiller";
+/** One ruleset since the Regatta cut. The field stays on docs and views
+ *  because a client cached from before the cut branches its whole UI on it
+ *  — and must keep seeing "masterKiller" until its service worker updates. */
+export type Variant = "masterKiller";
 
 /** The public (both-seats-visible) Master Killer table state — classes,
  *  charges, wards, and the current player's targetable token lists. Safe to
@@ -669,8 +672,10 @@ export interface RoomDoc {
    *  set after a null attempt so a later tick doesn't re-roll the decision. */
   rescueAttempted: boolean;
 
-  // ---- Master Killer (null/unused in classic rooms) ---------------------
+  // ---- Master Killer ------------------------------------------------------
   variant: Variant;
+  /** Always set on a live doc. Typed nullable from the two-ruleset days; the
+   *  null checks that remain are harmless guards. */
   mk: WirePowerState | null;
   classesPicked: { p1: boolean; p2: boolean };
   currentPowerMoves: PowerMove[] | null;
@@ -845,7 +850,6 @@ export interface RoomView {
   power: PublicPower | null;
   yourTurn: boolean;
   /** Seat-gated: only the current player sees their options. */
-  legalMoves: Move[] | null;
   powerMoves: PowerMove[] | null;
   gameOver: { winner: PlayerId; stats: { turns: number; captures: { p1: number; p2: number } } } | null;
   opponentAway: boolean;
@@ -1088,9 +1092,7 @@ function commitFrame(doc: RoomDoc, now: number, ev: UnseqEvent): RoomDoc {
 // FRESH DOCS
 // ============================================================================
 
-export function freshMatchFields(
-  variant: Variant,
-): Pick<
+export function freshMatchFields(): Pick<
   RoomDoc,
   | "phase" | "openingFlips" | "state" | "currentFlip" | "turns" | "captures"
   | "lastMove" | "lastMovePlayer" | "wasSkipped" | "skippedPlayer" | "skipReason"
@@ -1105,7 +1107,7 @@ export function freshMatchFields(
   | "lastInspire" | "lastInspireFaded" | "lastSongOfHaste" | "lastCrescendo"
 > {
   return {
-    phase: variant === "masterKiller" ? "classPick" : "opening",
+    phase: "classPick",
     openingFlips: { p1: null, p2: null },
     state: initialState(),
     currentFlip: null,
@@ -1116,7 +1118,7 @@ export function freshMatchFields(
     wasSkipped: false,
     skippedPlayer: null,
     skipReason: null,
-    mk: variant === "masterKiller" ? toWirePower(initialPowerState()) : null,
+    mk: toWirePower(initialPowerState()),
     classesPicked: { p1: false, p2: false },
     currentPowerMoves: null,
     lastPush: null,
@@ -1168,7 +1170,6 @@ export function freshMatchFields(
 export function createRoomDoc(
   code: string,
   vsCpu: boolean,
-  variant: Variant,
   p1Token: string,
   now: number,
   unlisted = false,
@@ -1183,19 +1184,17 @@ export function createRoomDoc(
     started: vsCpu, // cpu rooms are "full" with one human
     unlisted,
     version: 1,
-    variant,
+    variant: "masterKiller",
     waitingSince: now,
     seq: 0,
     events: [],
     seatLastSeen: { p1: now, p2: now },
     chat: [],
-    ...freshMatchFields(variant),
+    ...freshMatchFields(),
   };
   if (!doc.started) return doc;
-  // Room starts immediately (cpu): emit the opening frame for the phase.
-  return doc.phase === "classPick"
-    ? pushEvent(doc, classPickEventOf(doc))
-    : pushEvent(doc, openingEventOf(doc, null));
+  // Room starts immediately (cpu): the class pick opens.
+  return pushEvent(doc, classPickEventOf(doc));
 }
 
 /** The p2 seat just filled (PvP join): mark started and emit the first frame. */
@@ -1273,29 +1272,11 @@ export function applyAction(
       if (doc.state.winner) return { doc, error: "Game is over" };
       if (doc.phase !== "play" || doc.state.currentPlayer !== seat) return { doc, error: "Not your turn" };
       if (doc.currentFlip === null) return { doc, error: "No flip yet" };
-      if (doc.variant === "masterKiller") {
-        if (!doc.mk || !doc.currentPowerMoves) return { doc, error: "No moves" };
-        if (action.moveIndex < 0 || action.moveIndex >= doc.currentPowerMoves.length) {
-          return { doc, error: "Invalid move index" };
-        }
-        return { doc: applyMkMove(doc, seat, doc.currentPowerMoves[action.moveIndex], now, rand) };
+      if (!doc.mk || !doc.currentPowerMoves) return { doc, error: "No moves" };
+      if (action.moveIndex < 0 || action.moveIndex >= doc.currentPowerMoves.length) {
+        return { doc, error: "Invalid move index" };
       }
-      const moves = getLegalMoves(doc.state, doc.currentFlip);
-      if (action.moveIndex < 0 || action.moveIndex >= moves.length) return { doc, error: "Invalid move index" };
-      const move = moves[action.moveIndex];
-      let next: RoomDoc = {
-        ...doc,
-        state: applyMove(doc.state, move),
-        currentFlip: null,
-        captures: { ...doc.captures, [seat]: doc.captures[seat] + move.captures.length },
-        lastMove: move,
-        lastMovePlayer: seat,
-        wasSkipped: false,
-        skippedPlayer: null,
-        skipReason: null,
-      };
-      next = commitFrame(next, now, stateEventOf(next));
-      return { doc: next };
+      return { doc: applyMkMove(doc, seat, doc.currentPowerMoves[action.moveIndex], now, rand) };
     }
 
     case "usePower": {
@@ -1339,12 +1320,8 @@ export function applyAction(
 
     case "newMatch": {
       if (doc.state.winner === null) return { doc, error: "Current match hasn't ended" };
-      let next: RoomDoc = { ...doc, ...freshMatchFields(doc.variant), waitingSince: now, rescueAttempted: false };
-      next =
-        next.phase === "classPick"
-          ? pushEvent(next, classPickEventOf(next))
-          : pushEvent(next, openingEventOf(next, null));
-      return { doc: next };
+      const next: RoomDoc = { ...doc, ...freshMatchFields(), waitingSince: now, rescueAttempted: false };
+      return { doc: pushEvent(next, classPickEventOf(next)) };
     }
   }
 }
@@ -1354,7 +1331,7 @@ function validateUsePower(
   seat: PlayerId,
   a: Extract<RoomActionInput, { op: "usePower" }>["action"],
 ): string | null {
-  if (doc.variant !== "masterKiller" || !doc.mk) return "Not a Master Killer room";
+  if (!doc.mk) return "Not a Master Killer room";
   if (doc.state.winner !== null) return "Game is over";
   if (doc.phase !== "play" || doc.state.currentPlayer !== seat) return "Not your turn";
   const cls = doc.mk.classes[seat];
@@ -2398,7 +2375,7 @@ function autoSkipDelay(doc: RoomDoc): number {
   const mover = doc.state.currentPlayer;
   const isBot = doc.vsCpu && mover === "p2";
   if (isBot) return AUTO_SKIP_DELAY_MS;
-  if (doc.variant === "masterKiller" && doc.mk) {
+  if (doc.mk) {
     const p = fromWirePower(doc.mk);
     if (
       doc.mk.classes[mover] === "mage" &&
@@ -2553,13 +2530,12 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
   // TS's null-narrowing on the field).
   const flip = doc.currentFlip;
 
-  const moves = doc.variant === "masterKiller" ? (doc.currentPowerMoves ?? []) : getLegalMoves(doc.state, flip);
+  const moves = doc.currentPowerMoves ?? [];
   const isBotTurn = doc.vsCpu && doc.state.currentPlayer === "p2";
 
   // MK bot zero-move rescue: one shot, before the auto-skip becomes due.
   if (
     isBotTurn &&
-    doc.variant === "masterKiller" &&
     doc.mk &&
     moves.length === 0 &&
     !doc.rescueAttempted &&
@@ -2606,36 +2582,17 @@ function tickOnce(doc: RoomDoc, now: number, rand: () => number): RoomDoc {
     return commitFrame(next, now, stateEventOf(next));
   }
 
-  if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS) {
-    if (doc.variant === "masterKiller" && doc.mk) {
-      const power = fromWirePower(doc.mk);
-      const action = pickBotPowerAction(
-        doc.state,
-        power,
-        doc.currentPowerMoves ?? [],
-        flip,
-        rand,
-        doc.difficulty ?? "standard",
-      );
-      if (action) return applyBotAction(doc, "p2", action, now, rand);
-      return doc;
-    }
-    const botMoves = getLegalMoves(doc.state, flip);
-    if (botMoves.length === 0) return doc;
-    const idx = pickBotMove(doc.state, botMoves, rand, doc.difficulty ?? "standard");
-    const move = botMoves[idx];
-    let next: RoomDoc = {
-      ...doc,
-      state: applyMove(doc.state, move),
-      currentFlip: null,
-      captures: { ...doc.captures, p2: doc.captures.p2 + move.captures.length },
-      lastMove: move,
-      lastMovePlayer: "p2" as PlayerId,
-      wasSkipped: false,
-      skippedPlayer: null,
-      skipReason: null,
-    };
-    return commitFrame(next, now, stateEventOf(next));
+  if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS && doc.mk) {
+    const power = fromWirePower(doc.mk);
+    const action = pickBotPowerAction(
+      doc.state,
+      power,
+      doc.currentPowerMoves ?? [],
+      flip,
+      rand,
+      doc.difficulty ?? "standard",
+    );
+    if (action) return applyBotAction(doc, "p2", action, now, rand);
   }
 
   return doc;
@@ -2725,7 +2682,7 @@ function commitTurnFlip(doc: RoomDoc, now: number, rand: () => number): RoomDoc 
   let lastThaw: RoomDoc["lastThaw"] = null;
   let lastWallBleed: RoomDoc["lastWallBleed"] = null;
   let lastInspireFaded: RoomDoc["lastInspireFaded"] = null;
-  if (doc.variant === "masterKiller" && mk) {
+  if (mk) {
     let power = fromWirePower(mk);
     if (flip === 0) {
       zeroFlipChargeBefore = power.charges[state.currentPlayer];
@@ -2809,11 +2766,7 @@ export function viewFor(doc: RoomDoc, seat: PlayerId, since: number, now: number
   const oldest = doc.events.length > 0 ? doc.events[0].seq : doc.seq + 1;
   const resync = since < oldest - 1;
   const yourTurn = doc.phase === "play" && doc.state.winner === null && doc.state.currentPlayer === seat;
-  const legalMoves =
-    doc.variant === "classic" && doc.currentFlip !== null && yourTurn
-      ? getLegalMoves(doc.state, doc.currentFlip)
-      : null;
-  const powerMoves = doc.variant === "masterKiller" && yourTurn ? doc.currentPowerMoves : null;
+  const powerMoves = yourTurn ? doc.currentPowerMoves : null;
   const opp = otherSeat(seat);
   const oppSeen = doc.seatLastSeen[opp];
   const oppIsBot = doc.vsCpu && opp === "p2";
@@ -2825,12 +2778,12 @@ export function viewFor(doc: RoomDoc, seat: PlayerId, since: number, now: number
     phase: doc.phase,
     vsCpu: doc.vsCpu,
     difficulty: doc.vsCpu ? (doc.difficulty ?? "standard") : null,
-    variant: doc.variant,
+    variant: "masterKiller",
     state: doc.state,
     flip: doc.currentFlip,
     openingFlips: { ...doc.openingFlips },
     classPick:
-      doc.variant === "masterKiller" && doc.mk
+      doc.mk
         ? {
             classes: {
               p1: doc.classesPicked.p1 ? doc.mk.classes.p1 : null,
@@ -2841,7 +2794,6 @@ export function viewFor(doc: RoomDoc, seat: PlayerId, since: number, now: number
         : null,
     power: publicPower(doc),
     yourTurn,
-    legalMoves,
     powerMoves,
     gameOver: doc.state.winner
       ? { winner: doc.state.winner, stats: { turns: doc.turns, captures: { ...doc.captures } } }

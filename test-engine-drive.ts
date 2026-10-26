@@ -15,8 +15,7 @@
 // Run:  npx tsx test-engine-drive.ts [gamesPerMatchup]
 // ============================================================================
 
-import { getLegalMoves, type PlayerId } from "./rulebook";
-import { pickBotMove } from "./bot";
+import type { PlayerId } from "./rulebook";
 import { pickBotPowerAction } from "./master-killer-bot";
 import type { PlayerClass } from "./master-killer";
 import type { BotDifficulty } from "./bot-difficulty";
@@ -56,14 +55,9 @@ interface GameResult {
   steps: number;
 }
 
-function playOne(
-  variant: "classic" | "masterKiller",
-  p1Class: PlayerClass,
-  p2Class: PlayerClass,
-  difficulty: BotDifficulty = "standard",
-): GameResult {
+function playOne(p1Class: PlayerClass, p2Class: PlayerClass, difficulty: BotDifficulty = "standard"): GameResult {
   let now = 1_000_000;
-  let doc = createRoomDoc("TEST", true, variant, "p1tok", now, false, difficulty);
+  let doc = createRoomDoc("TEST", true, "p1tok", now, false, difficulty);
   let lastSeq = 0;
   let steps = 0;
 
@@ -83,7 +77,7 @@ function playOne(
 
     // Force the matchup: the harness pokes the bot's class the moment the
     // tick picks one (test-only; a client can't do this).
-    if (variant === "masterKiller" && doc.mk && doc.classesPicked.p2 && doc.mk.classes.p2 !== p2Class) {
+    if (doc.mk && doc.classesPicked.p2 && doc.mk.classes.p2 !== p2Class) {
       doc = { ...doc, mk: { ...doc.mk, classes: { ...doc.mk.classes, p2: p2Class } } };
     }
 
@@ -102,45 +96,45 @@ function playOne(
       act({ op: "openingFlip" });
       return;
     }
-    if (doc.phase === "play" && !doc.state.winner && doc.state.currentPlayer === "p1" && doc.currentFlip !== null) {
-      if (variant === "masterKiller" && doc.mk) {
-        const moves = doc.currentPowerMoves ?? [];
-        const action = pickBotPowerAction(doc.state, fromWirePower(doc.mk), moves, doc.currentFlip, Math.random, difficulty);
-        if (!action) return; // dead flip, no rescue — tick auto-skips
-        if (action.kind === "move") {
-          act({ op: "chooseMove", moveIndex: moves.indexOf(action.move) });
-        } else if (action.kind === "charge") {
-          act({ op: "usePower", action: { kind: "charge", moveIndex: moves.indexOf(action.move) } });
-        } else {
-          act({ op: "usePower", action } as RoomActionInput);
-          if (action.kind === "reflip") {
-            // The re-flip commit must announce itself even when the charge
-            // math nets to zero (cost refunded by a zero replacement flip) —
-            // the client's Reroll! proc keys on this field, not the delta.
-            const newest = doc.events[doc.events.length - 1];
-            assert(
-              newest?.kind === "state" && newest.lastReflip?.player === "p1",
-              "reflip commit missing lastReflip",
-            );
-          }
-          if (action.kind === "revive") {
-            // Same contract for the Necromancer's turn-keeping act: the
-            // revive commit must announce itself (the client's Revive!
-            // proc and the rise animation key on this field) and keep the
-            // flip alive for the recomputed move list.
-            const newest = doc.events[doc.events.length - 1];
-            assert(
-              newest?.kind === "state" && newest.lastRevive != null,
-              "revive commit missing lastRevive",
-            );
-            assert(doc.currentFlip !== null, "revive commit dropped the flip");
-          }
+    if (
+      doc.phase === "play" &&
+      !doc.state.winner &&
+      doc.state.currentPlayer === "p1" &&
+      doc.currentFlip !== null &&
+      doc.mk
+    ) {
+      const moves = doc.currentPowerMoves ?? [];
+      const action = pickBotPowerAction(doc.state, fromWirePower(doc.mk), moves, doc.currentFlip, Math.random, difficulty);
+      if (!action) return; // dead flip, no rescue — tick auto-skips
+      if (action.kind === "move") {
+        act({ op: "chooseMove", moveIndex: moves.indexOf(action.move) });
+      } else if (action.kind === "charge") {
+        act({ op: "usePower", action: { kind: "charge", moveIndex: moves.indexOf(action.move) } });
+      } else {
+        act({ op: "usePower", action } as RoomActionInput);
+        if (action.kind === "reflip") {
+          // The re-flip commit must announce itself even when the charge
+          // math nets to zero (cost refunded by a zero replacement flip) —
+          // the client's Reroll! proc keys on this field, not the delta.
+          const newest = doc.events[doc.events.length - 1];
+          assert(
+            newest?.kind === "state" && newest.lastReflip?.player === "p1",
+            "reflip commit missing lastReflip",
+          );
         }
-        return;
+        if (action.kind === "revive") {
+          // Same contract for the Necromancer's turn-keeping act: the
+          // revive commit must announce itself (the client's Revive!
+          // proc and the rise animation key on this field) and keep the
+          // flip alive for the recomputed move list.
+          const newest = doc.events[doc.events.length - 1];
+          assert(
+            newest?.kind === "state" && newest.lastRevive != null,
+            "revive commit missing lastRevive",
+          );
+          assert(doc.currentFlip !== null, "revive commit dropped the flip");
+        }
       }
-      const moves = getLegalMoves(doc.state, doc.currentFlip);
-      if (moves.length === 0) return; // tick auto-skips
-      act({ op: "chooseMove", moveIndex: pickBotMove(doc.state, moves, Math.random, difficulty) });
     }
   };
 
@@ -155,7 +149,7 @@ function playOne(
     assert(v.latestSeq === doc.seq, "view latestSeq mismatch");
     if (doc.state.winner) assert(v.gameOver !== null, "gameOver missing from view");
     if (seat !== doc.state.currentPlayer) {
-      assert(v.legalMoves === null && v.powerMoves === null, "moves leaked to non-current seat");
+      assert(v.powerMoves === null, "moves leaked to non-current seat");
     }
   }
 
@@ -164,7 +158,6 @@ function playOne(
 
 function runMatchup(
   label: string,
-  variant: "classic" | "masterKiller",
   a: PlayerClass,
   b: PlayerClass,
   difficulty: BotDifficulty = "standard",
@@ -176,7 +169,7 @@ function runMatchup(
   for (let i = 0; i < games; i++) {
     // Alternate seatings so first-mover luck cancels out, like the oracle.
     const flip = i % 2 === 1;
-    const r = playOne(variant, flip ? b : a, flip ? a : b, difficulty);
+    const r = playOne(flip ? b : a, flip ? a : b, difficulty);
     if (r.winner === null) stale++;
     else if ((r.winner === "p1") !== flip) aWins++;
     turnsSum += r.turns;
@@ -188,34 +181,31 @@ function runMatchup(
 }
 
 console.log(`Engine-drive validation — ${GAMES} games per matchup through applyAction()/tick().`);
-runMatchup("classic", "classic" as never, "archer", "archer"); // classes ignored in classic
-runMatchup("archer mirror", "masterKiller", "archer", "archer");
-runMatchup("archer vs mage", "masterKiller", "archer", "mage");
-runMatchup("archer vs warrior", "masterKiller", "archer", "warrior");
-runMatchup("mage mirror", "masterKiller", "mage", "mage");
-runMatchup("mage vs warrior", "masterKiller", "mage", "warrior");
-runMatchup("warrior mirror", "masterKiller", "warrior", "warrior");
+runMatchup("archer mirror", "archer", "archer");
+runMatchup("archer vs mage", "archer", "mage");
+runMatchup("archer vs warrior", "archer", "warrior");
+runMatchup("mage mirror", "mage", "mage");
+runMatchup("mage vs warrior", "mage", "warrior");
+runMatchup("warrior mirror", "warrior", "warrior");
 // Necromancer matchups drive the engine surface no other harness reaches:
 // applyMkRaise's act-then-redecide cycle (flip preserved, moves recomputed),
 // validateUsePower's raiseDead/exhume branches through the human path, and
 // the lastRaise/lastExhume/lastSoulHarvest announcements.
-runMatchup("necromancer mirror", "masterKiller", "necromancer", "necromancer");
-runMatchup("necro vs warrior", "masterKiller", "necromancer", "warrior");
+runMatchup("necromancer mirror", "necromancer", "necromancer");
+runMatchup("necro vs warrior", "necromancer", "warrior");
 // Warlock (2026-07-26): the mirror exercises Blood Pact on both sides and
 // double-curse bookkeeping; vs cleric pits Sacrifice's Ward/Blessing pierce
 // against the one class built to survive being hit.
-runMatchup("warlock mirror", "masterKiller", "warlock", "warlock");
-runMatchup("warlock vs cleric", "masterKiller", "warlock", "cleric");
+runMatchup("warlock mirror", "warlock", "warlock");
+runMatchup("warlock vs cleric", "warlock", "cleric");
 // Difficulty smoke: small runs at easy and hard so the transport invariants
 // (seq monotonic, JSON round-trip — difficulty is a plain string, Redis-safe;
 // termination under MAX_STEPS, which also bounds hard-tier think time) cover
 // every tier. Default runs above stay standard so the oracle comparison
 // against batch-random-master-killer-games.ts is unchanged.
 const SMOKE = Math.max(20, Math.floor(GAMES / 5));
-runMatchup("classic easy", "classic" as never, "archer", "archer", "easy", SMOKE);
-runMatchup("classic hard", "classic" as never, "archer", "archer", "hard", SMOKE);
-runMatchup("mk mirror easy", "masterKiller", "warrior", "warrior", "easy", SMOKE);
-runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
+runMatchup("mk mirror easy", "warrior", "warrior", "easy", SMOKE);
+runMatchup("mk mirror hard", "mage", "mage", "hard", SMOKE);
 
 // ---------------------------------------------------------------------------
 // Bulwark display window: a Bulwark that blocked THIS flip is consumed by
@@ -226,7 +216,7 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
 // "the glow wore off but it's still activating" report.
 // ---------------------------------------------------------------------------
 {
-  const base = createRoomDoc("BWTEST", true, "masterKiller", "tok", 0, false);
+  const base = createRoomDoc("BWTEST", true, "tok", 0, false);
   const mk: WirePowerState & { classes: Record<PlayerId, PlayerClass> } = {
     classes: { p1: "warrior", p2: "archer" },
     charges: { p1: 0, p2: 0 },
@@ -265,7 +255,7 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
 // the server must refuse to seat anyone in one.
 // ---------------------------------------------------------------------------
 {
-  const base = createRoomDoc("PICKTEST", true, "masterKiller", "tok", 0, false);
+  const base = createRoomDoc("PICKTEST", true, "tok", 0, false);
   assert(base.phase === "classPick", "a Master Killer room opens in class pick");
 
   const shipped = applyAction(base, "p1", { op: "pickClass", class: "rogue" }, 0);
@@ -298,7 +288,7 @@ runMatchup("mk mirror hard", "masterKiller", "mage", "mage", "hard", SMOKE);
 // think time must not leave the CPU on the placeholder class.
 // ---------------------------------------------------------------------------
 {
-  const base = createRoomDoc("FOETEST", true, "masterKiller", "tok", 0, false);
+  const base = createRoomDoc("FOETEST", true, "tok", 0, false);
   const chosen = applyAction(base, "p1", { op: "pickClass", class: "bard", foe: "necromancer" }, 0);
   assert(!chosen.error, "a pick with a foe is accepted in a CPU room");
   assert(chosen.doc.mk?.classes.p2 === "necromancer", "the foe is the CPU's class");

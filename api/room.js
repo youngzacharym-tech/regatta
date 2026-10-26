@@ -60,67 +60,6 @@ function flipCoins(rand = Math.random) {
   }
   return marked;
 }
-function getLegalMoves(state, flip) {
-  if (state.winner !== null) return [];
-  if (flip <= 0) return [];
-  const player = state.currentPlayer;
-  const moves = [];
-  for (const token of state.tokens) {
-    if (token.owner !== player) continue;
-    if (token.position >= PATH_LENGTH_PER_PLAYER) continue;
-    const from = token.position;
-    const to = from === -1 ? flip - 1 : from + flip;
-    if (to >= PATH_LENGTH_PER_PLAYER - 1) {
-      if (to !== PATH_LENGTH_PER_PLAYER - 1) continue;
-      const remaining = state.tokens.filter(
-        (t) => t.owner === player && t.id !== token.id && t.position < PATH_LENGTH_PER_PLAYER
-      );
-      moves.push({
-        tokenId: token.id,
-        from,
-        to: PATH_LENGTH_PER_PLAYER,
-        captures: [],
-        landsOnShield: false,
-        causesWin: remaining.length === 0
-      });
-      continue;
-    }
-    const destTile = BOARD_LAYOUT[to];
-    const occupants = state.tokens.filter(
-      (t) => t.position === to && t.id !== token.id && (destTile.isContested || t.owner === player)
-    );
-    const self = occupants.find((t) => t.owner === player);
-    const enemy = occupants.find((t) => t.owner !== player);
-    if (self) continue;
-    if (enemy && destTile.type === "shield") continue;
-    moves.push({
-      tokenId: token.id,
-      from,
-      to,
-      captures: enemy ? [enemy.id] : [],
-      landsOnShield: destTile.type === "shield",
-      causesWin: false
-    });
-  }
-  return moves;
-}
-function applyMove(state, move) {
-  const tokens = state.tokens.map((t) => {
-    if (t.id === move.tokenId) return { ...t, position: move.to };
-    if (move.captures.includes(t.id)) return { ...t, position: -1 };
-    return t;
-  });
-  const extraTurn = move.landsOnShield;
-  const nextPlayer = extraTurn ? state.currentPlayer : otherPlayer(state.currentPlayer);
-  return {
-    tokens,
-    currentPlayer: nextPlayer,
-    lastFlip: null,
-    // Q5b: shield extra turn = fresh flip
-    winner: move.causesWin ? state.currentPlayer : null,
-    extraTurn
-  };
-}
 function applyNoMove(state) {
   return {
     ...state,
@@ -131,198 +70,6 @@ function applyNoMove(state) {
 }
 function otherPlayer(p) {
   return p === "p1" ? "p2" : "p1";
-}
-
-// bot-difficulty.ts
-var FLIP_WEIGHTS = [1, 4, 6, 4, 1];
-var FLIP_WEIGHT_TOTAL = 16;
-var EASY_HEED_P = 0.35;
-function normalizeDifficulty(d) {
-  return d === "easy" || d === "hard" ? d : "standard";
-}
-
-// bot.ts
-var EVAL_ESCAPED = 200;
-var EVAL_PER_TILE = 8;
-var EVAL_RESERVE = -20;
-var EVAL_SHIELD_TILE = 10;
-var EVAL_HOME_STRETCH = 16;
-var WIN_VALUE = 1e6;
-function pickBotMove(state, moves, rand = Math.random, difficulty = "standard") {
-  if (difficulty === "easy") return pickEasy(state, moves, rand);
-  if (difficulty === "hard") return pickHard(state, moves, rand);
-  return pickStandard(state, moves, rand);
-}
-function pickStandard(state, moves, rand) {
-  let bestIndex = 0;
-  let bestScore = -Infinity;
-  for (let i = 0; i < moves.length; i++) {
-    const m = moves[i];
-    let score = 0;
-    if (m.causesWin) score += 1e3;
-    if (m.captures.length > 0) {
-      const victimProgress = Math.max(
-        ...m.captures.map((id) => {
-          const t = state.tokens.find((tok) => tok.id === id);
-          return t ? t.position : 0;
-        })
-      );
-      score += 400 + victimProgress * 10;
-    }
-    if (m.landsOnShield) score += 250;
-    if (m.to === PATH_LENGTH_PER_PLAYER) score += 300;
-    if (m.from === -1) score += 60;
-    const fromContested = m.from >= 0 && BOARD_LAYOUT[m.from]?.isContested;
-    const toSafe = m.to < PATH_LENGTH_PER_PLAYER && !BOARD_LAYOUT[m.to]?.isContested;
-    if (fromContested && toSafe) score += 120;
-    if (m.to < PATH_LENGTH_PER_PLAYER && BOARD_LAYOUT[m.to]?.isContested && BOARD_LAYOUT[m.to]?.type !== "shield") {
-      const threatened = state.tokens.some(
-        (t) => t.owner !== state.currentPlayer && t.position >= 0 && m.to - t.position >= 1 && m.to - t.position <= 4
-      );
-      if (threatened) score -= 80;
-    }
-    score += m.to;
-    score += rand() * 20;
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = i;
-    }
-  }
-  return bestIndex;
-}
-function pickEasy(state, moves, rand) {
-  const winIdx = moves.findIndex((m) => m.causesWin);
-  if (winIdx !== -1) return winIdx;
-  if (rand() < EASY_HEED_P) return pickStandard(state, moves, rand);
-  return Math.floor(rand() * moves.length);
-}
-function evalSide(state, player) {
-  let score = 0;
-  for (const t of state.tokens) {
-    if (t.owner !== player) continue;
-    if (t.position >= PATH_LENGTH_PER_PLAYER) {
-      score += EVAL_ESCAPED;
-      continue;
-    }
-    if (t.position < 0) {
-      score += EVAL_RESERVE;
-      continue;
-    }
-    score += EVAL_PER_TILE * t.position;
-    if (t.position >= 12) score += EVAL_HOME_STRETCH;
-    if (BOARD_LAYOUT[t.position].type === "shield") score += EVAL_SHIELD_TILE;
-  }
-  return score;
-}
-function evaluateClassic(state, me) {
-  const foe = me === "p1" ? "p2" : "p1";
-  return evalSide(state, me) - evalSide(state, foe);
-}
-function myBestShallow(state, flip, me) {
-  if (flip === 0) return evaluateClassic(state, me);
-  const moves = getLegalMoves(state, flip);
-  if (moves.length === 0) return evaluateClassic(state, me);
-  let best = -Infinity;
-  for (const m of moves) {
-    const v = m.causesWin ? WIN_VALUE : evaluateClassic(applyMove(state, m), me);
-    if (v > best) best = v;
-  }
-  return best;
-}
-function myTurnExpectation(state, me) {
-  let value = 0;
-  for (let f = 0; f <= 4; f++) {
-    value += FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL * myBestShallow(state, f, me);
-  }
-  return value;
-}
-function oppExtraTurnExpectation(state, me) {
-  let value = 0;
-  for (let f = 0; f <= 4; f++) {
-    let leaf;
-    if (f === 0) {
-      leaf = evaluateClassic(state, me);
-    } else {
-      const moves = getLegalMoves(state, f);
-      if (moves.length === 0) {
-        leaf = evaluateClassic(state, me);
-      } else {
-        leaf = Infinity;
-        for (const m of moves) {
-          const v = m.causesWin ? -WIN_VALUE : evaluateClassic(applyMove(state, m), me);
-          if (v < leaf) leaf = v;
-        }
-      }
-    }
-    value += FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL * leaf;
-  }
-  return value;
-}
-function worstOppReply(state, flip, me) {
-  if (flip === 0) return evaluateClassic(state, me);
-  const moves = getLegalMoves(state, flip);
-  if (moves.length === 0) return evaluateClassic(state, me);
-  let worst = Infinity;
-  for (const m of moves) {
-    let v;
-    if (m.causesWin) {
-      v = -WIN_VALUE;
-    } else {
-      const next = applyMove(state, m);
-      v = next.currentPlayer === me ? myTurnExpectation(next, me) : oppExtraTurnExpectation(next, me);
-    }
-    if (v < worst) worst = v;
-  }
-  return worst;
-}
-function oppReplyExpectation(state, me) {
-  let value = 0;
-  for (let f = 0; f <= 4; f++) {
-    value += FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL * worstOppReply(state, f, me);
-  }
-  return value;
-}
-function bestOwnFollowup(state, flip, me) {
-  if (flip === 0) return evaluateClassic(state, me);
-  const moves = getLegalMoves(state, flip);
-  if (moves.length === 0) return evaluateClassic(state, me);
-  let best = -Infinity;
-  for (const m of moves) {
-    let v;
-    if (m.causesWin) {
-      v = WIN_VALUE;
-    } else {
-      const next = applyMove(state, m);
-      v = next.currentPlayer === me ? evaluateClassic(next, me) : oppReplyExpectation(next, me);
-    }
-    if (v > best) best = v;
-  }
-  return best;
-}
-function pickHard(state, moves, rand) {
-  const me = state.currentPlayer;
-  let bestIndex = 0;
-  let bestScore = -Infinity;
-  for (let i = 0; i < moves.length; i++) {
-    const m = moves[i];
-    let value;
-    if (m.causesWin) {
-      value = WIN_VALUE;
-    } else {
-      const next = applyMove(state, m);
-      value = 0;
-      for (let f = 0; f <= 4; f++) {
-        const p = FLIP_WEIGHTS[f] / FLIP_WEIGHT_TOTAL;
-        value += p * (next.currentPlayer === me ? bestOwnFollowup(next, f, me) : worstOppReply(next, f, me));
-      }
-    }
-    value += rand() * 1e-3;
-    if (value > bestScore) {
-      bestScore = value;
-      bestIndex = i;
-    }
-  }
-  return bestIndex;
 }
 
 // master-killer.ts
@@ -2082,6 +1829,14 @@ function applyCrescendo(state, power, mover) {
   };
 }
 
+// bot-difficulty.ts
+var FLIP_WEIGHTS = [1, 4, 6, 4, 1];
+var FLIP_WEIGHT_TOTAL = 16;
+var EASY_HEED_P = 0.35;
+function normalizeDifficulty(d) {
+  return d === "easy" || d === "hard" ? d : "standard";
+}
+
 // master-killer-bot.ts
 var MK_STD_NECRO_SHIELD_EXTRA = 250;
 var MK_STD_NECRO_RACE_SCALE = 1;
@@ -3364,9 +3119,9 @@ function stateEventOf(doc) {
 function commitFrame(doc, now, ev) {
   return pushEvent({ ...doc, waitingSince: now, rescueAttempted: false }, ev);
 }
-function freshMatchFields(variant) {
+function freshMatchFields() {
   return {
-    phase: variant === "masterKiller" ? "classPick" : "opening",
+    phase: "classPick",
     openingFlips: { p1: null, p2: null },
     state: initialState(),
     currentFlip: null,
@@ -3377,7 +3132,7 @@ function freshMatchFields(variant) {
     wasSkipped: false,
     skippedPlayer: null,
     skipReason: null,
-    mk: variant === "masterKiller" ? toWirePower(initialPowerState()) : null,
+    mk: toWirePower(initialPowerState()),
     classesPicked: { p1: false, p2: false },
     currentPowerMoves: null,
     lastPush: null,
@@ -3425,7 +3180,7 @@ function freshMatchFields(variant) {
     rescueAttempted: false
   };
 }
-function createRoomDoc(code, vsCpu, variant, p1Token, now, unlisted = false, difficulty = "standard") {
+function createRoomDoc(code, vsCpu, p1Token, now, unlisted = false, difficulty = "standard") {
   const doc = {
     code,
     vsCpu,
@@ -3436,16 +3191,16 @@ function createRoomDoc(code, vsCpu, variant, p1Token, now, unlisted = false, dif
     // cpu rooms are "full" with one human
     unlisted,
     version: 1,
-    variant,
+    variant: "masterKiller",
     waitingSince: now,
     seq: 0,
     events: [],
     seatLastSeen: { p1: now, p2: now },
     chat: [],
-    ...freshMatchFields(variant)
+    ...freshMatchFields()
   };
   if (!doc.started) return doc;
-  return doc.phase === "classPick" ? pushEvent(doc, classPickEventOf(doc)) : pushEvent(doc, openingEventOf(doc, null));
+  return pushEvent(doc, classPickEventOf(doc));
 }
 function startRoom(doc, now) {
   const started = { ...doc, started: true, waitingSince: now };
@@ -3493,29 +3248,11 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
       if (doc.state.winner) return { doc, error: "Game is over" };
       if (doc.phase !== "play" || doc.state.currentPlayer !== seat) return { doc, error: "Not your turn" };
       if (doc.currentFlip === null) return { doc, error: "No flip yet" };
-      if (doc.variant === "masterKiller") {
-        if (!doc.mk || !doc.currentPowerMoves) return { doc, error: "No moves" };
-        if (action.moveIndex < 0 || action.moveIndex >= doc.currentPowerMoves.length) {
-          return { doc, error: "Invalid move index" };
-        }
-        return { doc: applyMkMove(doc, seat, doc.currentPowerMoves[action.moveIndex], now, rand) };
+      if (!doc.mk || !doc.currentPowerMoves) return { doc, error: "No moves" };
+      if (action.moveIndex < 0 || action.moveIndex >= doc.currentPowerMoves.length) {
+        return { doc, error: "Invalid move index" };
       }
-      const moves = getLegalMoves(doc.state, doc.currentFlip);
-      if (action.moveIndex < 0 || action.moveIndex >= moves.length) return { doc, error: "Invalid move index" };
-      const move = moves[action.moveIndex];
-      let next = {
-        ...doc,
-        state: applyMove(doc.state, move),
-        currentFlip: null,
-        captures: { ...doc.captures, [seat]: doc.captures[seat] + move.captures.length },
-        lastMove: move,
-        lastMovePlayer: seat,
-        wasSkipped: false,
-        skippedPlayer: null,
-        skipReason: null
-      };
-      next = commitFrame(next, now, stateEventOf(next));
-      return { doc: next };
+      return { doc: applyMkMove(doc, seat, doc.currentPowerMoves[action.moveIndex], now, rand) };
     }
     case "usePower": {
       const err = validateUsePower(doc, seat, action.action);
@@ -3556,14 +3293,13 @@ function applyAction(doc, seat, action, now, rand = Math.random) {
     }
     case "newMatch": {
       if (doc.state.winner === null) return { doc, error: "Current match hasn't ended" };
-      let next = { ...doc, ...freshMatchFields(doc.variant), waitingSince: now, rescueAttempted: false };
-      next = next.phase === "classPick" ? pushEvent(next, classPickEventOf(next)) : pushEvent(next, openingEventOf(next, null));
-      return { doc: next };
+      const next = { ...doc, ...freshMatchFields(), waitingSince: now, rescueAttempted: false };
+      return { doc: pushEvent(next, classPickEventOf(next)) };
     }
   }
 }
 function validateUsePower(doc, seat, a) {
-  if (doc.variant !== "masterKiller" || !doc.mk) return "Not a Master Killer room";
+  if (!doc.mk) return "Not a Master Killer room";
   if (doc.state.winner !== null) return "Game is over";
   if (doc.phase !== "play" || doc.state.currentPlayer !== seat) return "Not your turn";
   const cls = doc.mk.classes[seat];
@@ -4384,7 +4120,7 @@ function autoSkipDelay(doc) {
   const mover = doc.state.currentPlayer;
   const isBot = doc.vsCpu && mover === "p2";
   if (isBot) return AUTO_SKIP_DELAY_MS;
-  if (doc.variant === "masterKiller" && doc.mk) {
+  if (doc.mk) {
     const p = fromWirePower(doc.mk);
     if (doc.mk.classes[mover] === "mage" && (canReflipAgain(p, mover) || doc.currentFlip !== null && doc.currentFlip !== 0 && getBlinkTiles(doc.state, p, mover).length > 0)) {
       return AUTO_SKIP_WITH_RESCUE_MS;
@@ -4449,9 +4185,9 @@ function tickOnce(doc, now, rand) {
     return commitTurnFlip(doc, now, rand);
   }
   const flip = doc.currentFlip;
-  const moves = doc.variant === "masterKiller" ? doc.currentPowerMoves ?? [] : getLegalMoves(doc.state, flip);
+  const moves = doc.currentPowerMoves ?? [];
   const isBotTurn = doc.vsCpu && doc.state.currentPlayer === "p2";
-  if (isBotTurn && doc.variant === "masterKiller" && doc.mk && moves.length === 0 && !doc.rescueAttempted && elapsed >= BOT_RESCUE_THINK_MS) {
+  if (isBotTurn && doc.mk && moves.length === 0 && !doc.rescueAttempted && elapsed >= BOT_RESCUE_THINK_MS) {
     const power = fromWirePower(doc.mk);
     const action = pickBotPowerAction(
       doc.state,
@@ -4489,36 +4225,17 @@ function tickOnce(doc, now, rand) {
     };
     return commitFrame(next, now, stateEventOf(next));
   }
-  if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS) {
-    if (doc.variant === "masterKiller" && doc.mk) {
-      const power = fromWirePower(doc.mk);
-      const action = pickBotPowerAction(
-        doc.state,
-        power,
-        doc.currentPowerMoves ?? [],
-        flip,
-        rand,
-        doc.difficulty ?? "standard"
-      );
-      if (action) return applyBotAction(doc, "p2", action, now, rand);
-      return doc;
-    }
-    const botMoves = getLegalMoves(doc.state, flip);
-    if (botMoves.length === 0) return doc;
-    const idx = pickBotMove(doc.state, botMoves, rand, doc.difficulty ?? "standard");
-    const move = botMoves[idx];
-    let next = {
-      ...doc,
-      state: applyMove(doc.state, move),
-      currentFlip: null,
-      captures: { ...doc.captures, p2: doc.captures.p2 + move.captures.length },
-      lastMove: move,
-      lastMovePlayer: "p2",
-      wasSkipped: false,
-      skippedPlayer: null,
-      skipReason: null
-    };
-    return commitFrame(next, now, stateEventOf(next));
+  if (isBotTurn && moves.length > 0 && elapsed >= BOT_THINK_MS && doc.mk) {
+    const power = fromWirePower(doc.mk);
+    const action = pickBotPowerAction(
+      doc.state,
+      power,
+      doc.currentPowerMoves ?? [],
+      flip,
+      rand,
+      doc.difficulty ?? "standard"
+    );
+    if (action) return applyBotAction(doc, "p2", action, now, rand);
   }
   return doc;
 }
@@ -4602,7 +4319,7 @@ function commitTurnFlip(doc, now, rand) {
   let lastThaw = null;
   let lastWallBleed = null;
   let lastInspireFaded = null;
-  if (doc.variant === "masterKiller" && mk) {
+  if (mk) {
     let power = fromWirePower(mk);
     if (flip === 0) {
       zeroFlipChargeBefore = power.charges[state.currentPlayer];
@@ -4664,8 +4381,7 @@ function viewFor(doc, seat, since, now) {
   const oldest = doc.events.length > 0 ? doc.events[0].seq : doc.seq + 1;
   const resync = since < oldest - 1;
   const yourTurn = doc.phase === "play" && doc.state.winner === null && doc.state.currentPlayer === seat;
-  const legalMoves = doc.variant === "classic" && doc.currentFlip !== null && yourTurn ? getLegalMoves(doc.state, doc.currentFlip) : null;
-  const powerMoves = doc.variant === "masterKiller" && yourTurn ? doc.currentPowerMoves : null;
+  const powerMoves = yourTurn ? doc.currentPowerMoves : null;
   const opp = otherSeat(seat);
   const oppSeen = doc.seatLastSeen[opp];
   const oppIsBot = doc.vsCpu && opp === "p2";
@@ -4677,11 +4393,11 @@ function viewFor(doc, seat, since, now) {
     phase: doc.phase,
     vsCpu: doc.vsCpu,
     difficulty: doc.vsCpu ? doc.difficulty ?? "standard" : null,
-    variant: doc.variant,
+    variant: "masterKiller",
     state: doc.state,
     flip: doc.currentFlip,
     openingFlips: { ...doc.openingFlips },
-    classPick: doc.variant === "masterKiller" && doc.mk ? {
+    classPick: doc.mk ? {
       classes: {
         p1: doc.classesPicked.p1 ? doc.mk.classes.p1 : null,
         p2: doc.classesPicked.p2 ? doc.mk.classes.p2 : null
@@ -4690,7 +4406,6 @@ function viewFor(doc, seat, since, now) {
     } : null,
     power: publicPower(doc),
     yourTurn,
-    legalMoves,
     powerMoves,
     gameOver: doc.state.winner ? { winner: doc.state.winner, stats: { turns: doc.turns, captures: { ...doc.captures } } } : null,
     opponentAway: !oppIsBot && doc.started && now - oppSeen > OPPONENT_AWAY_MS,
@@ -4725,7 +4440,9 @@ return 1
 `;
 async function loadDoc(code) {
   const raw = await getRedis().get(roomKey(code));
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+  const doc = JSON.parse(raw);
+  return doc.mk ? doc : null;
 }
 async function casStore(prevVersion, next) {
   next.version = prevVersion + 1;
@@ -4781,7 +4498,7 @@ async function handleJoin(msg) {
           player: "p2",
           room: code,
           vsCpu: next.vsCpu,
-          variant: next.variant,
+          variant: "masterKiller",
           seatToken: token2,
           view: viewFor(next, "p2", 0, now)
         };
@@ -4791,11 +4508,10 @@ async function handleJoin(msg) {
     return json({ error: `Room ${code} is already full` }, 409);
   }
   const vsCpu = msg.mode === "cpu";
-  const variant = msg.variant === "masterKiller" ? "masterKiller" : "classic";
   const token = randomUUID();
   for (let attempt = 0; attempt < 20; attempt++) {
     const code = newRoomCode();
-    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty));
+    let doc = createRoomDoc(code, vsCpu, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty));
     doc = tick(doc, now);
     const ok = await getRedis().set(roomKey(code), JSON.stringify(doc), "EX", ROOM_TTL_S, "NX");
     if (ok === "OK") {
@@ -4804,7 +4520,7 @@ async function handleJoin(msg) {
         player: "p1",
         room: code,
         vsCpu,
-        variant,
+        variant: "masterKiller",
         seatToken: token,
         view: viewFor(doc, "p1", 0, now)
       };
@@ -4835,12 +4551,12 @@ async function POST(request) {
           if (!raw) return void stale.push(code);
           const doc = JSON.parse(raw);
           const hostFresh = now2 - doc.seatLastSeen.p1 < LOBBY_HOST_FRESH_MS;
-          if (doc.started || doc.seats.p2 !== null || doc.unlisted || !hostFresh) {
+          if (doc.started || doc.seats.p2 !== null || doc.unlisted || !hostFresh || !doc.mk) {
             return void stale.push(code);
           }
           rooms.push({
             code,
-            variant: doc.variant,
+            variant: "masterKiller",
             ageSeconds: Math.max(0, Math.round((now2 - doc.waitingSince) / 1e3))
           });
         });

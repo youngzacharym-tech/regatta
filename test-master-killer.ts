@@ -1,9 +1,8 @@
 // ============================================================================
 // test-master-killer.ts — hand-constructed scenario checks for
-// master-killer.ts. No formal test framework exists in this repo (see
-// play-random-game.ts / batch-random-games.ts for the established
-// script-based convention) — this follows the same pattern: plain
-// assertions, clear PASS/FAIL summary, non-zero exit on any failure.
+// master-killer.ts. No formal test framework exists in this repo — the
+// convention is plain scripts: plain assertions, clear PASS/FAIL summary,
+// non-zero exit on any failure.
 //
 // Run: npx tsx test-master-killer.ts
 // ============================================================================

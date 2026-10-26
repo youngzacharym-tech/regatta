@@ -5,9 +5,9 @@
 // ============================================================================
 
 import type { GameState, Move, PlayerId } from "./rulebook";
-// Master Killer mode's message shapes below are ADDITIVE ONLY — every field
-// they touch on existing message types is optional and populated only in
-// masterKiller rooms. Classic-mode broadcasts are byte-identical to before.
+// The Master Killer fields below are still marked optional — they were added
+// alongside the classic ruleset, which was cut on 2026-10-25. Every room is a
+// Master Killer room now, so they are always populated in practice.
 import type { PlayerClass, PowerMove } from "./master-killer";
 
 /** One line of in-match chat. `seat` is the sender's protocol seat (the
@@ -39,8 +39,9 @@ export type RoomRequest =
       mode: "cpu" | "create" | "join";
       /** Room code, required for mode "join". */
       room?: string;
-      /** Ruleset for a NEW room; ignored for mode "join". */
-      variant?: "classic" | "masterKiller";
+      /** IGNORED since the Regatta cut: every room is Master Killer. Clients
+       *  cached from before the cut still send it. */
+      variant?: string;
       /** Create a PRIVATE room: joinable by code, hidden from the lobby. */
       unlisted?: boolean;
       /** CPU opponent strength for mode "cpu"; ignored otherwise. ADDITIVE:
@@ -81,7 +82,8 @@ export interface RoomJoinResponse {
   player: PlayerId;
   room: string;
   vsCpu: boolean;
-  variant: "classic" | "masterKiller";
+  /** Always "masterKiller" — kept for clients cached from before the cut. */
+  variant: "masterKiller";
   seatToken: string;
   view: RoomView;
 }
@@ -93,7 +95,8 @@ export type RoomResponse = RoomView & { error?: string };
 /** One open room in the public lobby list. */
 export interface LobbyRoom {
   code: string;
-  variant: "classic" | "masterKiller";
+  /** Always "masterKiller" — kept for clients cached from before the cut. */
+  variant: "masterKiller";
   /** Seconds the host has been waiting for an opponent. */
   ageSeconds: number;
 }
@@ -116,9 +119,8 @@ export type ServerMessage =
        *  lifetime, so clients reconnect and present this to resume their
        *  seat mid-game. */
       seatToken: string;
-      /** Which ruleset this room plays. Classic omits this in spirit (it's
-       *  always "classic" there) — clients branch their whole UI flow on it. */
-      variant: "classic" | "masterKiller";
+      /** Which ruleset this room plays — always Master Killer now. */
+      variant: "masterKiller";
     }
   | {
       type: "waiting";
@@ -487,9 +489,6 @@ export type ClientMessage =
       mode: "cpu" | "create" | "join";
       /** Required for mode "join". */
       room?: string;
-      /** Ruleset for a NEW room (mode "cpu"/"create"). Ignored for mode
-       *  "join" — you play whatever the room you're joining already is. */
-      variant?: "classic" | "masterKiller";
       /** CPU strength for mode "cpu"; ignored otherwise (see RoomRequest's
        *  join op — same additive field, same server-side whitelist). */
       difficulty?: "easy" | "standard" | "hard";

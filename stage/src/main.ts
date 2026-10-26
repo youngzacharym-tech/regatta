@@ -26,9 +26,8 @@ import { createFaceoff } from "./faceoff.ts";
 import { createFaceoffFigures } from "./faceoff3d.ts";
 import { patchFigureMaterial } from "./figure-material.ts";
 import { createGamepadControls, rumble, type TableStep, type TableTarget } from "./gamepad.ts";
-// Master Killer mode — additive only. Everything below is inert in classic
-// rooms (myVariant stays "classic", currentPower stays null, and every
-// branch that reads them is gated accordingly).
+// The Master Killer rules. currentPower stays null outside a match (the
+// menu, the class pick), and every branch that reads it is gated on that.
 import {
   CHARGE_CAP,
   CHARGED_SHOT_COST,
@@ -112,8 +111,8 @@ const API_URL = resolveApiURL();
 const GLB_URL = "/board.glb";
 /** Flip coins + the hooded stand-in figures (tools/build_pieces_mk.py). */
 const PIECES_URL = "/pieces-core.glb";
-/** Master Killer class figurines — lazy-loaded only when an MK room is
- *  seen (ensureMkPieces), never on the menu or in classic rooms. */
+/** Master Killer class figurines — lazy-loaded only when a room is seen
+ *  (ensureMkPieces), never on the menu. */
 const PIECES_MK_URL = "/figures.glb";
 
 // ---------------------------------------------------------------------------
@@ -822,11 +821,10 @@ for (let i = 0; i < 8; i++) {
 // placement and the Red/Blue label, which stay viewer-relative).
 let sculptedTokenGeos: { red: THREE.BufferGeometry; blue: THREE.BufferGeometry } | null = null;
 
-// Master Killer class-token geometries (from pieces-mk.glb): per class, the
-// red-team and blue-team fused sculpts — same blank stone, class relief
-// (bow / crescent / shield) instead of blossom/star. Populated all-or-nothing
-// by ensureMkPieces; until then (or forever, if the fetch fails) the classic
-// sculpts stand in.
+// Master Killer class figurines (from figures.glb): per class, the red-team
+// and blue-team sculpts. Populated all-or-nothing by ensureMkPieces; until
+// then (or forever, if the fetch fails) the hooded stand-ins above hold the
+// stones' places.
 let classTokenGeos: Partial<
   Record<PlayerClass, { red: THREE.BufferGeometry; blue: THREE.BufferGeometry }>
 > | null = null;
@@ -834,15 +832,13 @@ let classTokenGeos: Partial<
 function applyTokenGeometries() {
   markers.forEach((marker, i) => {
     const owner: PlayerId = i < 4 ? "p1" : "p2";
-    // Master Killer rooms: once a seat's class is known (class pick or the
-    // authoritative power block), its four stones wear that class's sculpt.
-    // Classic rooms and the pre-pick moments keep blossom/
-    // star; a missing pieces-mk.glb also falls back there — never an
-    // invisible stone. Geometry pointer swap only: the marker's material
-    // (team tint, ward/Bulwark emissive), raycast identity, and flight
-    // state are untouched.
-    const cls =
-      myVariant === "masterKiller" ? currentPower?.classes[owner] ?? pickedClasses[owner] : null;
+    // Once a seat's class is known (class pick or the authoritative power
+    // block), its four stones wear that class's figurine. The pre-pick
+    // moments keep the hooded stand-ins; a missing figures.glb also falls
+    // back there — never an invisible stone. Geometry pointer swap only: the
+    // marker's material (team tint, ward/Bulwark emissive), raycast identity,
+    // and flight state are untouched.
+    const cls = currentPower?.classes[owner] ?? pickedClasses[owner];
     const geos = (cls ? classTokenGeos?.[cls] : null) ?? sculptedTokenGeos;
     if (geos) marker.mesh.geometry = owner === "p1" ? geos.red : geos.blue;
   });
@@ -855,8 +851,8 @@ function applyTokenGeometries() {
   // only once the sculpted materials are live (vertexColors on) — the
   // pre-load placeholder red/blue materials already tell the sides apart.
   {
-    const p1c = myVariant === "masterKiller" ? currentPower?.classes.p1 ?? pickedClasses.p1 : null;
-    const p2c = myVariant === "masterKiller" ? currentPower?.classes.p2 ?? pickedClasses.p2 : null;
+    const p1c = currentPower?.classes.p1 ?? pickedClasses.p1;
+    const p2c = currentPower?.classes.p2 ?? pickedClasses.p2;
     const mirror = p1c !== null && p1c === p2c;
     const me: PlayerId = myRole ?? "p1";
     markers.forEach((marker, i) => {
@@ -1282,10 +1278,9 @@ gltfLoader.load(
   (err) => console.error("Failed to load", PIECES_URL, err),
 );
 
-// Fetch the Master Killer class tokens the FIRST time an MK room is seen
-// (join, resume, or reload — classic rooms and the menu never
-// pay for it), so the sculpts are usually decoded before the class pick
-// resolves. On any failure the classic sculpts simply remain.
+// Fetch the class figurines the FIRST time a room is seen (join, resume, or
+// reload — the menu never pays for it), so the sculpts are usually decoded
+// before the class pick resolves. On any failure the stand-ins simply remain.
 let mkPiecesRequested = false;
 function ensureMkPieces() {
   if (mkPiecesRequested) return;
@@ -1297,7 +1292,7 @@ function ensureMkPieces() {
         (gltf.scene.getObjectByName(name) as THREE.Mesh | undefined)?.geometry;
       const loaded: NonNullable<typeof classTokenGeos> = {};
       // Per-class tolerance (was all-or-nothing): a class whose sculpt
-      // hasn't shipped in the glb yet simply keeps the classic blossom/star
+      // hasn't shipped in the glb yet simply keeps the hooded stand-in
       // (applyTokenGeometries' own fallback) instead of dragging every
       // OTHER class down with it — the seam that lets a new class's rules
       // ship ahead of (or without) its Blender relief.
@@ -1313,7 +1308,7 @@ function ensureMkPieces() {
         const red = geoOf(`token_${cls}_red`);
         const blue = geoOf(`token_${cls}_blue`);
         if (!red || !blue) {
-          console.warn(`pieces-mk.glb has no ${cls} sculpt — classic tokens for that class`);
+          console.warn(`${PIECES_MK_URL} has no ${cls} sculpt — stand-in tokens for that class`);
           continue;
         }
         // Same pivot rule as pieces.glb: local base at y = -0.08.
@@ -1743,9 +1738,8 @@ function updateCorpseDecals() {
  *  wall's protected-ness is simpler — the server already hands over the
  *  exact token id -> kind map (walls), and Vanish is its own separate map
  *  (2026-09-17, split off the wall system — see PowerState.vanished).
- *  Classic rooms (currentPower === null) always take the clear-everything
- *  branch — a no-op against the materials' own black-emissive default, so
- *  classic visuals are untouched. */
+ *  With no match up (currentPower === null) it takes the clear-everything
+ *  branch — a no-op against the materials' own black-emissive default. */
 /** The most recent GameState the client rendered. Needed by the Snare
  *  targeting flow, which has to turn a tapped STONE into the tile in front
  *  of it — the one place a dock action needs board positions rather than
@@ -1953,7 +1947,7 @@ function flashGems(container: HTMLDivElement, kind: "flare" | "spend") {
 /** Sync both avatar plates (portrait, gems, name, turn glow). Each plate
  *  appears as soon as that side's class is KNOWN — during class pick that
  *  comes from pickedClasses; once the match is underway, currentPower is
- *  authoritative. Classic rooms take the hide branch. */
+ *  authoritative. The menu (no classes known) takes the hide branch. */
 function updatePlates(state: GameState | null) {
   // Stones first: every path where class knowledge appears or vanishes
   // (class pick, replays, resyncs, seat/menu resets) already funnels through
@@ -1966,7 +1960,7 @@ function updatePlates(state: GameState | null) {
   const theirSide: PlayerId = mySide === "p1" ? "p2" : "p1";
   const mine = currentPower ? currentPower.classes[mySide] : pickedClasses[mySide];
   const theirs = currentPower ? currentPower.classes[theirSide] : pickedClasses[theirSide];
-  if (myVariant !== "masterKiller" || (!mine && !theirs)) {
+  if (!mine && !theirs) {
     plateMe.classList.remove("show", "turn");
     plateThem.classList.remove("show", "turn");
     return;
@@ -2003,8 +1997,7 @@ let currentMoves: Move[] | null = null;
 /** Every roll of the player's coins waits for a tap on their pile. */
 let rollPending: { flip: number; legalMoves: Move[] | null; state: GameState } | null = null;
 
-// --- Master Killer mode (additive; all null/"classic" in classic rooms) ---
-let myVariant: "classic" | "masterKiller" = "classic";
+// --- Master Killer power state (null outside a match) ---
 /** Public class/charge/ward info — mirrors protocol.ts's `state.power`. */
 let currentPower: {
   classes: Record<PlayerId, PlayerClass>;
@@ -2306,7 +2299,7 @@ const ABILITY_INFO: Record<string, { name: string; cost: string; desc: string; k
     name: "Exhume",
     cost: "Ultimate · 3 shield landings in a row",
     klass: "necromancer",
-    desc: `Death honors no finish line: drag one of the opponent's ESCAPED stones back aboard at tile ${EXHUME_RETURN_POSITION + 1} — if that tile is taken it settles on the nearest free one behind — and it must sail the home stretch again. The one power that can undo an escape.`,
+    desc: `Death honors no finish line: drag one of the opponent's ESCAPED stones back aboard at tile ${EXHUME_RETURN_POSITION + 1} — if that tile is taken it settles on the nearest free one behind — and it must run the home stretch again. The one power that can undo an escape.`,
   },
   bless: {
     name: "Bless",
@@ -2972,7 +2965,7 @@ function abilityState(ability: string, charges: number): { state: DockState; rea
 function updateDock(active?: boolean) {
   if (active !== undefined) dockActive = active;
   const mySide: PlayerId = myRole ?? "p1";
-  const cls = myVariant === "masterKiller" && currentPower ? currentPower.classes[mySide] : null;
+  const cls = currentPower ? currentPower.classes[mySide] : null;
   if (!cls) {
     disarm();
     dockEl.classList.remove("show", "off");
@@ -4005,14 +3998,13 @@ exitToggle.addEventListener("click", () => {
 });
 exitRestart.addEventListener("click", () => {
   exitConfirm.classList.remove("show");
-  const wasTutorial = tutorialMode;
-  const variant = myVariant; // resetToMenu wipes these — capture first
+  const wasTutorial = tutorialMode; // resetToMenu wipes these — capture first
   const difficulty = cpuDifficulty ?? undefined; // keep the same foe on restart
   resetToMenu("");
   menuEl.classList.remove("show"); // straight into the fresh game, no menu flash
   tutorialMode = wasTutorial;
   coachShown.clear();
-  sendToServer({ type: "join", mode: "cpu", variant, difficulty });
+  sendToServer({ type: "join", mode: "cpu", difficulty });
 });
 
 // ---------------------------------------------------------------------------
@@ -4347,7 +4339,7 @@ function tutorialChargeOnOffer(): boolean {
  *  the kit, a Charge on offer, a stone in the Archer's reach, the shield
  *  streak, the ultimate. Called whenever the overlay or the roll changes. */
 function coachTurn() {
-  if (!tutorialMode || !currentPower || myVariant !== "masterKiller") return;
+  if (!tutorialMode || !currentPower) return;
   const mySide: PlayerId = myRole ?? "p1";
   const p = currentPower;
   // My roll is revealed and the dock is live: the moment to act.
@@ -4471,8 +4463,8 @@ function announceFromState(msg: {
 }) {
   const chargeFor = (player: PlayerId): string =>
     msg.lastChargeEvent && msg.lastChargeEvent.player === player ? chargeSuffix(msg.lastChargeEvent.delta) : "";
-  // Class lookup for the proc banner — absent in classic rooms, so every
-  // showProc below is inert there by construction.
+  // Class lookup for the proc banner — null when the event carries no power
+  // block, so every showProc below is inert then by construction.
   const classOf = (player: PlayerId | null | undefined): PlayerClass | null =>
     player && msg.power ? (msg.power.classes[player] ?? null) : null;
 
@@ -5278,8 +5270,7 @@ const prevBargainKey: Record<PlayerId, string> = { p1: "", p2: "" };
 /** Apply the response's CURRENT overlay — idempotent, interactive state. */
 function applyOverlay(v: RoomResponse) {
   const mySide: PlayerId = myRole ?? "p1";
-  myVariant = v.variant;
-  if (v.variant === "masterKiller") ensureMkPieces(); // covers resume + reload
+  ensureMkPieces(); // covers resume + reload
   inCpuGame = v.vsCpu;
   cpuDifficulty = v.difficulty ?? null; // covers join, resume, AND reload
 
@@ -5347,7 +5338,7 @@ function applyOverlay(v: RoomResponse) {
   // edges) must never leave a stale ward/Bulwark rig on the board.
   updateTokenTints(v.state);
   const mine = v.yourTurn;
-  const movesForTap: Move[] | null = myVariant === "masterKiller" ? v.powerMoves : v.legalMoves;
+  const movesForTap: Move[] | null = v.powerMoves;
   updatePlates(v.state);
 
   if (v.flip !== null && mine) {
@@ -5898,17 +5889,10 @@ async function pollLoop() {
 }
 
 /** Reset all per-match client state and seat us in a (re)joined room. */
-function seatSelf(
-  seat: PlayerId,
-  room: string,
-  vsCpu: boolean,
-  variant: "classic" | "masterKiller",
-  difficulty: BotDifficulty | null = null,
-) {
+function seatSelf(seat: PlayerId, room: string, vsCpu: boolean, difficulty: BotDifficulty | null = null) {
   myRole = seat;
   myRoom = room;
-  myVariant = variant;
-  if (variant === "masterKiller") ensureMkPieces(); // decode during class pick
+  ensureMkPieces(); // decode during class pick
   inCpuGame = vsCpu;
   cpuDifficulty = vsCpu ? (difficulty ?? "standard") : null;
   rollPending = null;
@@ -5935,23 +5919,17 @@ function seatSelf(
     : "You are Red. Waiting for opponent…";
 }
 
-function doJoin(
-  mode: "cpu" | "create" | "join",
-  room?: string,
-  variant?: "classic" | "masterKiller",
-  unlisted = false,
-  difficulty?: BotDifficulty,
-) {
+function doJoin(mode: "cpu" | "create" | "join", room?: string, unlisted = false, difficulty?: BotDifficulty) {
   menuError.textContent = "";
   setStatus("Joining…");
-  post({ op: "join", mode, room, variant, unlisted, difficulty })
+  post({ op: "join", mode, room, unlisted, difficulty })
     .then((raw) => {
       const j = raw as RoomJoinResponse;
       session = { room: j.room, seat: j.player, seatToken: j.seatToken };
       saveSession(session);
       exitToggle.classList.add("show");
       closeLobby();
-      seatSelf(j.player, j.room, j.vsCpu, j.variant, j.view.difficulty ?? null);
+      seatSelf(j.player, j.room, j.vsCpu, j.view.difficulty ?? null);
       processResponse(j.view as RoomResponse);
       void pollLoop();
     })
@@ -6015,19 +5993,10 @@ const DIFF_NAMES: Record<BotDifficulty, string> = {
 let cpuDifficulty: BotDifficulty | null = null;
 
 // --- Master Killer mode: menu toggle + class-pick overlay ---
-/** Ruleset picked in the menu, sent along with cpu/create joins. Ignored
- *  by the server for mode "join" — you play whatever room you're joining. */
 /** The menu is a two-step flow: WHO first (computer / friend / tutorial),
- *  then only the setup questions that fit — CPU games ask game + foe,
- *  friend games ask game + room, the tutorial asks nothing and just sails.
- *  Mode persists like the volume so returning players land on their game. */
+ *  then only the setup questions that fit — CPU games ask the foe, friend
+ *  games ask the room, the tutorial asks nothing and just starts. */
 let menuIntent: "cpu" | "friend" = "cpu";
-// Master Killer stands alone now: the classic ruleset (and its tutorial) stay
-// in the code until the Regatta cut, but the menu no longer offers them.
-let menuPick: "classic" | "masterKiller" = "masterKiller";
-function selectedVariant(): "classic" | "masterKiller" {
-  return menuPick;
-}
 /** CPU tier picked in the menu, persisted like regatta-volume so the choice
  *  survives reloads. Sent with mode "cpu" joins only. */
 let menuDiff: BotDifficulty = normalizeDifficulty(localStorage.getItem("regatta-cpu-difficulty"));
@@ -6037,22 +6006,10 @@ function selectedDifficulty(): BotDifficulty {
 const menuCpuBtn = document.getElementById("menu-cpu") as HTMLButtonElement;
 const menuCreateBtn = document.getElementById("menu-create") as HTMLButtonElement;
 const menuBrowseBtn = document.getElementById("menu-browse") as HTMLButtonElement;
-const menuModeSeg = document.getElementById("menu-mode-seg") as HTMLDivElement;
 const menuDiffWrap = document.getElementById("menu-diff") as HTMLDivElement;
 const menuDiffSeg = document.getElementById("menu-diff-seg") as HTMLDivElement;
-const menuTitle = document.getElementById("menu-title") as HTMLHeadingElement;
-const menuTagline = document.getElementById("menu-tagline") as HTMLDivElement;
 const menuStepIntent = document.getElementById("menu-step-intent") as HTMLDivElement;
 const menuStepSetup = document.getElementById("menu-step-setup") as HTMLDivElement;
-function applyMenuPick() {
-  const mk = menuPick === "masterKiller";
-  for (const b of menuModeSeg.querySelectorAll("button")) {
-    b.classList.toggle("on", b.dataset.pick === menuPick);
-  }
-  // The marquee follows the pick — the menu IS the game you're about to play.
-  menuTitle.textContent = mk ? "MASTER KILLER" : "REGATTA";
-  menuTagline.textContent = mk ? "a darker table · class powers" : "a race across the board";
-}
 /** Only the questions that fit the intent: foe pick + Begin for CPU games,
  *  room buttons for friends. Everything else never renders. */
 function applyMenuIntent() {
@@ -6065,18 +6022,8 @@ function applyMenuIntent() {
 function showMenuStep(step: "intent" | "setup") {
   menuStepIntent.classList.toggle("show", step === "intent");
   menuStepSetup.classList.toggle("show", step === "setup");
-  if (step === "setup") {
-    applyMenuPick();
-    applyMenuIntent();
-  }
+  if (step === "setup") applyMenuIntent();
 }
-menuModeSeg.addEventListener("click", (e) => {
-  const b = (e.target as HTMLElement).closest("button[data-pick]") as HTMLButtonElement | null;
-  if (!b) return;
-  menuPick = b.dataset.pick as typeof menuPick;
-  localStorage.setItem("regatta-mode", menuPick);
-  applyMenuPick();
-});
 (document.getElementById("menu-go-cpu") as HTMLButtonElement).addEventListener("click", () => {
   menuIntent = "cpu";
   showMenuStep("setup");
@@ -6091,12 +6038,11 @@ menuModeSeg.addEventListener("click", (e) => {
   hideCoach();
   tutorialMode = true;
   coachShown.clear();
-  sendToServer({ type: "join", mode: "cpu", variant: "masterKiller", difficulty: "easy" });
+  sendToServer({ type: "join", mode: "cpu", difficulty: "easy" });
 });
 (document.getElementById("menu-back") as HTMLButtonElement).addEventListener("click", () => {
   showMenuStep("intent");
 });
-applyMenuPick();
 
 /** Reflect menuDiff in the seg — same instant class toggle as the mode seg
  *  (also runs once at load, since localStorage may disagree with the
@@ -6200,7 +6146,7 @@ function hideRoomInfo() {
  *  so only rejections need handling here. */
 function sendToServer(msg: ClientMessage) {
   if (msg.type === "join") {
-    doJoin(msg.mode, msg.room, msg.variant, false, msg.difficulty);
+    doJoin(msg.mode, msg.room, false, msg.difficulty);
     return;
   }
   if (!session) return;
@@ -6263,7 +6209,6 @@ function resetToMenu(message: string) {
   dockKey = "";
   dockActive = false;
   pickedClasses = { p1: null, p2: null };
-  myVariant = "classic";
   setChatAvailable(false); // hide + clear chat back at the menu
   updatePlates(null);
   for (const marker of markers) {
@@ -6291,11 +6236,11 @@ menuCpuBtn.addEventListener("click", () => {
   menuError.textContent = "";
   tutorialMode = false; // the tutorial has its own one-tap path on step 1
   coachShown.clear();
-  sendToServer({ type: "join", mode: "cpu", variant: selectedVariant(), difficulty: selectedDifficulty() });
+  sendToServer({ type: "join", mode: "cpu", difficulty: selectedDifficulty() });
 });
 (document.getElementById("menu-create") as HTMLButtonElement).addEventListener("click", () => {
   menuError.textContent = "";
-  sendToServer({ type: "join", mode: "create", variant: selectedVariant() });
+  sendToServer({ type: "join", mode: "create" });
 });
 function submitJoinCode() {
   const code = menuCodeInput.value.trim().toUpperCase();
@@ -6320,7 +6265,7 @@ const lobbyEl = document.getElementById("lobby") as HTMLDivElement;
 const lobbyList = document.getElementById("lobby-list") as HTMLDivElement;
 let lobbyTimer: ReturnType<typeof setInterval> | null = null;
 
-function renderLobby(rooms: { code: string; variant: string; ageSeconds: number }[]) {
+function renderLobby(rooms: { code: string; ageSeconds: number }[]) {
   lobbyList.innerHTML = "";
   if (rooms.length === 0) {
     const div = document.createElement("div");
@@ -6338,10 +6283,7 @@ function renderLobby(rooms: { code: string; variant: string; ageSeconds: number 
     const meta = document.createElement("span");
     meta.className = "meta";
     const age = r.ageSeconds < 60 ? `${r.ageSeconds}s` : `${Math.round(r.ageSeconds / 60)}m`;
-    meta.innerHTML =
-      r.variant === "masterKiller"
-        ? `<span class="mk">⚔ Master Killer</span> · waiting ${age}`
-        : `Classic · waiting ${age}`;
+    meta.textContent = `waiting ${age}`;
     const go = document.createElement("span");
     go.className = "go";
     go.textContent = "Join";
@@ -6353,7 +6295,7 @@ function renderLobby(rooms: { code: string; variant: string; ageSeconds: number 
 
 async function refreshLobby() {
   try {
-    const v = (await post({ op: "listRooms" })) as { rooms: { code: string; variant: string; ageSeconds: number }[] };
+    const v = (await post({ op: "listRooms" })) as { rooms: { code: string; ageSeconds: number }[] };
     if (lobbyEl.classList.contains("show")) renderLobby(v.rooms);
   } catch {
     /* transient — next refresh retries */
@@ -6382,7 +6324,7 @@ lobbyEl.addEventListener("click", (e) => {
   if (e.target === lobbyEl) closeLobby();
 });
 (document.getElementById("lobby-private") as HTMLButtonElement).addEventListener("click", () => {
-  doJoin("create", undefined, selectedVariant(), true);
+  doJoin("create", undefined, true);
 });
 
 
@@ -6403,7 +6345,7 @@ const GUIDE_SPREADS: [string, string][] = [
      <ol class="toc">
        <li data-goto="1"><span>The Game &amp; the Table</span><i></i><b>I</b></li>
        <li data-goto="2"><span>Taking a Turn</span><i></i><b>II</b></li>
-       <li data-goto="3"><span>Master Killer</span><i></i><b>III</b></li>
+       <li data-goto="3"><span>Champions &amp; Mana</span><i></i><b>III</b></li>
        <li data-goto="4"><span>The Archer</span><i></i><b>IV</b></li>
        <li data-goto="5"><span>The Mage</span><i></i><b>V</b></li>
        <li data-goto="6"><span>The Warrior</span><i></i><b>VI</b></li>
@@ -6424,71 +6366,70 @@ const GUIDE_SPREADS: [string, string][] = [
   ],
   [
     `<h2>The Game</h2>
-     <p>A race across the water, played on one carved ship. Regatta is a
-     rendition of the <em>Royal Game of Ur</em> — a four-thousand-year-old
-     race game — as it appears on the tavern tables of Soulframe.</p>
-     <p>Two crews race to sail all <span class="gold">four stones</span> down
-     their own shore, across the contested midline, and home to the far dock.
-     First crew to walk all four off the board wins.</p>`,
+     <p>A race with a war on top of it. Two champions each march
+     <span class="gold">four stones</span> along their own row, down the
+     shared middle, then back into their own row and off the far end.
+     First to get all four off the board wins.</p>
+     <p>Under the race is the fight: every champion carries a kit of
+     powers — captures, walls, shoves, curses — paid for in mana.</p>`,
     `<div class="runner">The Game &middot; the table</div>
      <ul>
-       <li><b>Your stones</b> bear the <span class="gold">red blossom</span>,
-       matching your shore's stamps, and wait in a pile by your coins. The
-       enemy's carry the blue star.</li>
-       <li><b>Your coins</b> are the four metal pieces stacked in front of
-       you. They are your dice.</li>
-       <li><b>Your shore</b> is the red row nearest you. The middle row is
-       shared water — that is where captures happen.</li>
-       <li><b>Score pads</b> are the two stone medallions set into the notch;
-       escaped stones gather past the ship's prow.</li>
+       <li><b>Your stones</b> stand on <span class="gold">red bases</span>,
+       sculpted as your champion; the enemy's stand on blue. Stones still
+       waiting to enter stand beside your coins.</li>
+       <li><b>Your coins</b> are the four pieces in front of you. They are
+       your dice.</li>
+       <li><b>Your row</b> is the one nearest you, marked X. The middle row,
+       marked ∞, is shared — that is where captures happen.</li>
+       <li><b>Your portrait</b>, bottom left, holds your mana gems and your
+       kit. The enemy's sits top right.</li>
      </ul>`,
   ],
   [
     `<h2>Taking a Turn</h2>
      <ul>
        <li>Every match opens with a <span class="gold">flip-off</span>: both
-       crews tap their coins, and the higher roll takes first move. A tie
-       means both flip again.</li>
-       <li>When your coin pile <span class="gold">glows</span>, tap it to
-       roll. Coins landing <b>design-up</b> count one pace each — zero to
-       four.</li>
-       <li>Stones you may move light up. Tap one to sail it that many paces.</li>
-       <li>Rolled a zero, or no stone can move? The turn passes.</li>
-       <li>Your route: down your shore toward the prow, up the shared middle,
-       then back along your shore to the dock.</li>
+       sides tap their coins, and the higher flip moves first. A tie means
+       both flip again.</li>
+       <li>When your coins <span class="gold">glow</span>, tap them to flip.
+       Each coin landing <b>gold side up</b> is one tile — zero to four.</li>
+       <li>Stones you may move light up. Tap one to move it that many tiles.</li>
+       <li>Flipped a zero, or no stone can move? The turn passes — but a zero
+       still pays you a mana.</li>
+       <li>Your route: along your X row, down the shared ∞ row, then back
+       into your own row and off the far end.</li>
      </ul>`,
-    `<div class="runner">Taking a Turn &middot; shields, swords &amp; home</div>
+    `<div class="runner">Taking a Turn &middot; shields, captures &amp; home</div>
      <ul>
-       <li><b>Shield tiles</b> (the crest glyph) grant an
+       <li><b>Shield tiles</b> (the gold pentagram) grant an
        <span class="gold">extra turn</span> and protect the stone standing
        there from capture.</li>
-       <li>Land on an enemy stone in shared water and it is
-       <span class="gold">captured</span> — sent back to their hand to start
-       over.</li>
+       <li>Land on an enemy stone in the shared row and it is
+       <span class="gold">captured</span> — sent back to start over.</li>
        <li>Two of your own stones cannot share a tile.</li>
-       <li>The final dock demands an <b>exact roll</b> — overshoot and the
-       stone must wait.</li>
-       <li>Every stone brought home earns a <span class="gold">swig of
-       ale</span> — your mug glows; tap it and drink to the crossing.</li>
-       <li>First to bring <b>all four stones home</b> wins the race — and
-       drains the mug.</li>
+       <li>Leaving the board takes the <b>exact count</b> — overshoot and
+       the stone must wait.</li>
+       <li>Every stone you get off the board earns a <span class="gold">swig
+       of ale</span> — your mug glows; tap it and drink.</li>
+       <li>First to get <b>all four stones off</b> wins — and drains the
+       mug.</li>
      </ul>`,
   ],
   [
-    `<h2>Master Killer</h2>
-     <p>A darker table, offered from the menu before you sit down: each crew
-     picks a <span class="gold">class</span> before the flip-off and plays
-     the whole match armed with its powers.</p>
-     <p>Every capture, every zero you roll, every shield tile you land on,
-     and every stone you bring home fills your <span class="gold">mana</span>
-     — up to ${CHARGE_CAP} banked
-     at once, the same purse for every class. Spend mana to fire your
-     class's active powers, offered as buttons beside your coins whenever
-     you can afford them.</p>
+    `<h2>Champions &amp; Mana</h2>
+     <p>Before the flip-off, each side picks a <span class="gold">champion</span>
+     at the face-off and plays the whole match armed with its class's
+     powers.</p>
+     <p>Every capture, every zero you flip, every shield tile you land on,
+     and every stone you get off the board fills your
+     <span class="gold">mana</span> — up to ${CHARGE_CAP} banked at once,
+     the same purse for every class. Spend it on your champion's active
+     powers, in the kit around your portrait, whenever you can afford
+     them.</p>
      <p>Each class keeps its own chapter in this book — and each hides an
      <span class="gold">ultimate</span>, earned by landing on shield tiles
      three times in a row without your turn ever passing.</p>`,
-    `<div class="runner">Master Killer &middot; the ten classes</div>
+    `<div class="runner">Champions &middot; the ten classes</div>
      <ul>
        <li><b>Archer</b> — Snipe, Push, Charged Shot.</li>
        <li><b>Mage</b> — Ward, Re-flip, Blink.</li>
@@ -6618,7 +6559,7 @@ const GUIDE_SPREADS: [string, string][] = [
        tile three times running and death honors no finish line — drag one
        of the opponent's ESCAPED stones back aboard at tile
        ${EXHUME_RETURN_POSITION + 1}, or the nearest free tile behind it,
-       to sail the home stretch all over again. The one power in the game
+       to run the home stretch all over again. The one power in the game
        that can undo an escape.</li>
      </ul>`,
   ],
@@ -6652,7 +6593,7 @@ const GUIDE_SPREADS: [string, string][] = [
        next upkeep is waived too.</li>
      </ul>
      <p>The Cleric wins by refusing to lose stones: each wall costs the
-     enemy a wasted turn just probing it, and the army that keeps its crew
+     enemy a wasted turn just probing it, and the army that keeps its ranks
      keeps the race — so long as the mana holds out to pay for it.</p>`,
   ],
   [
@@ -7161,7 +7102,7 @@ function promptUpdateLogIfNew() {
     hud.textContent = "Joining room…";
   } else {
     menuEl.classList.add("show");
-    hud.textContent = "Pick a game mode";
+    hud.textContent = "Choose how to play";
     promptUpdateLogIfNew();
   }
 }
@@ -7635,7 +7576,6 @@ if (dockDemoParam !== null) {
     ? (dockDemoParam as PlayerClass)
     : "warrior";
   menuEl.classList.remove("show");
-  myVariant = "masterKiller";
   hud.textContent = `dockdemo: ${cls}`;
   const demoStates: { label: string; charges: number; ult: boolean; active: boolean; reflips: number }[] = [
     { label: "off-turn", charges: 1, ult: false, active: false, reflips: 0 },
@@ -7729,7 +7669,6 @@ if (dockDemoParam !== null) {
 // ---------------------------------------------------------------------------
 if (location.hostname === "localhost" && new URLSearchParams(location.search).has("vfx")) {
   menuEl.classList.remove("show");
-  myVariant = "masterKiller";
   hud.textContent = "vfx demo";
   ensureMkPieces();
   const demoState: GameState = {
@@ -7789,7 +7728,7 @@ if (location.hostname === "localhost" && new URLSearchParams(location.search).ha
     };
     const rand = mulberry32(20260719);
     let now = 1_000_000;
-    let doc = eng.createRoomDoc("LOGDEMO", true, "masterKiller", "p1tok", now, false, "standard");
+    let doc = eng.createRoomDoc("LOGDEMO", true, "p1tok", now, false, "standard");
     myRole = "p1";
     menuEl.classList.remove("show");
     hud.textContent = "logdemo: playing…";

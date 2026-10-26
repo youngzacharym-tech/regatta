@@ -4,44 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Regatta: a fan-made, browser-based 2-player race-and-capture board game (a
-digital take on a *Soulframe* minigame), played with coin flips instead of
-dice. Three.js/Vite client + authoritative server (HTTP long-polling) sharing a
-pure TypeScript rulebook. Live at https://masterkiller.vercel.app, installable
-as a PWA. **Master Killer** is the class-powers variant (Archer / Mage /
-Warrior, charge economy) selectable from the menu — this is the project's
-active focus (the repo is literally named for it).
+Master Killer: a browser-based 2-player race-and-war board game. Each side
+picks one of ten classes (Archer, Mage, Warrior, Necromancer, Cleric, Rogue,
+Warlock, Hunter, Barbarian, Bard), then races four stones around a 15-tile
+board while class powers capture, wall, shove and curse, paid for with mana.
+Coin flips instead of dice. Three.js/Vite client + authoritative server (HTTP
+long-polling) sharing pure TypeScript rules. Live at
+https://masterkiller.vercel.app, installable as a PWA.
 
-## Repo genealogy — read this before hunting for code
+It began as the class-powers variant of **Regatta** (a *Soulframe* minigame
+take). The classic ruleset was cut from this branch on 2026-10-25; it lives
+on in `master`.
 
-- This repo (`w3t-wr3/master-killer-myrm`) is a FORK of
-  `youngzacharym-tech/regatta` (Zach's repo, added as git remote `upstream`).
-- **The Master Killer implementation lives on `upstream`'s
-  `master-killer-mode` branch** — `master` on both repos is classic-only.
-  Work here happens on the local `master-killer-mode` branch tracking
-  upstream's.
-- The live `masterkiller.vercel.app` deploys from Zach's own Vercel account —
-  NOT reachable from the `wetwarelabs` Vercel team this machine's CLI is
-  logged into. Kasen cannot deploy there; coordinate with Zach or stand up a
-  separate deployment.
-- **OUR deployment (this is what "deploy" means):** Vercel project
-  `regatta-mk-test` on the `wetwarelabs` team, linked via this clone's
-  `.vercel/project.json` — `npm run deploy` ships to
-  **https://masterkiller.regatta.games** (canonical; the project's
-  regatta-mk-test.vercel.app URL serves the same build, and `REDIS_URL` is
-  already set in the project env). Pushing to `upstream` does NOT deploy
-  our site; only push there when Kasen explicitly wants to hand work to
-  Zach.
-- Related but distinct: `w3t-wr3/regatta-wetware-fork` (Kasen's tavern-build
-  fork, local clone at `~/regatta`) feeds the `wetwarelabs` Vercel project
-  `regatta` → `regatta.games`. Don't confuse the two deploy targets.
+## Repo + deploy
+
+- Git remote `origin` = `youngzacharym-tech/regatta`. Master Killer lives on
+  branch **`standalone`**. `master` is classic Regatta, `master-killer-mode`
+  is the old two-ruleset build. Remotes `kasen` and `myrm` are collaborator
+  forks — don't push there unless asked.
+- Deploy target: Vercel project **`masterkiller`** (masterkiller.vercel.app).
+  `npm run deploy` pins `--project masterkiller`. This folder's `.vercel/` is
+  still LINKED to the old `regatta` project, so a bare `vercel deploy` ships
+  to the wrong place — never use it.
+- Redis (Upstash) is shared with other games; `api/room.ts` prefixes every
+  key `mk:`.
 
 ## Setup
 
 Two independent npm projects — install both before doing anything:
 
 ```bash
-npm install              # root: server (ws, tsx, ioredis, esbuild)
+npm install              # root: server (tsx, ioredis, esbuild)
 cd stage && npm install  # client: three, vite
 ```
 
@@ -49,14 +42,12 @@ Node >=20 required (`engines` in package.json).
 
 ## Commands
 
-Rulebook regression/smoke tests (no server needed):
+Rules gates (no server needed):
 ```bash
-npx tsx play-random-game.ts               # one random classic game
-npx tsx batch-random-games.ts             # 1000 random classic games, balance stats
-npx tsx batch-random-master-killer-games.ts  # same for Master Killer (all class matchups)
-npx tsx batch-bot-difficulty.ts           # CPU tier separation gate (easy/standard/hard, both rulesets; exits 1 on failure)
-npx tsx test-master-killer.ts             # Master Killer rules unit suite
-npx tsx test-master-killer-drift.ts       # referee-vs-rulebook drift check
+npx tsx test-master-killer.ts                # rules scenario suite (npm test)
+npx tsx test-master-killer-drift.ts          # class rules never change the base race's move gen
+npx tsx batch-random-master-killer-games.ts  # every class matchup, balance stats (npm run batch)
+npx tsx batch-bot-difficulty.ts              # CPU tier separation gate (exits 1 on failure)
 ```
 
 Local dev server (polling referee + static host in one process):
@@ -64,29 +55,31 @@ Local dev server (polling referee + static host in one process):
 npm run referee             # or: npm start — port 8080 (PORT env overrides)
 cd stage && npm run dev     # Vite dev on :5173 with HMR, talks to :8080
 ```
-GOTCHA on Kasen's Mac: Docker squats on port 8080 — run `PORT=8090 npm run
-referee` and browse http://localhost:8090 instead. Client API URL resolution
-is `resolveApiURL()` in `stage/src/main.ts` (`?referee=<url>` overrides).
+Client API URL resolution is `resolveApiURL()` in `stage/src/main.ts`
+(`?referee=<url>` overrides).
 
 Engine/transport tests:
 ```bash
-npm run test-engine                  # full games through room-engine's applyAction/tick (invariants + balance)
+npm run test-engine                  # full games through room-engine's applyAction/tick
+node tools/smoke/poll-transport-smoke.mjs <url>   # live smoke: CPU game, PvP + chat, lobby
 ```
-The old WS lobby tests were deleted with the WebSocket transport; transport
-smoke-testing is now curl against POST /api/room (see referee.ts's contract).
+Known: `test-engine-drive.ts` is stale — its Bulwark display block reads a
+field the 2026-09-17 wall rework removed, and it crashes there.
 
 Build & deploy:
 ```bash
 npm run build:stage   # vite build → stage/dist (+ sw.js cache stamp)
 npm run build:api     # esbuild-bundles api/room.ts → api/room.js (COMMITTED, pre-bundled)
-npm run deploy        # build:api + `npx vercel deploy --prod` — never bare `vercel deploy`
+npm run deploy        # build:api + vercel deploy --prod --project masterkiller
 ```
 `api/room.js` is committed on purpose (git-based Vercel deploys need the
 pre-bundle; Vercel's per-file compiler can't resolve the shared root-level
 imports — see `.vercelignore`). Regenerate it whenever `api/room.ts`,
-`room-engine.ts`, `rulebook.ts`, `master-killer.ts`, or the bots change.
+`room-engine.ts`, `rulebook.ts`, `master-killer.ts`, or the bot change.
 
 There is no lint config; correctness rides on the test scripts above.
+`cd stage && npx tsc --noEmit -p .` has 44 known errors, all a pre-existing
+`RoomActionInput` union gap in `room-engine.ts`.
 
 ## Architecture
 
@@ -95,51 +88,44 @@ rules modules are pure, side-effect-free TypeScript imported *verbatim* by
 the client bundle and both server implementations, so client and server can
 never disagree about legality.
 
-- **`rulebook.ts`** — classic rules, the untouched base game. Immutable
-  GameState; coin flips passed in. Design decisions recorded inline as a
-  locked Q&A block (Q1-Q7) — update that block when changing a rule.
-- **`master-killer.ts`** — the variant rulebook, SEPARATE from rulebook.ts
-  on purpose (classic stays byte-identical). Reimplements its own move
-  generator (`getLegalPowerMoves`), layering class powers on top: Archer
-  (Snipe passive / Push active), Mage (Ward passive / Re-flip active),
-  Warrior (Shieldbreaker passive / Charge-sweep active). Charge economy:
-  captures, zero flips, and shield landings each bank a charge, capped at
-  CHARGE_CAP (2). Every tunable is a named constant at the top with the
-  simulation-derived balance rationale in its comment — re-run
-  `batch-random-master-killer-games.ts` after touching any of them.
-- **`bot.ts` / `master-killer-bot.ts`** — CPU move pickers for each ruleset.
-- **`protocol.ts`** — wire types. Master Killer fields are ADDITIVE ONLY
-  (optional, populated only in masterKiller rooms): `variant` on role,
-  `classPick` phase, `powerMoves`/`power`/`lastPush`/`lastChargeEvent` on
-  state broadcasts. `lastChargeEvent` is the server-computed charge diff —
-  clients display it, never re-derive it.
+- **`rulebook.ts`** — the base race: the 15-tile board (`BOARD_LAYOUT`),
+  immutable `GameState`, coin flips passed in. Its locked Q&A block (Q1-Q7)
+  records the race rules. `master-killer.ts` and the drift test build on it.
+- **`master-killer.ts`** — the class rules. Its own move generator
+  (`getLegalPowerMoves`) layers class powers on the race. Mana (charges)
+  comes from captures, shield landings, zero flips and escapes, capped at
+  `CHARGE_CAP`. Ultimates bank after three shield landings in a row. Every
+  tunable is a named constant at the top with its simulation-derived
+  rationale — re-run `batch-random-master-killer-games.ts` after touching
+  any of them.
+- **`master-killer-bot.ts`** — the CPU (easy / standard / hard;
+  `bot-difficulty.ts` holds the shared tier vocabulary).
+- **`protocol.ts`** — wire types. The Master Killer fields are still typed
+  optional from the two-ruleset days but are always populated. `variant`
+  stays on the wire as `"masterKiller"` because clients cached from before
+  the cut branch their UI on it.
 - **`room-engine.ts`** — THE turn engine, pure over a `RoomDoc` value:
   `applyAction` (player did something), `tick` (fire due absolute deadlines
   — replaces every setTimeout), `viewFor` (seat-gated view + replayable
   event log). Both transports share it verbatim, so they cannot drift.
 - **`referee.ts`** — local server: static files + POST /api/room over an
   in-memory Map. **`api/room.ts`** — the identical endpoint on Vercel over
-  Upstash Redis (version CAS via Lua), long-poll holds (~20s) instead of a
-  held-open socket — this is what killed the every-5-minutes WS recycle.
-  Ships pre-bundled as `api/room.js` (see above). Clients resume by polling
-  with their seat token; there is no rejoin handshake.
-- **`stage/`** — Three.js + Vite client. `src/main.ts` (~2100 lines) covers
-  scene, board/token rendering, tap-to-move raycasting, coin-flip and mug
-  animations, PWA install, app mode, and the **avatar plates**: Hearthstone
-  style class frames (bottom-left = you + charge gems + power rune + utility
-  rail; top-right = opponent). Plates are driven entirely by the `power`
-  broadcast + `lastChargeEvent` (gem flare/spend), and the rune arms the
-  same pushArmed/sweepArmed targeting flows the board taps consume.
-  `src/layout.ts` maps abstract tile indices to measured 3D coordinates —
-  the one file to re-tune if the board mesh changes. Class portrait art:
-  shipped as `stage/public/avatars/*.webp` (512px); 1254px PNG originals in
-  `art/avatars/` (kept out of stage/public so they don't deploy).
-- **`tools/build_assets.py`** — Blender headless pipeline for the .glb
-  assets; only needed when the sculpts change.
+  Upstash Redis (version CAS via Lua), long-poll holds (~20s). Ships
+  pre-bundled as `api/room.js` (see above). Clients resume by polling with
+  their seat token; there is no rejoin handshake.
+- **`stage/`** — Three.js + Vite client. `src/main.ts` covers the scene,
+  stones and tap-to-move raycasting, coin and mug animations, the avatar
+  plates + ability dock, the coached tutorial, the rulebook, and PWA install.
+  `src/faceoff.ts` (+ `faceoff3d.ts`) is the class pick, `src/gamepad.ts`
+  the controller support. `src/layout.ts` maps tile indices to measured 3D
+  coordinates — re-tune it if the board mesh changes.
+- **`tools/`** — headless Blender build scripts for the art:
+  `build_board_mk.py` → `stage/public/board.glb`, `build_pieces_mk.py` →
+  `figures.glb` + `pieces-core.glb`, sharing `mkgeo.py`.
 
 ### Client-server trust model
 
-Only the current player receives `legalMoves`/`powerMoves`; clients send
-INDEXES into those lists (or target token ids for Push), never move data.
-The server recomputes and re-validates everything. Keep new UI affordances
-on that model — never trust client-supplied move shapes.
+Only the current player receives `powerMoves`; clients send INDEXES into
+that list (or target token ids / tiles for powers), never move data. The
+server recomputes and re-validates everything. Keep new UI affordances on
+that model — never trust client-supplied move shapes.

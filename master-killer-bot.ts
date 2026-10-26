@@ -1,15 +1,15 @@
 // ============================================================================
 // master-killer-bot.ts — CPU decision-making for Master Killer mode.
 //
-// Mirrors bot.ts's approach (ranked heuristic, small jitter) but scores
+// Grew out of the classic bot.ts (ranked heuristic, small jitter; cut with
+// the Regatta ruleset 2026-10-25, still in `master`) but scores
 // across ALL available actions this turn — a normal/power-boosted move,
 // Archer's Push, Mage's Re-flip, Warrior's Charge or Bulwark, the
 // Necromancer's Raise Dead / Dark Resurrection, or (once banked) Mage's
 // Blink Strike / Warrior's Shield Wall / Necromancer's Exhume ultimate — and
-// takes whichever scores highest. Separate file from bot.ts so classic mode's bot
-// (and anything reading it, including Kasen's audit) stays untouched.
+// takes whichever scores highest.
 //
-// Three difficulty tiers, same shape as bot.ts (see bot-difficulty.ts):
+// Three difficulty tiers (see bot-difficulty.ts):
 //   easy     — win short-circuit, then mostly uniform-random over EVERY
 //              legal action (including legal-but-wasteful ones, e.g. an
 //              empty-sweep Charge — the blunders are the point).

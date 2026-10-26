@@ -1,11 +1,10 @@
 // ============================================================================
-// bot-difficulty.ts — the CPU difficulty vocabulary, shared by both bots
-// (bot.ts / master-killer-bot.ts), the room engine, and the client menu.
+// bot-difficulty.ts — the CPU difficulty vocabulary, shared by the bot
+// (master-killer-bot.ts), the room engine, and the client menu.
 //
-// A SEPARATE file on purpose: master-killer-bot.ts deliberately does not
-// import bot.ts (classic's bot stays untouched by MK work), and protocol.ts/
-// room-engine.ts need the type without pulling any picker code into the
-// bundle. Wire values are the neutral easy/standard/hard — display names
+// A SEPARATE file on purpose: protocol.ts/room-engine.ts need the type
+// without pulling any picker code into the bundle. (It was also shared with
+// the classic ruleset's bot.ts until the Regatta cut, 2026-10-25.) Wire values are the neutral easy/standard/hard — display names
 // (Tipsy / Barkeep / Champion) are presentation only and live in the client,
 // so a rename never touches the protocol.
 // ============================================================================
@@ -23,8 +22,7 @@ export const FLIP_WEIGHTS = [1, 4, 6, 4, 1] as const;
 export const FLIP_WEIGHT_TOTAL = 16;
 
 /** Easy tier: probability it plays the standard heuristic instead of a
- *  uniform-random pick. Lives here (not bot.ts) because both bots share the
- *  one knob and master-killer-bot.ts deliberately never imports bot.ts.
+ *  uniform-random pick. Lives here, beside the tier names it tunes.
  *  0.35 keeps easy visibly sloppy — roughly two of three decisions are
  *  coin-toss picks — while still occasionally punishing a blunder, so a new
  *  player learns the threats exist without being farmed. Raise toward 1 and

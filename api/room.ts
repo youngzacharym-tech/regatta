@@ -1,5 +1,5 @@
 // ============================================================================
-// api/room.ts — Regatta's referee as ONE Vercel HTTP function (polling).
+// api/room.ts — Master Killer's referee as ONE Vercel HTTP function (polling).
 //
 // This replaces the WebSocket function (api/ws.ts). Why: Vercel time-boxes a
 // held-open socket at maxDuration, which recycled every PvP connection like
@@ -78,7 +78,12 @@ return 1
 
 async function loadDoc(code: string): Promise<RoomDoc | null> {
   const raw = await getRedis().get(roomKey(code));
-  return raw ? (JSON.parse(raw) as RoomDoc) : null;
+  if (!raw) return null;
+  const doc = JSON.parse(raw) as RoomDoc;
+  // A classic room minted before the Regatta cut (by a client still on the
+  // old build) has no power state and can't run on this engine — treat it as
+  // gone. Rooms expire after ROOM_TTL_S, so this only matters for a few hours.
+  return doc.mk ? doc : null;
 }
 
 async function casStore(prevVersion: number, next: RoomDoc): Promise<boolean> {
@@ -150,7 +155,7 @@ async function handleJoin(msg: Extract<RoomRequest, { op: "join" }>): Promise<Re
           player: "p2",
           room: code,
           vsCpu: next.vsCpu,
-          variant: next.variant,
+          variant: "masterKiller",
           seatToken: token,
           view: viewFor(next, "p2", 0, now),
         };
@@ -162,11 +167,11 @@ async function handleJoin(msg: Extract<RoomRequest, { op: "join" }>): Promise<Re
 
   // create / cpu — mint a fresh room under a unique code (NX write).
   const vsCpu = msg.mode === "cpu";
-  const variant = msg.variant === "masterKiller" ? "masterKiller" : "classic";
+  // Every room is Master Killer — a cached pre-cut client's variant is ignored.
   const token = randomUUID();
   for (let attempt = 0; attempt < 20; attempt++) {
     const code = newRoomCode();
-    let doc = createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty));
+    let doc = createRoomDoc(code, vsCpu, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty));
     doc = tick(doc, now);
     const ok = await getRedis().set(roomKey(code), JSON.stringify(doc), "EX", ROOM_TTL_S, "NX");
     if (ok === "OK") {
@@ -176,7 +181,7 @@ async function handleJoin(msg: Extract<RoomRequest, { op: "join" }>): Promise<Re
         player: "p1",
         room: code,
         vsCpu,
-        variant,
+        variant: "masterKiller",
         seatToken: token,
         view: viewFor(doc, "p1", 0, now),
       };
@@ -211,12 +216,13 @@ export async function POST(request: Request): Promise<Response> {
           if (!raw) return void stale.push(code); // room expired
           const doc = JSON.parse(raw) as RoomDoc;
           const hostFresh = now - doc.seatLastSeen.p1 < LOBBY_HOST_FRESH_MS;
-          if (doc.started || doc.seats.p2 !== null || doc.unlisted || !hostFresh) {
+          // !doc.mk: a pre-cut classic room (see loadDoc) — never list it.
+          if (doc.started || doc.seats.p2 !== null || doc.unlisted || !hostFresh || !doc.mk) {
             return void stale.push(code);
           }
           rooms.push({
             code,
-            variant: doc.variant,
+            variant: "masterKiller",
             ageSeconds: Math.max(0, Math.round((now - doc.waitingSince) / 1000)),
           });
         });

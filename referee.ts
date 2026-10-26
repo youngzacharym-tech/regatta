@@ -1,5 +1,5 @@
 // ============================================================================
-// referee.ts — Regatta's local/dev server: static files + the /api/room
+// referee.ts — Master Killer's local/dev server: static files + the /api/room
 // polling endpoint in one Node process.
 //
 // This is the SAME transport contract as the Vercel function (api/room.ts) —
@@ -126,12 +126,12 @@ function handleJoin(msg: Extract<RoomRequest, { op: "join" }>, res: ServerRespon
     const token = randomUUID();
     const next = tick(startRoom({ ...doc, seats: { ...doc.seats, p2: token } }, now), now);
     rooms.set(code, next);
-    console.log(`[+] p2 seated in room ${code} (${next.variant})`);
+    console.log(`[+] p2 seated in room ${code}`);
     const body: RoomJoinResponse = {
       player: "p2",
       room: code,
       vsCpu: next.vsCpu,
-      variant: next.variant,
+      variant: "masterKiller",
       seatToken: token,
       view: viewFor(next, "p2", 0, now),
     };
@@ -139,20 +139,20 @@ function handleJoin(msg: Extract<RoomRequest, { op: "join" }>, res: ServerRespon
   }
 
   const vsCpu = msg.mode === "cpu";
-  const variant = msg.variant === "masterKiller" ? "masterKiller" : "classic";
+  // Every room is Master Killer — a cached pre-cut client's variant is ignored.
   const token = randomUUID();
   const code = newRoomCode();
   const doc = tick(
-    createRoomDoc(code, vsCpu, variant, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty)),
+    createRoomDoc(code, vsCpu, token, now, msg.unlisted === true, normalizeDifficulty(msg.difficulty)),
     now,
   );
   rooms.set(code, doc);
-  console.log(`[+] p1 seated in room ${code} (${variant})${vsCpu ? " (vs CPU)" : ""}`);
+  console.log(`[+] p1 seated in room ${code}${vsCpu ? " (vs CPU)" : ""}`);
   const body: RoomJoinResponse = {
     player: "p1",
     room: code,
     vsCpu,
-    variant,
+    variant: "masterKiller",
     seatToken: token,
     view: viewFor(doc, "p1", 0, now),
   };
@@ -162,7 +162,7 @@ function handleJoin(msg: Extract<RoomRequest, { op: "join" }>, res: ServerRespon
 async function handleRoomApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "POST") {
     res.writeHead(200, { "Cache-Control": "no-store" });
-    res.end("Regatta room API — POST RoomRequest JSON here.");
+    res.end("Master Killer room API — POST RoomRequest JSON here.");
     return;
   }
 
@@ -191,7 +191,7 @@ async function handleRoomApi(req: IncomingMessage, res: ServerResponse): Promise
         .slice(0, 20)
         .map((d) => ({
           code: d.code,
-          variant: d.variant,
+          variant: "masterKiller" as const,
           ageSeconds: Math.max(0, Math.round((now - d.waitingSince) / 1000)),
         })),
     };
@@ -298,7 +298,7 @@ const httpServer = createServer((req, res) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`Regatta server listening on port ${PORT}`);
+  console.log(`Master Killer server listening on port ${PORT}`);
   console.log(`  http://localhost:${PORT}/          (Stage — Vite build from stage/dist)`);
   console.log(`  http://localhost:${PORT}/api/room  (polling referee API)`);
 });

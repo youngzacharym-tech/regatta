@@ -1,8 +1,7 @@
 // ============================================================================
 // batch-random-master-killer-games.ts
 //
-// Mirrors batch-random-games.ts's role for the classic game: plays many
-// simulated matches and reports aggregate stats — but across all 10 class
+// Plays many simulated matches and reports aggregate stats — but across all 10 class
 // matchups (both seatings each, to cancel first-move bias), with both sides
 // driven by pickBotPowerAction. This is the tuning tool for
 // CHARGE_CAP/PUSH_DISTANCE/WARD_SCOPE (and the necromancer's
@@ -800,7 +799,7 @@ for (const [a, b] of matchups) {
   const label = a === b ? `${a} mirror` : `${a} vs ${b}`;
   const results: GameResult[] = [];
   // Both seatings cancel first-move bias (p1 always moves first in
-  // initialState(), same convention batch-random-games.ts uses).
+  // initialState()).
   for (let i = 0; i < GAMES_PER_MATCHUP; i++) {
     results.push(i % 2 === 0 ? playOne(a, b) : swapWinner(playOne(b, a)));
   }
