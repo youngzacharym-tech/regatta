@@ -2984,7 +2984,11 @@ function updateDock(active?: boolean) {
   chargeMoveIndexByToken.clear();
   if (cls === "warrior" && currentPowerMoves) {
     for (let i = 0; i < currentPowerMoves.length; i++) {
-      if (currentPowerMoves[i].chargeAvailable) chargeMoveIndexByToken.set(currentPowerMoves[i].tokenId, i);
+      // chargeAvailable alone only means "lane clear of my own stones" — a
+      // Charge that cuts nobody down is legal but just a 1-mana plain move,
+      // so the dock only offers the ones that sweep.
+      const m = currentPowerMoves[i];
+      if (m.chargeAvailable && m.chargeSweepCaptures.length > 0) chargeMoveIndexByToken.set(m.tokenId, i);
     }
   }
 
@@ -7642,7 +7646,7 @@ if (dockDemoParam !== null) {
               causesWin: false,
               breaksWard: false,
               chargeAvailable: true,
-              chargeSweepCaptures: [],
+              chargeSweepCaptures: [4],
             },
           ]
         : null;
